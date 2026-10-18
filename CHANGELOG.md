@@ -1,6 +1,36 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test7 (FSR 4.1.1 Performance at 120: sharpening, idle gaps, AA, frame pacing numbers):**
+  - FSR 4.1.1's sharpening is one pass of our own (`shaders/fsr4_sharpen.comp`) instead of the
+    replay's RCAS pass (0.315-0.35 ms at 4K at any strength). It uses AMD's RCAS math
+    (fsr1/ffx_fsr1.h, MIT) with noise removal and the same sharpness mapping, reads each texel
+    once per 16x16 block from shared memory, and works on `c/(1+max(c))`, so the HDR
+    highlights (the lamps) are limited instead of ringing. It is timed as `sharpen` in the
+    pass timer, inside the FSR 4.1.1 figure. `BBHOST_FSR4_SHARPEN=amd` brings back the
+    replay's pass. `fsr4_sharpen_test` checks it against RCAS in double.
+  - Anti-aliasing has a new **Auto** value, now the default. It turns the game's AA pass
+    (~0.35 ms at 4K) off while FSR 4.1.1 upscales and keeps it on otherwise, including
+    when FSR 4.1.1 cannot run and FSR 3.1 stands in. A saved On or Off still wins.
+    `BBHOST_ANTI_ALIAS=auto|0|1`. It is in the launcher (Anti-aliasing combo) and the F10
+    screen. The in-game row shows what is in effect. The log says when the game's AA
+    changes.
+  - A `gpu idle:` line under `gpu busy:` every 300 flips sorts the GPU's idle time between
+    command buffers:
+    - late: the GPU had run dry when the submission came;
+    - queued: the time between command buffers that were already queued;
+    - before the presenter's blit.
+    Each kind is split by size. The line also gives the hand-over -> recorded ->
+    vkQueueSubmit latency and the CPU's waits for the GPU (flush_locked), and a second line
+    shows what ended the command buffer before each late gap. `tools/gpu_gaps.py --idle LOG`
+    sums and names them.
+  - `BBHOST_SUBMIT_SPLIT=<n>` (off by default, experimental): every n-th draw, if the GPU
+    has run dry, submit the recording mid-job. This is the same draw-boundary submission
+    as `BBHOST_PASS_BREAK_SUBMIT`. Unlike `BBHOST_SUBMIT_EVERY_JOB=0` it never holds labels
+    back.
+  - bbtest: session.txt now has an `in-game frames (MangoHud):` line: average fps, 1% and
+    0.1% lows, frame-time mean and deviation, frames over 8.42 ms and over 12 ms, and the
+    whole seconds under 120 fps.
 - **test6 (FPS that matches what is shown, FSR 4.1.1 cost):**
   - `present: 300 frames in N ms` now says `N fps shown`: the frames presented, which is
     MangoHud's number. The `pass-timer:` line now gives its real window and calls its count

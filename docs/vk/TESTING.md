@@ -93,6 +93,43 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test7 checks (~30 min)
+
+Install test7 (the tarball and the `bbtest` beside it), then `cd` into the folder. Use FSR
+4.1.1 Performance, Resolution 3840x2160, frame rate 120 and sharpness 5/10. Turn on **Show
+upscaler GPU time** in the launcher. In the launcher, set **Anti-aliasing** to **Auto (off
+with FSR 4.1.1)**: your saved Off stays Off until you change it. Stand at the spawn lamp.
+Do not use `--record`.
+
+A. **The lamp, profiled per pass:** `BBHOST_GPU_PROFILE=3 ./bbtest start t8-lamp-p3`.
+   - Look at the lamp and the fog for 30 s with the camera still: `./bbtest mark "lamp"`.
+   - Turn away from the lamp for 30 s: `./bbtest mark "away"`.
+   - `./bbtest stop`.
+   - In the log, check:
+     - `graphics: the game's anti-aliasing off (Auto: FSR 4.1.1 upscales)`;
+     - `fsr4: sharpening in one tiled pass`;
+     - `pass-timer: ... FSR 4.1.1 X ... sharpen Y ms` (expected: sharpen ~0.2 ms, against
+       the replay's 0.315-0.35);
+     - the `gpu profile:` per-pass lines for the lamp (which post pass grows);
+     - `gpu idle:` and `gpu idle late after:` lines.
+   - session.txt has `in-game frames (MangoHud): ... 1% low ..., 0.1% low ..., N of M
+     seconds under 120`.
+B. **Sharpening, A/B (same spot, same sharpness 5/10, the lamp in view):**
+   - `./bbtest start t8-lamp-sharp` for 60 s, `./bbtest mark "lamp sharp ours"`,
+     `./bbtest stop`.
+   - Then the same with the old pass: `BBHOST_FSR4_SHARPEN=amd ./bbtest start
+     t8-lamp-sharp-amd`, `./bbtest mark "lamp sharp amd"`, `./bbtest stop`.
+   - Compare the FPS, the FSR 4.1.1 time and how sharp it looks.
+   - Check whether the lamp flicker at 0.5 is gone with ours.
+C. **Idle gaps:**
+   - `./bbtest start t8-gaps` for 60 s looking forward, `./bbtest mark "forward"`,
+     `./bbtest stop`, then (gpu_gaps.py ships beside bbtest)
+     `python3 gpu_gaps.py --idle "$(ls -d ~/.local/share/bbtest/sessions/*-t8-gaps | tail -1)/bbhost.log" --exe "$HOME/BloodBorne PC/bbhost-linux-v0.2.18/bbhost"`. Read which kind dominates: late, queued or before present.
+   - Then the experimental split: `BBHOST_SUBMIT_SPLIT=32 ./bbtest start t8-split`, the same
+     view, `./bbtest mark "forward split"`, `./bbtest stop`. Watch for flashing or black
+     frames and stop at once if you see any. Compare the `gpu idle:` ms/s, the `splits N/s`
+     and the FPS.
+
 ## test6 checks (~20 min)
 
 From the test6 folder (`cd` into it); FSR 4.1.1 Performance, Resolution 3840x2160, the

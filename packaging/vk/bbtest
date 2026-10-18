@@ -336,6 +336,11 @@ finish() {
         echo "in-game fps shown: $(awk '/world: the first in-game frame/ { on = 1; next }
             on && /present: 300 frames in [0-9]+ ms/ { for (i = 1; i <= NF; i++) if ($i == "in") { ms += $(i + 1); n++; break } }
             END { if (n) printf "%.1f over %.0f s (%d windows of 300)", 300 * n / (ms / 1000), ms / 1000, n; else printf "none" }' "$s/bbhost.log" 2> /dev/null)"
+        # test7: the frame pacing from MangoHud, in game only.
+        local skip csv
+        skip=$(sed -n 's/.*world: the first in-game frame, flip [0-9]*, \([0-9.]*\) s after start.*/\1/p' "$s/bbhost.log" 2> /dev/null | head -1)
+        csv=$(find "$s/mangohud" -type f -name '*.csv' 2> /dev/null | head -1)
+        echo "in-game frames (MangoHud): $(frame_stats "$csv" "${skip:-0}")"
         echo "marks:    $(grep -c ' MARK ' "$s/marks.log" 2> /dev/null || true)"
         echo "shots:    $(find "$s/shots" -type f 2> /dev/null | wc -l)"
         echo "clips:    $(find "$s/clips" -type f -name '*.mp4' 2> /dev/null | wc -l)"
@@ -346,6 +351,38 @@ finish() {
     rm -rf "$STATE"
     say "session bundled: $s"
     notify "session saved: $(basename "$s")"
+}
+
+# test7: frame-time statistics from MangoHud's per-frame CSV (log_interval=0),
+# the frames after `skip` seconds (bbhost's first in-game frame): average fps;
+# 1% and 0.1% lows (1000 over the 99th and 99.9th percentile frame times); the
+# frame times' standard deviation; the frames slower than 120 fps (8.42 ms:
+# 1000/120 and 1% for jitter) and slower than 12 ms (a visible hitch); and
+# the whole seconds that showed fewer than 119.5 frames - what an FPS counter
+# under 120 is.
+frame_stats() {
+    local csv=$1 skip=${2:-0}
+    [ -f "$csv" ] || { printf "no MangoHud CSV"; return 0; }
+    local tmp
+    tmp=$(mktemp)
+    awk -F, -v skip="$skip" '
+        $1 == "fps" { for (i = 1; i <= NF; i++) { if ($i == "frametime") ft = i; if ($i == "elapsed") el = i }; next }
+        ft && el && $el / 1e9 >= skip && $ft > 0 { printf "%.6f %s\n", $el / 1e9, $ft }' "$csv" > "$tmp"
+    local secs
+    # Consecutive 1000 ms of frame time, as a counter would count them.
+    secs=$(awk '{ t += $2; f++; if (t >= 1000) { w++; if (f < 119.5) low++; t -= 1000; f = 0 } }
+        END { printf "%d of %d seconds under 120", low, w }' "$tmp")
+    awk '{ print $2 }' "$tmp" | sort -g | awk -v secs="$secs" '
+        { v[NR] = $1; s += $1; q += $1 * $1; if ($1 > 8.42) slow++; if ($1 > 12) hitch++ }
+        END {
+            n = NR
+            if (n < 10) { printf "too few frames (%d)", n; exit }
+            mean = s / n; sd = sqrt(q / n - mean * mean)
+            p99 = v[int(n * 0.99)]; p999 = v[int(n * 0.999)]
+            printf "%d frames, avg %.1f fps, 1%% low %.1f, 0.1%% low %.1f, frame time %.2f ms +- %.2f (max %.1f); over 8.42 ms %d (%.1f%%), over 12 ms %d; %s",
+                n, 1000 / mean, 1000 / p99, 1000 / p999, mean, sd, v[n], slow, 100 * slow / n, hitch, secs
+        }'
+    rm -f "$tmp"
 }
 
 cmd_mark() {

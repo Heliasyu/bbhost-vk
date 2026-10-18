@@ -1138,3 +1138,47 @@ Ranked by measured ms (looking forward):
 5. **The game's anti-aliasing:** not measured yet (t6's run had it on); test6 run C.
 
 2 + 4 make 0.42 of the 0.52 ms; 1 alone covers it.
+
+## test7: towards a steady 120 with FSR 4.1.1 Performance (2026-10-18)
+
+The goal: FSR 4.1.1 Performance (1080p -> 4K), sharpness 0.5-0.6, game AA off, never under
+120 fps, the spawn lamp and fog included. The worst case seen so far is the lamp in view
+at sharpness 0.5 with AA off: 115-117 fps (8.6 ms a frame). To hold 120 with margin, the
+lamp view's GPU work should be about 7.5 ms or less, against roughly 8.0 now (8.6 ms minus
+~0.6 ms of idle).
+
+What test7 changes, and what each is worth:
+
+| Item | Expected | How it is measured |
+|---|---|---|
+| Our tiled RCAS instead of the replay's | -0.1 to -0.15 ms (0.32-0.35 -> ~0.2; a 4K RGBA16F read+write is ~133 MB, a ~0.2 ms floor) | pass timer `sharpen`, FSR 4.1.1 total |
+| AA Auto (off with FSR 4.1.1) | -0.35 to -0.45 ms against AA on (t7: 112.5 -> 118.5 fps) | already measured; now the default |
+| Idle gaps (~0.59 ms/frame) | none until the data says which kind; BBHOST_SUBMIT_SPLIT targets "late" gaps | `gpu idle:` line |
+| Lamp flicker at sharpness 0.5 | RCAS on `c/(1+max c)` limits HDR highlights instead of ringing | eyes, B in the test7 checks |
+
+That is not the 7.5 ms target yet. The next step depends on the t8-lamp-p3 profile, which
+shows which pass grows with the lamp and fog. The 4K post passes measured in t6: DoF
+composite 0.44, motion blur 0.63 (not ours to change), 0b0acf50+f7229091 x6 0.24 (glow).
+
+Spike sources looked at in the t7 log, over 224 s in game:
+- **Presenter drops:** 11 in game (122 -> 133). That is not the cause of the lows.
+- **Frame times:** the spread is wide even at an average of 120: 6-10 ms, ±0.66 ms, with
+  half the frames over 8.42 ms. 1% low 98.5, 0.1% low 87.4.
+- **Hitches:** 19 frames over 12 ms (max 24.6).
+- **Pipelines:** 206 first binds of pipelines in game, all from the cache ("pipeline in
+  0 ms").
+
+So the 1% lows are mostly frame pacing jitter around a GPU-bound 8.3-8.6 ms, not
+hitches. A frame time with GPU headroom (the 7.5 ms target) is what narrows it. bbtest's
+new frame statistics track it.
+
+Deferred, with the reason:
+- **Post-processing at 1080p, or a half-resolution DoF/glow blur:** this needs the lamp
+  profile to pick the pass, and a hardware A/B. The game's YEBIS chain is built on the
+  output target (sites 0x26c3af3 and 0x25d818d), so this is a redesign, not a toggle.
+- **Batching queued jobs in bb-submit** (one kernel submission for jobs already waiting):
+  this only helps "queued" gaps. Do it once `gpu idle:` shows they dominate.
+- **The game's frame limiter pacing (the 6-10 ms spread):** this needs a pacing trace on
+  hardware.
+- **Pipeline and descriptor churn:** no hitch in t7 points at them. Watch the "over 12 ms"
+  count.
