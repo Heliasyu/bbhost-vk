@@ -2,6 +2,9 @@
 
 ## Menus stop responding after a resolution change in the game's own Settings menu
 - **Seen on:** upstream bbhost too, before bbhost-vk's changes (reported 2026-10-18).
+- **Confirmed by the user (2026-10-18):** it happens **only** through the game's own
+  Settings menu Resolution pick list; F10 resolution changes always worked. That matches
+  cause 1 below (the pick list still up when the resize runs).
 - **What happens:** in Bloodborne's own in-game Settings menu, with bbhost's added PC entries
   (System > PC Graphics > Resolution), you pick a new resolution and the "keep this
   resolution?" yes/no question appears. From then on the menus take no input, while the game
@@ -15,7 +18,7 @@
 - **Code review (2026-10-18, static, without the game):** the menu path is
   unchanged from upstream. bbhost-vk only added the scene-size step inside the
   same resize and the PC Upscaling screens' `live_resolution_scale_changed`.
-  **Fixed in bbhost-vk (PR #6):**
+  **Fixed in bbhost-vk (branch `phase-5-test-release`, needs the game to verify):**
   1. *Resize under a pick list still on the stack, the most likely cause.* The
      change waited a fixed 1.5 s of wall time. A slow frame (a shader compile)
      or a held key kept the Resolution pick list up longer, so the resize
@@ -24,8 +27,10 @@
      once the stack is back to its base (option_menu.cpp:1523). Now a change
      from the game's menus also waits until no popup is up on PC Graphics,
      PC Upscaling or Upscaling Quality, for at most 10 s after the request
-     (live_resolution.cpp:995-1009, `option_menu_popup_open`). F10 and
-     going back do not wait.
+     (live_resolution.cpp:~1000-1012, `option_menu_popup_open`). Only requests
+     made by the System menu itself wait (it brackets its set with
+     `live_resolution_from_game_menu(true/false)`); F10, the setup window and
+     going back are exactly as before.
   2. *A question that was never shown came back later.* When PC Graphics
      closed, or the pick list stayed up, before the question could go up,
      its request stayed pending. The 10 s timeout ignored it

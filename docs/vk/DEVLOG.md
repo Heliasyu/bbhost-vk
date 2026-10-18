@@ -691,3 +691,25 @@ the new dialog, or the modal not taking focus. They are in
 docs/vk/KNOWN_ISSUES.md, with TESTING.md part G to reproduce with and
 without the split. The `src/core` change on this branch is only the new
 `upscaler.fsr4_dll` key; nothing online is touched.
+
+## 2026-10-18 (Sun), the in-game Settings resolution freeze (branch `phase-5-test-release`)
+
+A static review of the game-menu resolution path (live_resolution.cpp,
+option_menu.cpp, options.cpp): the confirm logic is all upstream's. The
+user then confirmed the freeze happens **only** with the game's own Settings
+Resolution pick list, never with F10. That points at the resize running
+while the pick list is still up.
+- **Fix (game-menu path only):**
+  - A request the System menu makes (resolution, upscaler, quality) now waits
+    past the 1.5 s until no popup is up on PC Graphics, PC Upscaling or
+    Upscaling Quality, for at most 10 s.
+  - A question that was never put up is withdrawn at its timeout, instead of
+    showing later.
+  - `g_confirm_open` is now atomic.
+  - F10 and the setup window never set the menu mark, so they are unchanged.
+  - The log says "waiting for the menu's pick list to close before the
+    change" when the gate holds a change back.
+- **Suspected, not changed:** in KNOWN_ISSUES.md with file:line.
+- **Updater:** Heliasyu/bbhost-vk is public, so the update check needs no
+  token. The private-repo hints are gone (the optional token_file still
+  works, as upstream's).

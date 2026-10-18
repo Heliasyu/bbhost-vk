@@ -1,4 +1,5 @@
 #include "engine/option_menu.h"
+#include "engine/live_resolution.h"
 #include "engine/graphics_patch.h"
 #include "host/window.h"
 
@@ -1884,7 +1885,9 @@ void option_menu_poll() {
     }
     if (g_resolution != g_last_resolution) {
         g_last_resolution = g_resolution;
+        live_resolution_from_game_menu(true);
         host_opt_set_resolution_index(g_resolution);
+        live_resolution_from_game_menu(false);
         host_log("pc-options: resolution entry %d from the System menu", g_resolution);
     } else if (host_opt_resolution_index() != g_last_resolution) {
         // Changed elsewhere - F10, or the keep-or-revert question going
@@ -1910,12 +1913,16 @@ void option_menu_poll() {
     push(g_up_sharpness);
     if (g_upscaler != g_upscaler_last) {
         g_upscaler_last = g_upscaler;
+        live_resolution_from_game_menu(true);
         host_opt_set_index("upscaler", g_upscaler);
+        live_resolution_from_game_menu(false);
         host_log("pc-options: upscaler entry %d from the System menu", g_upscaler);
     }
     if (g_up_quality != g_up_quality_last) {
         g_up_quality_last = g_up_quality;
+        live_resolution_from_game_menu(true);
         host_opt_set_index("upscale_quality", g_up_quality);
+        live_resolution_from_game_menu(false);
         host_log("pc-options: upscaling quality entry %d from the System menu", g_up_quality);
     }
     // Steam Deck: the frame rate sets the frame cap, the resolution and the

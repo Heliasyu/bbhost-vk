@@ -37,6 +37,11 @@ bool live_resolution_can(unsigned w, unsigned h);
 bool live_resolution_request(unsigned w, unsigned h, bool confirm = false);
 // 0 while nothing has been answered; then once 1 (keep) or 2 (go back).
 int live_resolution_take_answer();
+// bbhost-vk: on around the game's own System menu setting the resolution or
+// the upscaler (then off): a request made meanwhile waits (bounded) for that
+// menu's pick list to close before resizing. F10 and the setup window never
+// set it, so their changes go as upstream's.
+void live_resolution_from_game_menu(bool on);
 // Back to the size shown before the last change that asked to be kept, for
 // a "go back" whose old entry waits for the next start.
 void live_resolution_go_back();

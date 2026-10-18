@@ -95,6 +95,11 @@ constexpr std::int64_t kMenuSettleNs = 1500'000'000;
 // it came from (option_menu_popup_open) - a slow frame or a held key kept one
 // open longer - up to this long after the request, then it goes regardless.
 constexpr std::int64_t kMenuPopupWaitNs = 10'000'000'000;
+// Set when the change comes from the game's own System menu (option_menu.cpp
+// calls live_resolution_from_game_menu first); only those wait for the pick
+// list. F10 and the setup window never set it, so they behave as upstream.
+std::atomic<bool> g_from_game_menu{false};
+std::atomic<bool> g_game_menu_mark{false};  // around the System menu's own set (live_resolution_from_game_menu)
 
 // ---- Keep or go back -------------------------------------------------------------
 //
@@ -993,9 +998,9 @@ GUEST_ABI std::int64_t present_frame_end_hook(std::uint64_t, const std::uint64_t
     const std::int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::int64_t not_before = g_request_not_before.load();
     bool settled = now_ns >= not_before;
-    // A change from the game's menus (not_before set) also waits for the pick
-    // list it was chosen in to have closed; F10 and going back do not wait.
-    if (settled && not_before && (g_request.load() || g_rescale.load()) && now_ns < not_before + kMenuPopupWaitNs &&
+    // A change from the game's own menus also waits for the pick list it was
+    // chosen in to have closed; F10, the setup window and going back do not.
+    if (settled && g_from_game_menu.load() && (g_request.load() || g_rescale.load()) && now_ns < not_before + kMenuPopupWaitNs &&
         option_menu_popup_open()) {
         static std::int64_t said_for = -1;
         if (said_for != not_before) {
@@ -1006,6 +1011,7 @@ GUEST_ABI std::int64_t present_frame_end_hook(std::uint64_t, const std::uint64_t
     }
     const std::uint64_t asked = settled ? g_request.exchange(0) : 0;
     const bool rescale = settled && g_rescale.exchange(false);
+    if (asked || rescale) g_from_game_menu.store(false);
     hle_call_guest6(guest_fn(kFrameEnd), static_cast<std::int64_t>(dev), 0, 0, 0, 0, 0);
     if (!g_old_depth.empty()) release_old_depth(f0);
     confirm_tick();
@@ -1343,11 +1349,14 @@ bool live_resolution_request(unsigned w, unsigned h, bool confirm) {
             host_log("resolution: %ux%u needs more render-target memory than this run was given at its start; it applies when the game next starts", w, h);
         return false;
     }
+    g_from_game_menu.store(g_game_menu_mark.load());
     g_request_confirm.store(confirm);
     g_request_not_before.store(confirm ? std::chrono::steady_clock::now().time_since_epoch().count() + kMenuSettleNs : 0);
     g_request.store(pack(w, h));
     return true;
 }
+
+void live_resolution_from_game_menu(bool on) { g_game_menu_mark.store(on); }
 
 int live_resolution_take_answer() { return g_answer.exchange(0); }
 
@@ -1355,6 +1364,7 @@ void live_resolution_scale_changed() {
     if (!g_installed || !scene_split_available()) return;
     // From a menu as a resolution is (the pick list closes first).
     g_request_not_before.store(std::chrono::steady_clock::now().time_since_epoch().count() + kMenuSettleNs);
+    g_from_game_menu.store(g_game_menu_mark.load() || g_from_game_menu.load());
     g_rescale.store(true);
 }
 
@@ -1368,6 +1378,7 @@ void live_resolution_scene(unsigned* w, unsigned* h) {
 void live_resolution_go_back() {
     const std::uint64_t b = g_before_asked.exchange(0);
     if (b && b != g_current.load()) {
+        g_from_game_menu.store(false);
         g_request_confirm.store(false);
         g_request_not_before.store(0);
         g_request.store(b);
