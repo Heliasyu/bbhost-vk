@@ -17,7 +17,7 @@ namespace {
 
 constexpr int kPasses = static_cast<int>(TimedPass::kCount);
 constexpr std::uint32_t kTimerPairs = 64;  // timestamp pairs: several passes a frame, a few frames in flight
-const char* const kNames[kPasses] = {"MV", "reactive", "opaque", "upscale", "copy"};
+const char* const kNames[kPasses] = {"MV", "reactive", "opaque", "upscale", "copy", "sharpen"};
 
 VkQueryPool g_pool = VK_NULL_HANDLE;
 bool g_tried = false;
@@ -86,14 +86,14 @@ bool pass_timer_on_locked() {
     return on;
 }
 
-std::int32_t pass_timer_begin_locked(VkCommandBuffer cmd, TimedPass pass) {
+std::int32_t pass_timer_begin_locked(VkCommandBuffer cmd, TimedPass pass, VkPipelineStageFlagBits stage) {
     if (!cmd || !pass_timer_on_locked() || !ready_locked()) return -1;
     const std::uint32_t slot = g_next % kTimerPairs;
     if (g_slot_frame[slot]) return -1;  // still in flight: this one goes untimed
     ++g_next;
     g_slot_pass[slot] = static_cast<int>(pass);
     vkCmdResetQueryPool(cmd, g_pool, 2 * slot, 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_pool, 2 * slot);
+    vkCmdWriteTimestamp(cmd, stage, g_pool, 2 * slot);
     return static_cast<std::int32_t>(slot);
 }
 

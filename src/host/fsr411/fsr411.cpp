@@ -739,7 +739,8 @@ struct Upscaler::Impl {
         // Earlier work of the caller on the inputs (render, copies) is the caller's barrier.
         for (uint32_t index = 0; index < kPassCount; ++index) {
             const std::string name = kPasses[index];
-            if ((name == "spd" && !f.auto_exposure) || (name == "rcas" && !f.sharpen)) {
+            // bbhost-vk: sharpen_external leaves the RCAS pass to the caller (test7).
+            if ((name == "spd" && !f.auto_exposure) || (name == "rcas" && (!f.sharpen || f.sharpen_external))) {
                 continue;
             }
             const Pass& p = passes[index];
@@ -848,6 +849,10 @@ bool Upscaler::Record(const Frame& frame) {
 
 const std::string& Upscaler::Error() const noexcept {
     return impl->error;
+}
+
+Image Upscaler::SharpenSource() const {
+    return {impl->mlsr_output.image, impl->mlsr_output.view, impl->out_w, impl->out_h};
 }
 
 std::string Upscaler::Describe() const {

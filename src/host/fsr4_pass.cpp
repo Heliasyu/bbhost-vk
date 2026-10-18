@@ -3,9 +3,13 @@
 
 #include "host/fsr411/fsr411.h"
 #include "host/gpu_internal.h"
+#include "host/pass_timer.h"
+#include "host/shaders/fsr4_sharpen.spv.h"
 #include "host/upscaler_inputs.h"
 #include "log.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -53,6 +57,94 @@ struct OutImage {
     std::uint32_t w = 0, h = 0;
     bool general = false;
 } g_out;
+
+// test7: the sharpening of the output, one pass from a shared-memory tile
+// (shaders/fsr4_sharpen.comp) instead of the replay's RCAS (0.32-0.35 ms at
+// 4K whatever the strength). BBHOST_FSR4_SHARPEN=amd keeps the replay's.
+struct SharpenPass {
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    bool tried = false;
+} g_sharpen;
+struct SharpenConstants {
+    std::uint32_t con0[4];
+    std::uint32_t size[2];
+};
+
+bool sharpen_amd() {
+    const char* e = std::getenv("BBHOST_FSR4_SHARPEN");
+    return e && std::strcmp(e, "amd") == 0;
+}
+
+bool make_sharpen() {
+    if (g_sharpen.tried) return g_sharpen.pipeline != VK_NULL_HANDLE;
+    g_sharpen.tried = true;
+    VkDescriptorSetLayoutBinding binds[2] = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo sli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sli.bindingCount = 2;
+    sli.pBindings = binds;
+    if (vkCreateDescriptorSetLayout(g.device, &sli, nullptr, &g_sharpen.set_layout) != VK_SUCCESS) return false;
+    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SharpenConstants)};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &g_sharpen.set_layout;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &range;
+    if (vkCreatePipelineLayout(g.device, &pli, nullptr, &g_sharpen.layout) != VK_SUCCESS) return false;
+    VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    smi.codeSize = sizeof(k_fsr4_sharpen_spv);
+    smi.pCode = k_fsr4_sharpen_spv;
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(g.device, &smi, nullptr, &module) != VK_SUCCESS) return false;
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    ci.stage.module = module;
+    ci.stage.pName = "main";
+    ci.layout = g_sharpen.layout;
+    if (vkCreateComputePipelines(g.device, g.cache, 1, &ci, nullptr, &g_sharpen.pipeline) != VK_SUCCESS) g_sharpen.pipeline = VK_NULL_HANDLE;
+    vkDestroyShaderModule(g.device, module, nullptr);
+    host_log("fsr4: sharpening %s", g_sharpen.pipeline ? "in one tiled pass (BBHOST_FSR4_SHARPEN=amd for the replay's RCAS)"
+                                                       : "pipeline failed: the replay's RCAS");
+    return g_sharpen.pipeline != VK_NULL_HANDLE;
+}
+
+// The postpass's result (`src`) sharpened into `dst`, both RGBA16F in General;
+// the replay's last barrier orders src's writes before.
+bool record_sharpen(VkCommandBuffer cmd, const Fsr411::Image& src, const Fsr411::Image& dst, float sharpness) {
+    const VkDescriptorSet set = alloc_set_locked(g_sharpen.set_layout);
+    if (!set || !src.view || !dst.view) return false;
+    VkDescriptorImageInfo infos[2] = {{VK_NULL_HANDLE, src.view, VK_IMAGE_LAYOUT_GENERAL},
+                                      {VK_NULL_HANDLE, dst.view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet w[2] = {};
+    for (int k = 0; k < 2; ++k) {
+        w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[k].dstSet = set;
+        w[k].dstBinding = static_cast<std::uint32_t>(k);
+        w[k].descriptorCount = 1;
+        w[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[k].pImageInfo = &infos[k];
+    }
+    vkUpdateDescriptorSets(g.device, 2, w, 0, nullptr);
+    // As the replay's cbRCAS: stops = 2 - 2 * sharpness, con = 2^-stops.
+    const float amount = std::clamp(sharpness, 0.0f, 1.0f);
+    const float linear = std::exp2(-(2.0f - 2.0f * amount));
+    SharpenConstants pc{};
+    std::memcpy(&pc.con0[0], &linear, 4);
+    pc.size[0] = dst.width;
+    pc.size[1] = dst.height;
+    const std::int32_t slot = pass_timer_begin_locked(cmd, TimedPass::Sharpen, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_sharpen.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_sharpen.layout, 0, 1, &set, 0, nullptr);
+    vkCmdPushConstants(cmd, g_sharpen.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, (dst.width + 15) / 16, (dst.height + 15) / 16, 1);
+    pass_timer_end_locked(cmd, slot);
+    return true;
+}
 
 bool make_output(std::uint32_t w, std::uint32_t h) {
     if (g_out.image && g_out.w == w && g_out.h == h) return true;
@@ -267,9 +359,14 @@ bool fsr4_record_locked(VkCommandBuffer cmd, const UpscalerInputs& in, std::uint
         f.jitter[1] = p.jitter_y;
         f.sharpen = p.sharpen && p.sharpness > 0.0f;
         f.sharpness = p.sharpness;
+        f.sharpen_external = f.sharpen && !sharpen_amd() && make_sharpen();
         f.reset = p.reset;
         f.auto_exposure = true;
         ok = g_fsr4->Record(f);
+        if (ok && f.sharpen_external && !record_sharpen(cmd, g_fsr4->SharpenSource(), f.output, f.sharpness)) {
+            *why = "FSR 4.1.1: could not record the sharpening";
+            ok = false;
+        }
         if (!ok) {
             const std::string& e = g_fsr4->Error();
             // Missing or broken assets, or a device the passes cannot run on, are for good.

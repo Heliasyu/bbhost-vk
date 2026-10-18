@@ -51,6 +51,9 @@ struct Frame {
     float pre_exposure = 1.0f;
     float sharpness = 0.0f; ///< 0..1
     bool sharpen = false;
+    /// bbhost-vk test7: with `sharpen`, stop after the postpass (its result in SharpenSource(),
+    /// layout General) and leave the sharpening into `output` to the caller.
+    bool sharpen_external = false;
     bool reset = false;
     bool auto_exposure = true;
 };
@@ -68,6 +71,8 @@ public:
     [[nodiscard]] const std::string& Error() const noexcept;
     /// The variant, asset set and sizes in use, for logs ("FP8 t2160_m0 output 3840x2160").
     [[nodiscard]] std::string Describe() const;
+    /// bbhost-vk test7: the postpass's RGBA16F result when the frame had sharpen_external.
+    [[nodiscard]] Image SharpenSource() const;
 
 private:
     struct Impl;

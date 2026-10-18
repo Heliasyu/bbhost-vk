@@ -16,13 +16,17 @@
 
 namespace gpu {
 
-enum class TimedPass : int { Motion, Reactive, Opaque, Upscale, Copy, kCount };
+// Sharpen (test7): FSR 4.1.1's own sharpening pass, inside the Upscale span.
+enum class TimedPass : int { Motion, Reactive, Opaque, Upscale, Copy, Sharpen, kCount };
 
 // Whether timing is on (the setting, re-read when the settings move).
 bool pass_timer_on_locked();
 // Before the pass's commands: the slot to end with, or -1 (off, no
 // timestamps on this queue, or the ring full).
-std::int32_t pass_timer_begin_locked(VkCommandBuffer cmd, TimedPass pass);
+// `stage`: where the first timestamp is taken - after a barrier, the stage it
+// waited for (else top of pipe, which may run ahead of earlier work).
+std::int32_t pass_timer_begin_locked(VkCommandBuffer cmd, TimedPass pass,
+                                     VkPipelineStageFlagBits stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
 // After them. The submission being recorded is g.flushes + 1.
 void pass_timer_end_locked(VkCommandBuffer cmd, std::int32_t slot);
 // Reads the retired slots (cheap; once a frame from the scale pass).
