@@ -19,7 +19,7 @@ References: Supermedo's Windows bbport launcher (visual style only), bbport (dea
 8. Phase 6: Polish and release (3-5 days), the first working release
 9. Phase 7: More upscalers for non-RDNA4 GPUs (after the first working release)
 10. Phase 8: Windows release (only once Phase 7 is working)
-11. Phase H (MAYBE, not committed; decide after the first working release): DualSense HD haptics and adaptive triggers
+11. Phase H (MAYBE, not committed; decide after the first working release): DualSense HD haptics and adaptive triggers, DualSense lightbar, Discord Rich Presence
 
 Phases 1-3 have to go in this order because each one needs the one before it. The launcher could start any time, but it goes after FSR 3.1 so its Upscaling tab controls a working upscaler.
 
@@ -144,7 +144,7 @@ Goal: anyone without an RDNA4 card gets a good temporal upscaler too. All of the
 - **Milestone:** the Windows build matches the Linux build in features, image quality and performance.
 - **Testing:** the user, or community testers, on a Windows install.
 
-## Phase H (MAYBE): DualSense HD haptics and adaptive triggers
+## Phase H (MAYBE): DualSense HD haptics, adaptive triggers, lightbar and Discord Rich Presence
 **Status: maybe.** Not part of the committed plan; the user decides after the first working release whether to do it.
 The PS4 game only has DualShock 4 rumble, so haptic data has to be made, not converted 1:1. Can slot in any time after Phase 6; it doesn't touch rendering.
 1. **Better rumble:** translate the game's rumble motor values into DualSense haptic waveforms (quickest).
@@ -154,6 +154,10 @@ The PS4 game only has DualShock 4 rumble, so haptic data has to be made, not con
 - **Platform note:** HD haptics need the DualSense's USB audio channels on Linux; Bluetooth haptics are much harder and may not be possible. Rumble and triggers work on both.
 - **Milestone:** haptics and triggers feel right on a DualSense over USB, with no input lag and no effect on other controllers.
 - **Your test:** a short play session on a DualSense over USB with `bbtest start ph`.
+
+### Also maybe: light extras (decide after the first working release)
+- **DualSense lightbar:** the lightbar follows the hunter's HP, from pale blue (#a9bfe3) at full to blood red (#8e1b2a) when low, with short flashes on Insight gained and visceral/parry hits. Uses SDL3's controller LED support; off by default and ignored for other controllers. Works over USB and Bluetooth.
+- **Discord Rich Presence:** shows "Playing Bloodborne (bbhost-vk)" with the current area or boss, playtime, and online/offline, via the Discord local IPC socket (no account data, nothing sent to any server bbhost talks to). Off by default; a toggle in the launcher and F10. Does nothing if Discord isn't running.
 
 ---
 
