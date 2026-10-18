@@ -1,6 +1,20 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test3 fixes:**
+  - The dark, stretched picture with a grey band at 3840x2160 (test2) is fixed. Any upscaler
+    preset below Native AA now makes the display buffers the output's size at the start.
+    Before, YEBIS's post-processing was built at the 5120x2160 buffers and read the
+    3840-wide picture across 5120. A Resolution change while the game runs that no longer
+    matches the buffers runs without the upscaler until the next start (logged).
+    `BBHOST_SPLIT_DISPLAY=max` restores the old sizing.
+  - The scene camera is looked for as bbport does: any shader stage, any buffer size, and
+    inside the G-buffer draws' buffers. `BBHOST_MOTION_PROBE=1` logs what those draws bind.
+  - The jitter pauses while no scene camera is found (it could only flicker).
+    `BBHOST_JITTER_NO_CAMERA=1` keeps it on.
+  - New debug option: `BBHOST_FSR_DUMP=1` (or `[debug] fsr_dump = true` in bbhost.toml)
+    writes one frame's FSR inputs, output and target as PNGs, with numbers. It runs at
+    `bbtest mark`, with `fsr-dump.request`, and once by itself.
 - **test2 fixes:**
   - FSR 3.1 and 4.1.1 now upscale to the active output (the Resolution setting) instead of
     the larger display buffers that live resolution keeps. test1 showed the scene in only

@@ -93,6 +93,28 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test3 checks (~20 min)
+
+Start with the upscaler and the Resolution you want to test **already set**. The display
+buffers are now sized to the output when the game starts with an upscaler preset, so change
+the Resolution only between runs. A live change runs without the upscaler until the next
+start, and the log says `scene-split: not split at ...`.
+
+Start with `BBHOST_FSR_DUMP=1 BBHOST_MOTION_PROBE=1 bbtest start test3 --capture`, set to
+FSR 3.1 Quality at 3840x2160.
+1. The picture fills the screen at normal brightness, with no grey band. Run `bbtest mark` in
+   the world: it also writes an `fsr-*/` folder of FSR stage PNGs into the session's `frames/`.
+2. In the log, look for:
+   - `resolution: display buffers 3840x2160, the output's`;
+   - `fsr3: output 3840x2160 at 0,0 in the scale pass's 3840x2160 target`;
+   - `motion: scene constants found at ...` (or the `motion-probe:` lines if it is not
+     found);
+   - `fsr3: ... N resets` well below the dispatches;
+   - `jitter: paused` only while there is no camera.
+3. Compare FPS and the `gpu-wait=` figure with FSR 1 at the same Resolution. gpu-wait is the
+   host waiting for the GPU: high means GPU-bound.
+4. Repeat at 5120x2160 with FSR 3.1 (test2's 5k run was FSR 1).
+
 ## Test build session (test1, ~90 min)
 This session covers the first test build from start to finish. The most important checks come
 first, so if time runs out, stop after part 4. The build is

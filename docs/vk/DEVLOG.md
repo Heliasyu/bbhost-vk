@@ -881,3 +881,83 @@ the right quarter of the screen, with the rest dark. The HUD and menus were righ
 - Check again after the size fix, against FSR 1 at 3840x2160.
 
 **Also.** The setup window's token row no longer says "only while the releases are private".
+
+## test2 hardware result and the test3 fixes (2026-10-18)
+
+test2 (`-67-g221d653`), FSR 3.1 Quality at 3840x2160:
+- The left ~75% of the screen showed a dark, smeared scene, magnified 4/3 across.
+- The right ~25% was a flat light-grey band. The HUD was right.
+- The log said: output 3840x2160 at 0,0 in a 5120x2160 target, 3000 resets in 3000 dispatches,
+  and no scene camera. About 88 fps, with the GPU at 100%.
+
+A second run at 5120x2160 (`t2-5k.log`) looked right. That run had FSR 1 selected: the scale
+pass was drawn bilinear, and there are no `fsr3:` lines.
+
+**1. The picture: YEBIS built at the display buffers' size (fixed).**
+- The split's Initialize site (0x26c3af3, Kyo's `jmp`) makes the graphics manager's scene
+  take the output entry's DefRenderTarget for its colour, whatever its size. YEBIS then takes
+  that target for its back buffer and builds its chain at that size.
+- Kyo's patches assume display buffers of the output's size. Live resolution makes them the
+  largest size a change can reach. So at 3840x2160, YEBIS ran at 5120x2160: the log's
+  post-processing targets are 2560x1080, 1568x441, 3136x882 and so on.
+- The picture was then read across 5120 texels onto 3840 pixels. That gives the 4/3 stretch,
+  and the grey band from x = 3840*3840/5120 = 2880, the target's untouched texels past 3840.
+- This is the same failure that live resolution's both-sides test fixed for the unsplit
+  scene (its comment describes it). The split had brought it back, for the bilinear path
+  too, since that is also a split. 5120x2160 matched the buffers, so it was right.
+- FSR's own copy was correct. The game's draw that FSR replaces writes 0..3840 as well.
+- Fix:
+  - `scene_split::display_size_at_start`: a split at the start makes the display buffers
+    the output's size.
+  - `display_fits_split`: `scene_split_wanted` makes no split while they differ. It logs
+    `scene-split: not split at WxH - the display buffers are ...`, and the scene renders at
+    the output size until the next start.
+  - So a Resolution change while the game runs to a size below the buffers still works,
+    without the upscaler. A larger one already applied only at the next start.
+  - `BBHOST_SPLIT_DISPLAY=max` keeps the old sizing.
+  - Tests are in scene_split_test.
+
+**2. The scene camera (broadened, needs hardware).**
+- test2's search found nothing: `scene blocks seen 0`.
+- It now follows bbport (vk_rasterizer.cpp / vk_camera_motion.cpp):
+  - Any stage (PS too), any V# or pointer holding a whole block.
+  - The signature is far and 1/far at [0],[1] and a size of at least 64 at [4],[5], no
+    longer the render or output size.
+  - After 60 frames without a camera, it also searches inside the G-buffer draws' buffers
+    (4+ colour targets and a depth; first 4 KiB, 16-byte steps).
+  - Cameras of another size are only taken from G-buffer draws.
+- Rejections are logged. The 600-frame line now counts the buffers looked at, the G-buffer
+  draws, and the most colour targets seen with a depth.
+- `BBHOST_MOTION_PROBE=1` logs each G-buffer draw's buffers once, with their first floats.
+- Tests are in temporal_test (`test_signature`).
+
+**3. Jitter.** It never depended on the camera. test2's "jitter 1 phases" came from the first
+frame, which was drawn before the phases were set (later lines say 18 phases), and the line
+now says so. But with no camera, FSR resets every frame and the jitter is on screen as
+flicker. So it pauses after 60 frames without a camera (`jitter: paused ...`).
+`BBHOST_JITTER_NO_CAMERA=1` keeps it on.
+
+**4. gpu-wait.**
+- The `sceGnmSubmitAndFlip` line's `gpu-wait` is the time the host blocked on submission
+  fences: `retire_slot_locked`, when all 16 command-buffer slots are in flight, plus
+  explicit `wait_submission_locked` waits. A high value means the GPU is the bottleneck.
+- It is about 1500 ms per 300 flips in the 5120x2160 FSR 1 run, which has no FSR 3.1 at all,
+  and about 1900 ms in test2. The FSR 1 baseline ran at 2560x1440 (about 5 ms).
+- So it follows the output's pixel count, not the FSR path. Per frame our passes measured
+  MV 0.02, reactive about 0.1, FSR 3.1 0.8-0.95 and copy 0.15-0.25 ms. They wait for nothing
+  on the host: the timer reads retired queries without WAIT, and FSR 3.1 retires by serial.
+  FSR-Vulkan waits for the device only when an FSR 4 v0.7 context is destroyed.
+- test2 also ran YEBIS at 5120x2160 for a 3840x2160 picture, 78% more post-processing pixels
+  than needed. Fix 1 removes that.
+
+**5. The FSR stage dump.** `BBHOST_FSR_DUMP=1` (or `[debug] fsr_dump = true`) writes these
+PNGs into the capture folder's `fsr-<date>-<time>-flip<n>/`:
+- scene colour, depth copy, motion, reactive, opaque colour;
+- the upscaler's output;
+- the scale pass's target before and after the copy.
+
+It also writes `info.txt`: sizes, rect, jitter, reset, and per image the min/mean/max
+luminance with separate means left and right of x = 3/4. It runs when `fsr-dump.request` or
+`capture.request` (`bbtest mark`) appears, on Shift+F12 with `BBHOST_VK_CAPTURE=1`, and once
+at the 600th upscaled frame. The pixel code is `temporal/dump_pixels.h`, tested in
+`test_dump_pixels`.
