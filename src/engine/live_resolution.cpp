@@ -91,6 +91,10 @@ std::atomic<bool> g_request_confirm{false};  // ask to keep it once it is shown
 // left it open (taking the keys meant for the question). It waits this long.
 std::atomic<std::int64_t> g_request_not_before{0};  // steady_clock ns
 constexpr std::int64_t kMenuSettleNs = 1500'000'000;
+// bbhost-vk: and past those 1.5 s, while a pick list is still up on the screen
+// it came from (option_menu_popup_open) - a slow frame or a held key kept one
+// open longer - up to this long after the request, then it goes regardless.
+constexpr std::int64_t kMenuPopupWaitNs = 10'000'000'000;
 
 // ---- Keep or go back -------------------------------------------------------------
 //
@@ -986,7 +990,20 @@ GUEST_ABI std::int64_t present_frame_end_hook(std::uint64_t, const std::uint64_t
     const std::uint64_t dev = saved[5];  // rdi
     const std::uint64_t f0 = hle_video_flip_count();
     if (g_next_test < g_tests.size() && f0 >= g_tests[g_next_test].first) g_request.store(g_tests[g_next_test++].second);
-    const bool settled = std::chrono::steady_clock::now().time_since_epoch().count() >= g_request_not_before.load();
+    const std::int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::int64_t not_before = g_request_not_before.load();
+    bool settled = now_ns >= not_before;
+    // A change from the game's menus (not_before set) also waits for the pick
+    // list it was chosen in to have closed; F10 and going back do not wait.
+    if (settled && not_before && (g_request.load() || g_rescale.load()) && now_ns < not_before + kMenuPopupWaitNs &&
+        option_menu_popup_open()) {
+        static std::int64_t said_for = -1;
+        if (said_for != not_before) {
+            said_for = not_before;
+            host_log("resolution: waiting for the menu's pick list to close before the change");
+        }
+        settled = false;
+    }
     const std::uint64_t asked = settled ? g_request.exchange(0) : 0;
     const bool rescale = settled && g_rescale.exchange(false);
     hle_call_guest6(guest_fn(kFrameEnd), static_cast<std::int64_t>(dev), 0, 0, 0, 0, 0);

@@ -880,9 +880,34 @@ GUEST_ABI void pc_enhance_handler(void* dialog, void* params) {
     log_rows("PCEnhance", dialog, kEnhanceRows, kEnhanceRows);
 }
 
+// bbhost-vk: PC Upscaling and Upscaling Quality as last opened, as PC
+// Graphics is kept (g_gfx_dialog): a resize waits while a pick list is up on
+// one of them (option_menu_popup_open). Menu thread.
+std::uint8_t* g_up_dialog = nullptr;
+std::uint8_t* g_upq_dialog = nullptr;
+std::uint64_t g_up_vtable = 0, g_upq_vtable = 0, g_up_base_depth = 0, g_upq_base_depth = 0;
+void track(std::uint8_t** dialog, std::uint64_t* vtable, std::uint64_t* base, void* d) {
+    *dialog = static_cast<std::uint8_t*>(d);
+    std::memcpy(vtable, d, sizeof(*vtable));
+    std::memcpy(base, *dialog + 0x40, sizeof(*base));
+}
+// Still open, as gfx_alive tells: its vtable, and row `row` still bound to `value`.
+bool tracked_alive(std::uint8_t* dialog, std::uint64_t vtable, int row, const void* value) {
+    if (!dialog) return false;
+    std::uint64_t vt = 0;
+    std::memcpy(&vt, dialog, sizeof(vt));
+    if (vt != vtable || dialog_row_count(dialog) <= row) return false;
+    std::uint64_t v = 0;
+    std::memcpy(&v, dialog_widget(dialog, row) + kChoiceValue, sizeof(v));
+    return v == reinterpret_cast<std::uint64_t>(value);
+}
+bool up_alive() { return tracked_alive(g_up_dialog, g_up_vtable, 0, &g_up_toggles[0].value); }
+bool upq_alive() { return tracked_alive(g_upq_dialog, g_upq_vtable, kUpQualityRows - 1, &g_up_quality); }
+
 // bbhost-vk's PC Upscaling: two toggles, then the upscaler's pick list, last.
 GUEST_ABI void pc_upscale_handler(void* dialog, void* params) {
     host_log("pc-options: PCUpscale opened, dialog=%p params=%p", dialog, params);
+    track(&g_up_dialog, &g_up_vtable, &g_up_base_depth, dialog);
     alignas(16) std::uint8_t scratch[0x100]{};
     hle_call_guest<std::int64_t>(guest_fn(kScratchInit), &scratch);
     seed_upscale();
@@ -896,6 +921,7 @@ GUEST_ABI void pc_upscale_handler(void* dialog, void* params) {
 // bbhost-vk's Upscaling Quality: the sharpness slider, then the quality's pick list.
 GUEST_ABI void pc_upquality_handler(void* dialog, void* params) {
     host_log("pc-options: PCUpQuality opened, dialog=%p params=%p", dialog, params);
+    track(&g_upq_dialog, &g_upq_vtable, &g_upq_base_depth, dialog);
     alignas(16) std::uint8_t scratch[0x100]{};
     hle_call_guest<std::int64_t>(guest_fn(kScratchInit), &scratch);
     seed_upscale();
@@ -1362,7 +1388,9 @@ constexpr std::uint64_t kDropdownVTable = 0x5739e90, kDropdownRedraw = 0x1f2b7c0
 std::atomic<int> g_confirm_answer{0};         // 1 yes, 2 no
 std::atomic<bool> g_confirm_yes{false};
 std::atomic<bool> g_confirm_timed_out{false};  // whatever closes it now counts as no
-bool g_confirm_open = false;  // menu thread
+// Set and cleared on the menu thread; read by option_menu_confirm_close from
+// the present step (live_resolution's confirm_tick), so atomic.
+std::atomic<bool> g_confirm_open{false};
 std::uint64_t g_confirm_popup = 0;  // ours, on the stack
 
 // PC Graphics still open: the dialog keeps its vtable and its first row
@@ -2004,6 +2032,18 @@ void option_menu_install(ElfImage* image) {
 
 bool option_menu_confirm_possible() { return g_installed && gfx_alive(); }
 
+bool option_menu_popup_open() {
+    if (!g_installed) return false;
+    auto open_on = [](std::uint8_t* dialog, std::uint64_t base, bool alive) {
+        if (!dialog || !alive) return false;
+        std::uint64_t depth = 0;
+        std::memcpy(&depth, dialog + 0x40, sizeof(depth));
+        return depth > base;
+    };
+    return open_on(g_gfx_dialog, g_gfx_base_depth, gfx_alive()) || open_on(g_up_dialog, g_up_base_depth, up_alive()) ||
+           open_on(g_upq_dialog, g_upq_base_depth, upq_alive());
+}
+
 void option_menu_confirm_ask(std::uint32_t message) {
     g_confirm_answer.store(0);
     g_confirm_ask.store(message);
@@ -2015,7 +2055,14 @@ int option_menu_confirm_take() { return g_confirm_answer.exchange(0); }
 // runs out it is closed the way a player would close it - the menu's decide
 // button on whichever answer is highlighted - and counted as no either way.
 void option_menu_confirm_close() {
-    if (!g_confirm_open) return;
+    if (!g_confirm_open.load()) {
+        // bbhost-vk: never put up (PC Graphics closed, or a pick list stayed
+        // on its stack, before the question could go up). Its request is
+        // withdrawn here, or it went up later - the next time PC Graphics
+        // opened - as a question nobody was waiting for.
+        if (g_confirm_ask.exchange(0)) host_log("pc-options: the resolution question was never shown; withdrawn");
+        return;
+    }
     g_confirm_timed_out.store(true);
     hle_pad_tap(menu_confirm_button(), 0, 120);
 }
