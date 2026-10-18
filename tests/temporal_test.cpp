@@ -319,6 +319,38 @@ void test_fsr3_policy() {
 
 }  // namespace
 
+// test1 (RX 9070, 4K): display buffers kept at 5120x2160, the active output
+// 3840x2160 - FSR's output is the active rect, never the buffer's extent.
+void test_fsr3_output_rect() {
+    OutputFrom from{};
+    // The scale pass's viewport: 3840x2160 at the corner of a 5120x2160 target.
+    CHECK((fsr3_output_rect(5120, 2160, 0, 0, 3840, 2160, 3840, 2160, &from) == OutputRect{0, 0, 3840, 2160}));
+    CHECK(from == OutputFrom::Viewport);
+    // A flipped viewport (negative height) is the same rect.
+    CHECK((fsr3_output_rect(5120, 2160, 0, 2160, 3840, -2160, 3840, 2160, &from) == OutputRect{0, 0, 3840, 2160}));
+    // An offset viewport keeps its place.
+    CHECK((fsr3_output_rect(5120, 2160, 640, 0, 3840, 2160, 3840, 2160, &from) == OutputRect{640, 0, 3840, 2160}));
+    // No viewport: the Resolution setting's size.
+    CHECK((fsr3_output_rect(5120, 2160, 0, 0, 0, 0, 3840, 2160, &from) == OutputRect{0, 0, 3840, 2160}));
+    CHECK(from == OutputFrom::Setting);
+    // A viewport past the target, or the whole 5120x2160 buffer: still the setting's size.
+    CHECK((fsr3_output_rect(5120, 2160, 0, 0, 6000, 2160, 3840, 2160, &from) == OutputRect{0, 0, 3840, 2160}));
+    CHECK(from == OutputFrom::ViewportDiffers);
+    CHECK((fsr3_output_rect(5120, 2160, 0, 0, 5120, 2160, 3840, 2160, &from) == OutputRect{0, 0, 3840, 2160}));
+    CHECK(from == OutputFrom::ViewportDiffers);
+    // No setting that fits: the viewport.
+    CHECK((fsr3_output_rect(5120, 2160, 0, 0, 3840, 2160, 0, 0, &from) == OutputRect{0, 0, 3840, 2160}));
+    CHECK(from == OutputFrom::Viewport);
+    // Neither: the target.
+    CHECK((fsr3_output_rect(3840, 2160, 0, 0, 0, 0, 0, 0, &from) == OutputRect{0, 0, 3840, 2160}));
+    CHECK(from == OutputFrom::Target);
+    CHECK((fsr3_output_rect(2560, 1440, 0, 0, 0, 0, 3840, 2160, &from) == OutputRect{0, 0, 2560, 1440}));
+    // And the sizes FSR then gets: 1.5x on both sides, not 2.00x by 1.5x.
+    const OutputRect r = fsr3_output_rect(5120, 2160, 0, 0, 3840, 2160, 3840, 2160);
+    CHECK(fsr3_sizes_ok({2560, 1440, r.w, r.h}));
+    CHECK(r.w * 1440 == r.h * 2560);
+}
+
 int main() {
     test_halton();
     test_parse();
@@ -326,6 +358,7 @@ int main() {
     test_motion();
     test_classify();
     test_fsr3_policy();
+    test_fsr3_output_rect();
     if (g_fail) {
         std::fprintf(stderr, "temporal_test: %d failures\n", g_fail);
         return 1;

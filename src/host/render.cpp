@@ -8108,10 +8108,12 @@ void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t
         // bbhost-vk Phase 2: the scene constants, bone palettes and velocity
         // scales by the V#'s own size (records x stride; records are bytes
         // when the stride is 0).
-        if (t_temporal_stage >= 0 && base && !b.pointer) {
+        if (t_temporal_stage >= 0 && base) {
+            // A pointer has no V#: the shader's own extent (test2: the scene
+            // constants may come this way).
             const std::uint32_t vstride = (words[1] >> 16) & 0x3fff;
-            const std::uint64_t vbytes = static_cast<std::uint64_t>(words[2]) * (vstride ? vstride : 1);
-            temporal_observe_buffer_locked(t_temporal_stage, t_temporal_vs, t_temporal_ps, static_cast<int>(i), base, vbytes);
+            const std::uint64_t vbytes = b.pointer ? static_cast<std::uint64_t>(bytes) : static_cast<std::uint64_t>(words[2]) * (vstride ? vstride : 1);
+            temporal_observe_buffer_locked(t_temporal_stage, t_temporal_vs, t_temporal_ps, static_cast<int>(i), base, vbytes, b.pointer);
         }
         int outcome = !base ? kNoBase : (base & 3) || !shape ? kUnaligned : kUnmapped;
         // Past the longest binding the range takes the page table: no one buffer need hold it.
@@ -11749,13 +11751,17 @@ static bool draw_impl(const GpuDraw& d) {
             RtImage* scene = nullptr;
             if (!stage_images[1].images.empty() && stage_images[1].images[0].resolved)
                 scene = find_render_target(tsharp_base(stage_images[1].images[0].w));
-            temporal_scale_pass_locked(scene, s.color[0] ? s.color[0]->width : 0, s.color[0] ? s.color[0]->height : 0);
+            // test2: the active output in the target (its viewport), not the
+            // target's extent - live resolution keeps the display buffers at
+            // the largest Resolution entry (host/fsr3_pass.h).
+            const temporal::OutputRect out_rect = s.color[0] ? fsr3_output_rect_locked(s.color[0], s.vport) : temporal::OutputRect{};
+            temporal_scale_pass_locked(scene, out_rect.w, out_rect.h);
             // bbhost-vk Phase 3: FSR 3.1 writes the pass's target instead of
             // the game's draw (host/fsr3_pass.h); the draw is dropped below,
             // where BBHOST_SKIP_PASS drops one.
             if (upscaler_scene_pass() == ScenePass::Fsr31 && s.color[0]) {
                 ensure_initialised(*s.color[0]);
-                fsr3_replaced = fsr3_scale_pass_locked(s.color[0]);
+                fsr3_replaced = fsr3_scale_pass_locked(s.color[0], out_rect);
             }
         }
         t_resolve_site = kSiteBuffers;

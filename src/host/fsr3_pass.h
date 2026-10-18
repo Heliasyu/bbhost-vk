@@ -10,6 +10,8 @@
 // cannot copy into - it says why once and the game's draw runs as Phase 1's
 // bilinear copy. FSR 4.1.1 selected uses this until Phase 4.
 
+#include "host/temporal/fsr3_policy.h"
+
 #include <cstdint>
 #include <string>
 
@@ -20,7 +22,15 @@ struct RtImage;
 // Under g.mu, the pass's render target bound (and initialised). True: the
 // target holds the upscaled scene; the caller skips the draw and marks the
 // target written.
-bool fsr3_scale_pass_locked(RtImage* target);
+// `out`: where in the target the scene goes (fsr3_output_rect_locked): FSR's
+// output size and the copy back, never the target's extent.
+bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out);
+
+// The scale pass's output rect in its target, from the draw's viewport
+// (`vport`: PA_CL_VPORT_XSCALE, XOFFSET, YSCALE, YOFFSET; null without one),
+// else the Resolution setting's size, else the target. Logged when it
+// changes, with a warning when it is not the Resolution setting's size.
+temporal::OutputRect fsr3_output_rect_locked(const RtImage* target, const float* vport);
 
 // One line for the reports: dispatches, fallbacks and why, resets, memory.
 std::string fsr3_report_locked();

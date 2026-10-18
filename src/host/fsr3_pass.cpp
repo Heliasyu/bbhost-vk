@@ -114,13 +114,15 @@ void barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkAccessFlags src_ac
     vkCmdPipelineBarrier(cmd, src, dst, 0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
-bool copy_output(VkCommandBuffer cmd, VkImage src, VkFormat src_format, std::uint32_t w, std::uint32_t h, RtImage& target) {
+bool copy_output(VkCommandBuffer cmd, VkImage src, VkFormat src_format, std::uint32_t w, std::uint32_t h, RtImage& target,
+                 const temporal::OutputRect& at) {
     barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     if (target.format == src_format) {
         VkImageCopy c{};
         c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         c.dstSubresource = c.srcSubresource;
+        c.dstOffset = {static_cast<std::int32_t>(at.x), static_cast<std::int32_t>(at.y), 0};
         c.extent = {w, h, 1};
         vkCmdCopyImage(cmd, src, VK_IMAGE_LAYOUT_GENERAL, target.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
         ++g_window.copies;
@@ -129,7 +131,8 @@ bool copy_output(VkCommandBuffer cmd, VkImage src, VkFormat src_format, std::uin
         b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         b.dstSubresource = b.srcSubresource;
         b.srcOffsets[1] = {static_cast<std::int32_t>(w), static_cast<std::int32_t>(h), 1};
-        b.dstOffsets[1] = b.srcOffsets[1];
+        b.dstOffsets[0] = {static_cast<std::int32_t>(at.x), static_cast<std::int32_t>(at.y), 0};
+        b.dstOffsets[1] = {static_cast<std::int32_t>(at.x + w), static_cast<std::int32_t>(at.y + h), 1};
         vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_GENERAL, target.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
         ++g_window.blits;
     }
@@ -168,7 +171,43 @@ int env_sign(const char* name, int axis) {
 
 }  // namespace
 
-bool fsr3_scale_pass_locked(RtImage* target) {
+temporal::OutputRect fsr3_output_rect_locked(const RtImage* target, const float* vport) {
+    if (!target) return {};
+    static std::uint64_t serial = ~0ull;
+    static std::uint32_t active_w = 0, active_h = 0;
+    if (host_opt_serial() != serial) {
+        serial = host_opt_serial();
+        const HostSettings hs = host_settings();
+        active_w = hs.res_width > 0 ? static_cast<std::uint32_t>(hs.res_width) : 0;
+        active_h = hs.res_height > 0 ? static_cast<std::uint32_t>(hs.res_height) : 0;
+    }
+    float x = 0, y = 0, w = 0, h = 0;
+    if (vport && vport[0] != 0.0f) {
+        x = vport[1] - vport[0];
+        w = 2.0f * vport[0];
+        y = vport[3] - vport[2];
+        h = 2.0f * vport[2];
+    }
+    temporal::OutputFrom from{};
+    const temporal::OutputRect r = temporal::fsr3_output_rect(target->width, target->height, x, y, w, h, active_w, active_h, &from);
+    static temporal::OutputRect said{};
+    static std::uint32_t said_tw = 0, said_th = 0;
+    if (r != said || target->width != said_tw || target->height != said_th) {
+        said = r;
+        said_tw = target->width;
+        said_th = target->height;
+        host_log("fsr3: output %ux%u at %u,%u in the scale pass's %ux%u target (from %s; Resolution %ux%u)", r.w, r.h, r.x, r.y, target->width,
+                 target->height, temporal::output_from_name(from), active_w, active_h);
+        if (active_w && (r.w != active_w || r.h != active_h))
+            host_log("fsr3: warning: the upscaler's output %ux%u is not the Resolution setting's %ux%u", r.w, r.h, active_w, active_h);
+        if (from == temporal::OutputFrom::ViewportDiffers)
+            host_log("fsr3: warning: the scale pass's viewport is %.0fx%.0f at %.0f,%.0f, not the Resolution setting's %ux%u", w, h < 0 ? -h : h, x,
+                     h < 0 ? y + h : y, active_w, active_h);
+    }
+    return r;
+}
+
+bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
     static const bool disabled = [] {
         const char* e = std::getenv("BBHOST_FSR3");
         return e && e[0] == '0';
@@ -188,7 +227,8 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     if (!target || target->depth || target->layers != 1) return fall_back(Fallback::Target);
     if (!in.valid || !in.color.image || !in.depth_copy.image || !in.motion.image || in.frame != hle_video_flip_count())
         return fall_back(Fallback::NoInputs);
-    const temporal::Fsr3Sizes sizes{in.render_w, in.render_h, target->width, target->height};
+    if (!out.w || !out.h || out.x + out.w > target->width || out.y + out.h > target->height) return fall_back(Fallback::Sizes);
+    const temporal::Fsr3Sizes sizes{in.render_w, in.render_h, out.w, out.h};
     if (!temporal::fsr3_sizes_ok(sizes) || in.color.width < in.render_w || in.color.height < in.render_h) return fall_back(Fallback::Sizes);
     if (target->format != VK_FORMAT_R16G16B16A16_SFLOAT && !blit_ok(target->format)) return fall_back(Fallback::Format);
     // FSR 4.1.1 (host/fsr4_pass.h), replayed from the user's DLL; FSR 3.1 below when it cannot.
@@ -198,7 +238,7 @@ bool fsr3_scale_pass_locked(RtImage* target) {
         VkCommandBuffer cmd4 = g_cmd();
         if (in.frame == g_last_frame4 && g_last_out4) {
             ++g_window.repeats;
-            copy_output(cmd4, g_last_out4, VK_FORMAT_R16G16B16A16_SFLOAT, target->width, target->height, *target);
+            copy_output(cmd4, g_last_out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target, out);
             return true;
         }
         barrier(cmd4, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -218,12 +258,12 @@ bool fsr3_scale_pass_locked(RtImage* target) {
         VkImage out4 = VK_NULL_HANDLE;
         bool fatal = false;
         std::string why4;
-        const bool ok4 = fsr4_record_locked(cmd4, in, target->width, target->height, p4, &out4, &fatal, &why4);
+        const bool ok4 = fsr4_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4);
         pass_timer_end_locked(cmd4, slot4);
         if (ok4) {
             if (p4.reset) ++g_window.resets;
             const std::int32_t copy4 = pass_timer_begin_locked(cmd4, TimedPass::Copy);
-            copy_output(cmd4, out4, VK_FORMAT_R16G16B16A16_SFLOAT, target->width, target->height, *target);
+            copy_output(cmd4, out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target, out);
             pass_timer_end_locked(cmd4, copy4);
             g_last_frame4 = in.frame;
             g_last_out4 = out4;
@@ -232,7 +272,7 @@ bool fsr3_scale_pass_locked(RtImage* target) {
             pass_timer_upscaler_is_fsr4(true);
             if (const std::string d = fsr4_describe_locked(); d != g_fsr4_described) {
                 g_fsr4_described = d;
-                host_log("fsr4: FSR 4.1.1 replay, %s (scene %ux%u -> %ux%u)", d.c_str(), in.render_w, in.render_h, target->width, target->height);
+                host_log("fsr4: FSR 4.1.1 replay, %s (scene %ux%u -> %ux%u)", d.c_str(), in.render_w, in.render_h, out.w, out.h);
             }
             g_last_fallback = Fallback::None;
             return true;
@@ -278,19 +318,25 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     if (in.frame == g_last_frame) {
         // A second scale pass in the same frame: the same picture again.
         ++g_window.repeats;
-        copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
+        copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target, out);
         return true;
     }
     const temporal::Fsr3Reset reset = temporal::fsr3_reset(g_history, in.frame, in.reset, false);
     if (reset != temporal::Fsr3Reset::None) {
         ++g_window.resets;
         static temporal::Fsr3Reset said = temporal::Fsr3Reset::None;
-        static std::uint64_t said_at = 0;
-        // Each kind once, then at most every 600 flips (cuts repeat during loads).
+        static std::uint64_t said_at = 0, since = 0;
+        // Each kind once, then at most every 600 flips (cuts repeat during
+        // loads), with how many there were in between: test1's lines every
+        // 601 flips were this throttle over a reset every frame.
         if (reset != said || in.frame > said_at + 600) {
+            host_log("fsr3: history reset at flip %llu: %s (%llu resets since the last line)", static_cast<unsigned long long>(in.frame),
+                     temporal::fsr3_reset_name(reset), static_cast<unsigned long long>(since));
             said = reset;
             said_at = in.frame;
-            host_log("fsr3: history reset at flip %llu: %s", static_cast<unsigned long long>(in.frame), temporal::fsr3_reset_name(reset));
+            since = 0;
+        } else {
+            ++since;
         }
     }
     Fsr3Frame fr;
@@ -329,7 +375,7 @@ bool fsr3_scale_pass_locked(RtImage* target) {
         return fall_back(Fallback::Dispatch);
     }
     const std::int32_t copy_slot = pass_timer_begin_locked(cmd, TimedPass::Copy);
-    copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
+    copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target, out);
     pass_timer_end_locked(cmd, copy_slot);
     pass_timer_upscaler_is_fsr4(false);
     g_last_frame = in.frame;
@@ -337,10 +383,16 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     if (g_last_fallback != Fallback::None) {
         if (g_last_fallback != Fallback::kCount) host_log("fsr3: upscaling again at flip %llu", static_cast<unsigned long long>(in.frame));
         else
-            host_log("fsr3: first FSR 3.1 frame at flip %llu: scene %ux%u -> %ux%u, jitter %u phases, reactive mask %s, sharpening %s %.1f",
-                     static_cast<unsigned long long>(in.frame), in.render_w, in.render_h, target->width, target->height, in.jitter_phases,
-                     fr.reactive.image ? "on" : hs.upscale_reactive ? "on (none this frame)" : "off", fr.sharpen ? "on" : "off",
+        {
+            host_log("fsr3: first FSR 3.1 frame at flip %llu: scene %ux%u -> %ux%u at %u,%u in a %ux%u target, jitter %u phases, reactive mask %s, sharpening %s %.1f",
+                     static_cast<unsigned long long>(in.frame), in.render_w, in.render_h, out.w, out.h, out.x, out.y, target->width, target->height,
+                     in.jitter_phases, fr.reactive.image ? "on" : hs.upscale_reactive ? "on (none this frame)" : "off", fr.sharpen ? "on" : "off",
                      static_cast<double>(fr.sharpness));
+            host_log("fsr3:   inputs (image, the region read): colour %ux%u (%ux%u), depth copy %ux%u (%ux%u), motion %ux%u (%ux%u), reactive %ux%u",
+                     in.color.width, in.color.height, in.color.used_w, in.color.used_h, in.depth_copy.width, in.depth_copy.height,
+                     in.depth_copy.used_w, in.depth_copy.used_h, in.motion.width, in.motion.height, in.motion.used_w, in.motion.used_h,
+                     fr.reactive.width, fr.reactive.height);
+        }
         g_last_fallback = Fallback::None;
     }
     std::uint64_t frames = g_window.dispatches;
@@ -379,7 +431,8 @@ std::string host_gpu_upscale_timing() { return host_gpu_pass_timing(); }
 #else  // !BBHOST_HAVE_FSR_VULKAN: upscaler_scene_pass() never asks for FSR 3.1
 
 namespace gpu {
-bool fsr3_scale_pass_locked(RtImage*) { return false; }
+bool fsr3_scale_pass_locked(RtImage*, const temporal::OutputRect&) { return false; }
+temporal::OutputRect fsr3_output_rect_locked(const RtImage*, const float*) { return {}; }
 std::string fsr3_report_locked() { return "fsr3: not built (BBHOST_FSR_VULKAN=OFF)"; }
 }  // namespace gpu
 std::string host_gpu_upscale_timing() { return std::string(); }

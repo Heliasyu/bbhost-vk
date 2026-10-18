@@ -27,6 +27,58 @@ inline bool fsr3_sizes_ok(const Fsr3Sizes& s) {
     return s.output_w <= 3 * s.render_w + 8 && s.output_h <= 3 * s.render_h + 8;
 }
 
+// Where the upscaled scene goes in the scale pass's target (test1's dark
+// screen): live resolution keeps the display buffers at the largest
+// Resolution entry (5120x2160), while the active output is the Resolution
+// setting's size (3840x2160). FSR's output size and the copy back are that
+// size, never the target's extent. The pass's viewport gives the corner
+// when it is that size too; a viewport of another size is reported
+// (`from` = ViewportDiffers) and the setting's size is used at 0,0. Without
+// a setting that fits, the viewport, else the target.
+struct OutputRect {
+    std::uint32_t x = 0, y = 0, w = 0, h = 0;
+    bool operator==(const OutputRect& o) const { return x == o.x && y == o.y && w == o.w && h == o.h; }
+    bool operator!=(const OutputRect& o) const { return !(*this == o); }
+};
+enum class OutputFrom : int { Viewport, Setting, ViewportDiffers, Target };
+inline const char* output_from_name(OutputFrom f) {
+    switch (f) {
+    case OutputFrom::Viewport: return "the Resolution setting, placed by the scale pass's viewport";
+    case OutputFrom::Setting: return "the Resolution setting";
+    case OutputFrom::ViewportDiffers: return "the Resolution setting; the scale pass's viewport is another size";
+    case OutputFrom::Target: return "the target's extent";
+    }
+    return "?";
+}
+// vp_*: the pass's viewport in pixels (a flipped one's negative height is
+// taken as its absolute value); 0 width or height: none.
+inline OutputRect fsr3_output_rect(std::uint32_t target_w, std::uint32_t target_h, float vp_x, float vp_y, float vp_w, float vp_h,
+                                   std::uint32_t active_w, std::uint32_t active_h, OutputFrom* from = nullptr) {
+    if (vp_h < 0.0f) {
+        vp_y += vp_h;
+        vp_h = -vp_h;
+    }
+    const auto round = [](float v) { return v <= 0.0f ? 0u : static_cast<std::uint32_t>(v + 0.5f); };
+    const std::uint32_t x = round(vp_x), y = round(vp_y), w = round(vp_w), h = round(vp_h);
+    const bool vp_ok = vp_x > -0.5f && vp_y > -0.5f && w >= 16 && h >= 16 && x + w <= target_w && y + h <= target_h;
+    OutputFrom f = OutputFrom::Target;
+    OutputRect r{0, 0, target_w, target_h};
+    if (active_w && active_h && active_w <= target_w && active_h <= target_h) {
+        if (vp_ok && w == active_w && h == active_h) {
+            f = OutputFrom::Viewport;
+            r = {x, y, w, h};
+        } else {
+            f = vp_ok || (w && h) ? OutputFrom::ViewportDiffers : OutputFrom::Setting;
+            r = {0, 0, active_w, active_h};
+        }
+    } else if (vp_ok) {
+        f = OutputFrom::Viewport;
+        r = {x, y, w, h};
+    }
+    if (from) *from = f;
+    return r;
+}
+
 // A context is made for exact sizes: FSR's resources are sized from its
 // maximum render size, so making it for the output size would hold 4K
 // resources at every preset. A preset or resolution change makes a new one
