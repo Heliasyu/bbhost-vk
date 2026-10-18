@@ -1,5 +1,24 @@
 # Changelog (bbhost-vk)
 
+## Unreleased (Phase 1: scene/UI resolution split, branch `phase-1-scene-ui-split`)
+With Upscaler Off, or Upscaling quality at Native AA (the default), nothing
+changes: the game's code and draws are stock. Display-only; online play,
+HDR and motion blur are untouched.
+- Upscaling quality now sets the 3D scene's render size when an upscaler is
+  on: output (the Resolution setting) / preset ratio, a multiple of 8 - e.g.
+  4K Quality renders the scene at 2560x1440. Post-processing, the Scaleform
+  UI and the display buffers stay at the output size, so menus and text are
+  sharp. Based on Kyo's Decoupled UI patch sites for 1.09, re-encoded for
+  any size, with host stubs instead of eboot code caves
+  (`src/engine/scene_split*`). `BBHOST_SCENE_SPLIT=0` turns it off.
+- The game's scene-to-UI scale pass (`ccbf44a6`) is drawn as a plain
+  bilinear copy while split (FSR 3.1 replaces it in Phase 3).
+- Changing Upscaler or Upscaling quality in F10 or the System menu resizes
+  the scene live, at the same point and delay as a resolution change.
+- Log lines for testing: `scene-split:` (render size, scale pass, site
+  bytes), `heap:` before/after each change, `yebis: restart N`.
+- `scene_split_test`: the site table against Kyo's patches at four sizes.
+
 ## Unreleased (Phase 0: groundwork, branch `phase-0-groundwork`)
 Nothing changes on screen or online in this phase: with every new setting at
 its default (and with Upscaler Off or FSR 1) the game is stock bbhost v0.2.18
