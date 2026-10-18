@@ -609,3 +609,30 @@ messages and bloodstains, a summon sign or bell).
   (on the build box at /workspace/bbhost-vk-builds/phase3/; not released).
 - Player's PC test: pending (TESTING.md, "Pending combined test session",
   parts D and E).
+
+## 2026-10-18 (Sun), Phase L: launcher mockups (branch `phase-L-launcher`)
+
+Base: `phase-3-fsr31`. Part 1 only: HTML mockups (1280x800, rendered with
+headless Chrome) for all ten tabs in docs/vk/mock/, in the Paleblood style
+of launcher-play.html / launcher-upscaling.html, waiting for the user's
+approval per tab. Each lists only what bbhost has today: the setup window
+(launcher.cpp), the F10 rows (options.cpp), the plugin settings the four
+bundled plugins declare, the patch manifests in patches/, and a few
+bbhost.toml keys ([video] width/height, [player] ime/name). Online &
+account shows exactly upstream's options (Live / Playtest / Custom, scheme,
+verify TLS, require account, Discord login, create, recover, website code,
+sign out) with placeholders; no real code is shown. The Upscaling mockup
+now shows what Phase 3 built; the FSR 4.1.1 card says it is not built yet.
+Part 2 (the shared ImGui theme and the tab skeleton) was not started: the
+user moved every effort to a first test release. The old launcher stays
+the only one.
+
+**FaceGen check added (TESTING.md part F).** shadPS4's exploded or
+stretched face vertices came from FaceGen's GPU writes that the CPU never
+read back. bbhost imports the game's GPU-visible memory into Vulkan, so
+GPU writes are what the CPU reads, and that does not happen. Phases 0-3
+leave that memory model alone: FSR 3.1, the motion, depth-copy and
+reactive passes read and write only bbhost's own images and the game's
+render targets. They do not touch guest buffers, the buffer shadow or
+the readback paths. Part F checks it on the PC: the mirror's appearance
+editor, a death and a lamp rest.

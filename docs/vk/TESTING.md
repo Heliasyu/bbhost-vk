@@ -112,7 +112,7 @@ Pass: every option is in `options-after.toml` with the value last set; the
 log has `upscaler:` lines for each change and no new errors; the picture looks
 identical to stock (Phase 0 changes nothing on screen).
 
-## Pending combined test session (Phase 0 to Phase 3 and online, ~65 min)
+## Pending combined test session (Phase 0 to Phase 3, online and FaceGen, ~70 min)
 The Phase 0, 1, 2 and 3 checks and the online check in one sitting, with
 the Phase 3 binary (`/workspace/bbhost-vk-builds/phase3/bbhost.bin` on the
 build box; check its SHA-256 against `bbhost.bin.sha256`). The Phase 2
@@ -243,3 +243,17 @@ networking; bbhost-vk does not touch them).
 Pass: sign-in, messages, bloodstains and the bell/sign behave as with
 upstream bbhost. If not, note it and run once with upstream's binary to
 compare.
+
+### F. FaceGen / vertex-explosion check (5 min), with FSR 3.1 at Quality
+shadPS4's "exploding vertices" on faces came from GPU writes (FaceGen)
+the CPU never read back. bbhost imports the game's GPU-visible memory into
+Vulkan, so it should not happen; this checks bbhost-vk's changes kept that.
+Optional: start with `BBHOST_GLITCH=1`.
+1. PC enhancements: **Hunter's Dream mirror** on (restart if it was off).
+2. In the Hunter's Dream workshop, use the mirror (Put on Disguise) to open
+   the appearance editor. For ~30 s change face shape, hair, and other face
+   sliders rapidly, rotating the preview; `bbtest clip`.
+3. Leave the editor, die once (anywhere), then rest at a lamp.
+
+Pass: no exploded or stretched vertices, no spikes, and no "veil" over
+faces (yours or NPCs') in the editor, after the death or at the lamp.
