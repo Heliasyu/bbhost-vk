@@ -23,6 +23,7 @@
 #include "hle/modules.h"
 #include "host/fsr3_upscaler.h"
 #include "host/fsr4_pass.h"
+#include "host/pass_timer.h"
 #include "host/gpu_internal.h"
 #include "host/options.h"
 #include "host/settings.h"
@@ -92,83 +93,6 @@ struct Stats {
 Stats g_window;
 
 // ---- the timer: timestamps around the dispatch, read once the submission retired ----
-constexpr std::uint32_t kTimerSlots = 32;
-VkQueryPool g_queries = VK_NULL_HANDLE;
-bool g_timer_tried = false;
-double g_tick_ns = 1.0;
-std::uint64_t g_tick_mask = ~0ull;
-std::uint64_t g_slot_frame[kTimerSlots] = {};  // the frame id each slot was written in; 0 free
-std::uint32_t g_slot_next = 0;
-double g_ms_sum = 0.0;
-int g_ms_n = 0;
-std::atomic<float> g_shown_ms{-1.0f};
-std::atomic<bool> g_shown_fsr4{false};  // the timed dispatches were FSR 4.1.1's
-std::chrono::steady_clock::time_point g_shown_at{};
-
-bool timer_ready_locked() {
-    if (g_timer_tried) return g_queries != VK_NULL_HANDLE;
-    g_timer_tried = true;
-    VkPhysicalDeviceProperties props{};
-    vkGetPhysicalDeviceProperties(g.phys, &props);
-    std::uint32_t n = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(g.phys, &n, nullptr);
-    std::vector<VkQueueFamilyProperties> qf(n);
-    vkGetPhysicalDeviceQueueFamilyProperties(g.phys, &n, qf.data());
-    const std::uint32_t bits = g.family < n ? qf[g.family].timestampValidBits : 0;
-    if (!bits || props.limits.timestampPeriod <= 0.0f) {
-        host_log("fsr3: no GPU timestamps on this queue: the dispatch is not timed");
-        return false;
-    }
-    g_tick_ns = props.limits.timestampPeriod;
-    g_tick_mask = bits >= 64 ? ~0ull : (1ull << bits) - 1;
-    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    qi.queryCount = 2 * kTimerSlots;
-    if (vkCreateQueryPool(g.device, &qi, nullptr, &g_queries) != VK_SUCCESS) g_queries = VK_NULL_HANDLE;
-    return g_queries != VK_NULL_HANDLE;
-}
-
-void timer_collect_locked() {
-    if (!g_queries) return;
-    for (std::uint32_t k = 0; k < kTimerSlots; ++k) {
-        if (!g_slot_frame[k] || g_slot_frame[k] > g.completed_submits) continue;
-        std::uint64_t t[2] = {};
-        if (vkGetQueryPoolResults(g.device, g_queries, 2 * k, 2, sizeof(t), t, sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
-            const double ms = static_cast<double>((t[1] - t[0]) & g_tick_mask) * g_tick_ns * 1e-6;
-            if (ms >= 0.0 && ms < 1000.0) {
-                g_ms_sum += ms;
-                ++g_ms_n;
-            }
-        }
-        g_slot_frame[k] = 0;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (g_ms_n && now - g_shown_at > std::chrono::milliseconds(500)) {
-        const double avg = g_ms_sum / g_ms_n;
-        g_shown_ms.store(static_cast<float>(avg));
-        static std::uint64_t logged = 0;
-        if (++logged % 120 == 1) host_log("fsr3: the dispatch takes %.2f ms on the GPU (%d frames)", avg, g_ms_n);
-        g_ms_sum = 0.0;
-        g_ms_n = 0;
-        g_shown_at = now;
-    }
-}
-
-
-// Timestamps around one dispatch (Show Upscaler GPU Time): the slot, or -1.
-std::int32_t timer_begin_locked(VkCommandBuffer cmd, bool on) {
-    if (!on || !timer_ready_locked() || g_slot_frame[g_slot_next % kTimerSlots]) return -1;
-    const auto slot = static_cast<std::int32_t>(g_slot_next++ % kTimerSlots);
-    vkCmdResetQueryPool(cmd, g_queries, 2 * static_cast<std::uint32_t>(slot), 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_queries, 2 * static_cast<std::uint32_t>(slot));
-    return slot;
-}
-void timer_end_locked(VkCommandBuffer cmd, std::int32_t slot, std::uint64_t frame_id) {
-    if (slot < 0) return;
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_queries, 2 * static_cast<std::uint32_t>(slot) + 1);
-    g_slot_frame[slot] = frame_id;
-}
-
 // ---- the copy into the target ----
 // Whether `format` (optimal tiling) can be a blit's destination, and RGBA16F its source.
 bool blit_ok(VkFormat format) {
@@ -251,7 +175,7 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     }();
     dig_locked();
     if (g_fsr) g_fsr->retire(g.completed_submits);
-    timer_collect_locked();
+    pass_timer_collect_locked();
     if (disabled) return fall_back(Fallback::Disabled);
     // The settings: a copy once they moved.
     static std::uint64_t serial = ~0ull;
@@ -290,20 +214,22 @@ bool fsr3_scale_pass_locked(RtImage* target) {
         p4.sharpen = sh4.enable;
         p4.sharpness = sh4.sharpness;
         p4.ultra_performance = hs.upscale_quality >= 4;
-        const std::int32_t slot4 = timer_begin_locked(cmd4, hs.debug_upscaler_time);
+        const std::int32_t slot4 = pass_timer_begin_locked(cmd4, TimedPass::Upscale);
         VkImage out4 = VK_NULL_HANDLE;
         bool fatal = false;
         std::string why4;
         const bool ok4 = fsr4_record_locked(cmd4, in, target->width, target->height, p4, &out4, &fatal, &why4);
-        timer_end_locked(cmd4, slot4, g.flushes + 1);
+        pass_timer_end_locked(cmd4, slot4);
         if (ok4) {
             if (p4.reset) ++g_window.resets;
+            const std::int32_t copy4 = pass_timer_begin_locked(cmd4, TimedPass::Copy);
             copy_output(cmd4, out4, VK_FORMAT_R16G16B16A16_SFLOAT, target->width, target->height, *target);
+            pass_timer_end_locked(cmd4, copy4);
             g_last_frame4 = in.frame;
             g_last_out4 = out4;
             ++g_window.dispatches;
             ++g_window.fsr4;
-            g_shown_fsr4.store(true);
+            pass_timer_upscaler_is_fsr4(true);
             if (const std::string d = fsr4_describe_locked(); d != g_fsr4_described) {
                 g_fsr4_described = d;
                 host_log("fsr4: FSR 4.1.1 replay, %s (scene %ux%u -> %ux%u)", d.c_str(), in.render_w, in.render_h, target->width, target->height);
@@ -392,18 +318,20 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     // Every input was written by commands before this point.
     barrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-    const std::int32_t slot = timer_begin_locked(cmd, hs.debug_upscaler_time);
+    const std::int32_t slot = pass_timer_begin_locked(cmd, TimedPass::Upscale);
     std::string why;
     const bool ok = g_fsr->record(fr, &why);
-    timer_end_locked(cmd, slot, fr.frame_id);
+    pass_timer_end_locked(cmd, slot);
     if (!ok) {
         static int said = 0;
         if (said++ < 8) host_log("fsr3: %s", why.c_str());
         g_history = {};  // the next dispatch starts over
         return fall_back(Fallback::Dispatch);
     }
+    const std::int32_t copy_slot = pass_timer_begin_locked(cmd, TimedPass::Copy);
     copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
-    g_shown_fsr4.store(false);
+    pass_timer_end_locked(cmd, copy_slot);
+    pass_timer_upscaler_is_fsr4(false);
     g_last_frame = in.frame;
     ++g_window.dispatches;
     if (g_last_fallback != Fallback::None) {
@@ -436,23 +364,17 @@ std::string fsr3_report_locked() {
     }
     char buf[640];
     std::snprintf(buf, sizeof(buf), "fsr3: %llu dispatches (%llu FSR 4.1.1, %llu copied, %llu blitted, %llu repeats), %llu resets, %llu contexts made, %.1f MiB; "
-                  "bilinear frames: %s; GPU %.2f ms",
+                  "bilinear frames: %s; GPU per pass: %s",
                   static_cast<unsigned long long>(w.dispatches), static_cast<unsigned long long>(w.fsr4), static_cast<unsigned long long>(w.copies), static_cast<unsigned long long>(w.blits),
                   static_cast<unsigned long long>(w.repeats), static_cast<unsigned long long>(w.resets), static_cast<unsigned long long>(w.contexts),
                   g_fsr ? static_cast<double>(g_fsr->memory_bytes()) / (1024.0 * 1024.0) : 0.0, falls.empty() ? "none" : falls.c_str(),
-                  static_cast<double>(g_shown_ms.load()));
+                  [] { const std::string t = host_gpu_pass_timing(); return t.empty() ? std::string("not timed") : t; }().c_str());
     return buf;
 }
 
 }  // namespace gpu
 
-std::string host_gpu_upscale_timing() {
-    const float ms = gpu::g_shown_ms.load();
-    if (ms < 0.0f) return std::string();
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%s %.2f ms", gpu::g_shown_fsr4.load() ? "FSR 4.1.1" : "FSR 3.1", static_cast<double>(ms));
-    return buf;
-}
+std::string host_gpu_upscale_timing() { return host_gpu_pass_timing(); }
 
 #else  // !BBHOST_HAVE_FSR_VULKAN: upscaler_scene_pass() never asks for FSR 3.1
 

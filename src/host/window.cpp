@@ -1974,9 +1974,10 @@ bool host_window_pump() {
     if (host_settings().debug_upscaler_time) {
         std::string line = g_pass_timer.ready() ? g_pass_timer.summary() : std::string();
         line = "GPU " + (line.empty() ? std::string("timing...") : line);
-        // The renderer's FSR 3.1 dispatch (host/fsr3_pass.h), when it runs.
+        // The renderer's own passes (host/pass_timer.h): motion vectors,
+        // reactive mask, opaque snapshot, the upscaler's dispatch, its copy.
         const std::string fsr = host_gpu_upscale_timing();
-        if (!fsr.empty()) line += "  " + fsr;
+        if (!fsr.empty()) line += "  |  scene: " + fsr;
         float dw = 0.0f;
         {
             std::lock_guard<std::mutex> ml(g_mouse_mu);
