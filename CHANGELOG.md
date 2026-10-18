@@ -15,6 +15,8 @@
   - New debug option: `BBHOST_FSR_DUMP=1` (or `[debug] fsr_dump = true` in bbhost.toml)
     writes one frame's FSR inputs, output and target as PNGs, with numbers. It runs at
     `bbtest mark`, with `fsr-dump.request`, and once by itself.
+  - The `upscaler: settings at start` line now computes the render size from the Resolution
+    setting, not a fixed 3840x2160.
 - **test2 fixes:**
   - FSR 3.1 and 4.1.1 now upscale to the active output (the Resolution setting) instead of
     the larger display buffers that live resolution keeps. test1 showed the scene in only

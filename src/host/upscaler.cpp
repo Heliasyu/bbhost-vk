@@ -2,6 +2,8 @@
 #include "host/upscaler.h"
 
 #include "engine/scene_split.h"
+#include "engine/scene_split_sites.h"
+#include "host/upscaler_presets.h"
 #include "host/options.h"
 #include "host/settings.h"
 #include "log.h"
@@ -22,12 +24,16 @@ std::atomic<int> g_kind{upscaler::kFsr1};
 
 void log_settings(const char* why) {
     const HostSettings s = host_settings();
-    std::uint32_t w = 0, h = 0;
-    upscaler::render_size(s.upscale_quality, 3840, 2160, &w, &h);
+    // test3: from the Resolution setting, as the split computes it (it said
+    // "from 3840x2160" whatever the Resolution, and rounded differently).
+    const std::uint32_t ow = s.res_width > 0 ? static_cast<std::uint32_t>(s.res_width) : 1920;
+    const std::uint32_t oh = s.res_height > 0 ? static_cast<std::uint32_t>(s.res_height) : 1080;
+    std::uint32_t w = ow, h = oh;
+    if (s.upscaler != upscaler::kOff) scene_split::render_size(upscaler::preset_ratio(s.upscale_quality), ow, oh, &w, &h);
     g_kind.store(s.upscaler, std::memory_order_relaxed);
-    host_log("upscaler: %s: %s, %s (%ux%u from 3840x2160), sharpness %.1f, reactive mask %s, jitter %s; motion vectors view %s, GPU time %s "
+    host_log("upscaler: %s: %s, %s (%ux%u from %ux%u), sharpness %.1f, reactive mask %s, jitter %s; motion vectors view %s, GPU time %s "
              "(a preset below Native AA renders the scene smaller: FSR 3.1 upscales it, otherwise bilinear; FSR 4.1.1 replays its assets when built, else FSR 3.1)",
-             why, upscaler::kind_name(s.upscaler), upscaler::preset_name(s.upscale_quality), w, h, static_cast<double>(s.upscale_sharpness),
+             why, upscaler::kind_name(s.upscaler), upscaler::preset_name(s.upscale_quality), w, h, ow, oh, static_cast<double>(s.upscale_sharpness),
              s.upscale_reactive ? "on" : "off", s.upscale_jitter ? "on" : "off", s.debug_motion_vectors ? "on" : "off", s.debug_upscaler_time ? "on" : "off");
 }
 
