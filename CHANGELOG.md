@@ -1,6 +1,27 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test10 (post-processing before the tonemap at render size; FSR moved to the chain's end):**
+  - With FSR 4.1.1 or 3.1 upscaling, the game's passes between the scale pass and its bloom
+    and tonemap now run at the render size. These are:
+    - the colour/fog pass (fbe7c4b6);
+    - the DoF downsample and blur (265a6d2d, e80526cc);
+    - the DoF composite (111fce32) and the pass on its result (bf368417);
+    - the motion blur's velocity (d3c8bb21) and the motion blur (e0305cef), or its one copy
+      while off.
+  - FSR runs where the next pass begins. That is chromatic aberration when it is on,
+    otherwise the bloom's downsample, then the tonemap. CA, bloom, tonemap, grain,
+    sharpening and the HUD/blur chain stay at 4K.
+  - Each moved pass draws into a render-size stand-in for its 4K target, with its viewport
+    and scissor scaled. The passes that read those targets read the stand-ins.
+  - **Per-frame fallback:** a frame whose scale pass has no upscaler inputs, or another
+    output, runs as test9. A dispatch, copy or clear on a stand-in's target closes the
+    window early.
+  - **Session fallback:** an upscaler failure at the chain's end turns the change off for the
+    session. `post-at-render:` log lines say what happened.
+  - `BBHOST_POST_AT_RENDER=0` brings back test9. `BBHOST_AB_SECONDS=<s>` now turns this off
+    and on (the motion blur skip stays on).
+  - The `ab:` lines and bbtest also count frames over 8.33 ms.
 - **test9 (fix: the motion blur skip now fires):**
   - test8 never skipped (t10: 0 pairs). The game's two draws are not a ping-pong: draw 1
     copies the DoF output S (0x165e30000) into B (0x169e00000), and draw 2 copies B into the

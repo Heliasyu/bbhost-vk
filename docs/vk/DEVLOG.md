@@ -1457,3 +1457,55 @@ policy (`temporal/mblur_skip.h`, `tests/mblur_skip_test.cpp`) proves it at run t
 **What makes the next build safe:** one in-game step that dumps those passes' constants and
 shader size queries (`BBHOST_POST_CHAIN_LOG` extended to their C# and the translator's
 `image_get_resinfo` use). That is cheap to add, and it can ride along with any run.
+
+## test10: the post chain before the tonemap at render size (2026-10-18)
+
+**t11 (test9):** the skip worked, +~1 fps (0.15 ms); 152 of 220 s under 120.
+- The "constants" t11 logged for #1-#10 are the user-data tables (descriptor words), not the
+  passes' constant values. The pixel-size question stays open. Each moved pass is judged by
+  its inputs instead.
+
+**What moves.** Between the scale pass and the first other program, these draw at render size:
+
+| Pass | Program | Risk |
+|---|---|---|
+| #1 colour/fog | fbe7c4b6 | medium: reads depth at 1080p, last frame's bloom, a LUT; a pixel offset would shift the fog |
+| #2-#3 DoF downsample and blur | 265a6d2d, e80526cc | low: their targets keep their own 2352x882 size; #2 now reads 1080p instead of 4K, so a 4K-texel kernel samples a little wider |
+| #4 DoF composite | 111fce32 | medium: a blend by depth/CoC; offsets would show as DoF edge halos |
+| #5 onto the DoF result | bf368417 | medium: reads depth and the DoF buffer |
+| #6 velocity | d3c8bb21 | none: already 1080p |
+| #7-#8 motion blur, or the skip's one copy | e0305cef | low: UV taps; velocity in 1080p units (the 1/1080 threshold) |
+
+**Mechanism:**
+- At the scale pass, A's stand-in gets the scene by a 1080p copy (~0.03 ms). The scale pass
+  draws nothing.
+- Draws of the moved programs into an output-size RGBA16F target are retargeted to its
+  stand-in, with the viewport scale/offset and the scissor scaled by render/output.
+- Reads of targets that have a stand-in, through an RGBA16F T#, bind the stand-in's view.
+- The window closes at the first draw of any other program. The other things that close it:
+  - a dispatch, copy or clear touching a stand-in's target;
+  - the next frame.
+- When it closes, FSR runs with the last stand-in as its colour input
+  (`fsr3_scale_pass_locked(..., color)`) and writes the real 4K target. Depth, motion,
+  jitter, reactive and exposure are unchanged. The input stays linear HDR.
+- An upscaler failure there copies the stand-in in once and turns the mode off for the
+  session.
+- **Not done:** an extra reactive mask over DoF and blur. FSR's own reactive mask from the
+  opaque snapshot is still used. DoF bokeh ghosting is a watch item.
+
+**Frame-time consistency** (the lights and fog flicker with uneven frame times):
+- Nothing new is made per frame. The three stand-ins are made once, on the first moved
+  frame or a resolution change, and the FSR context does not change.
+- The A/B flip only changes where FSR runs, from the next frame, with no allocation.
+- No CPU waits are added. The only extra GPU work is the 1080p copy.
+
+**Expected** (honest, from t8/t10 per-pass costs at 4K):
+- #1 0.30, #4 0.42, #5 ~0.15-0.2, the skip's copy 0.13 and #2's 4K read ~0.05: ~1.0-1.1 ms
+  today. About a quarter of that at 1080p, so ~0.75 ms saved, minus the 0.03 copy.
+- **Frame time:** 8.6 -> ~7.9 ms. Uncapped average ~125-127 fps, so the 120 cap holds most
+  of the time.
+- **Frames over 8.33 ms:** from ~60% (t10: 22715 of 37690) to perhaps 10-20%.
+- **1% low:** about 101 -> 108-114. The remaining lows are pacing jitter and the lamp and
+  fog spikes, not the average.
+- That is not the 7.5 ms target yet. The next candidates are #42-#53 at 4K: the tonemap
+  composite and the 0b0acf50 blur chain.

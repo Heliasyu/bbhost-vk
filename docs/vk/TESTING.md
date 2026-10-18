@@ -93,6 +93,29 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test10 checks (one run, ~6 min)
+
+Keep test9's `bbhost.bin` as `bbhost.bin.test9`. Use FSR 4.1.1 Performance, 4K, 120,
+sharpness 5/10, AA Auto, motion blur off, chromatic aberration as you have it, at the
+Cathedral lamp.
+
+1. `BBHOST_AB_SECONDS=30 ./bbtest start --capture t12-post-ab`. Stay 3 minutes with the
+   camera still. About every 30 s, run `./bbtest mark "lamp"`. The log's `ab: post at
+   render on/off` lines say which half each mark fell in.
+2. Look at the same things in the on and off halves:
+   - **DoF:** background blur in the same place and the same width. Not doubled, not
+     shifted, not only in a corner.
+   - **Fog and lamp glow:** in the same place, with no offset or seam.
+   - **Bloom size:** the same.
+   - Any quarter-size or shifted picture.
+   - `./bbtest mark "wrong: <what>"` at once if something is off.
+3. Turn motion blur on for 20 s and move the camera: `./bbtest mark "blur on"`. It should
+   still blur. Turn it off again.
+4. `./bbtest stop`. Send session.txt (`120 LOCK:`, `a/b ...` with frames over 8.33 ms per
+   side) and bbhost.log (`post-at-render:` lines).
+
+Fallback: `BBHOST_POST_AT_RENDER=0`.
+
 ## test9 checks (one run, ~5 min)
 
 Same as test8 (keep test8's `bbhost.bin` as `bbhost.bin.test8`): FSR 4.1.1 Performance,
