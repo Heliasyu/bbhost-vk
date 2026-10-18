@@ -296,7 +296,7 @@ struct Stats {
     std::uint64_t no_depth = 0, cuts = 0, reactive_passes = 0;
     // test3: where the scene constants came from, and what the draws bound.
     std::uint64_t buffers_seen = 0, gbuffer_draws = 0, max_colors_with_depth = 0, blocks_ps = 0, blocks_pointer = 0, blocks_other_size = 0;
-    std::uint64_t blocks_inside = 0, blocks_wrong_size = 0;
+    std::uint64_t blocks_inside = 0, blocks_wrong_size = 0, blocks_unsized = 0;
 };
 Stats g_stats, g_window;  // the run, and since the last summary
 temporal::Cut g_last_cut_logged = temporal::Cut::None;
@@ -404,9 +404,19 @@ void probe_buffer(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int ind
 }  // namespace
 
 void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes,
-                                    bool pointer) {
+                                    bool pointer, bool size_known) {
     if (!g_cfg.watching || !base) return;
     const auto* p = reinterpret_cast<const float*>(static_cast<std::uintptr_t>(base));
+    // test3's probe: the G-buffer draws' V#s mostly carry 0 records, so their
+    // size was 0 and the scene block was never looked at; the camera came
+    // only from the odd pipeline whose V# said 864 bytes (found 1 frame in
+    // 2-3). Now such a V# is read as far as the shader reads it, and a block
+    // head there on to the whole block when that memory is mapped.
+    if (!size_known && !pointer && bytes >= 24 && bytes < temporal::kSceneConstantBytes && temporal::scene_constants_head(p) &&
+        hle_kernel_va_mapped(base, temporal::kSceneConstantBytes)) {
+        bytes = temporal::kSceneConstantBytes;
+        ++g_window.blocks_unsized;
+    }
     if (stage == 1 && !pointer && index == temporal::velocity_scale_buffer(orb_ps) && bytes >= 8) {
         std::memcpy(g_velocity_scale, p, 8);
         g_velocity_scale_ok = std::isfinite(g_velocity_scale[0]) && std::isfinite(g_velocity_scale[1]);

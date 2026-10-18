@@ -8112,8 +8112,11 @@ void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t
             // A pointer has no V#: the shader's own extent (test2: the scene
             // constants may come this way).
             const std::uint32_t vstride = (words[1] >> 16) & 0x3fff;
-            const std::uint64_t vbytes = b.pointer ? static_cast<std::uint64_t>(bytes) : static_cast<std::uint64_t>(words[2]) * (vstride ? vstride : 1);
-            temporal_observe_buffer_locked(t_temporal_stage, t_temporal_vs, t_temporal_ps, static_cast<int>(i), base, vbytes, b.pointer);
+            // test3: a V# with no records (most GX token draws'): the shader's extent.
+            const bool known = b.pointer || words[2] != 0;
+            const std::uint64_t vbytes = !known || b.pointer ? static_cast<std::uint64_t>(bytes)
+                                                             : static_cast<std::uint64_t>(words[2]) * (vstride ? vstride : 1);
+            temporal_observe_buffer_locked(t_temporal_stage, t_temporal_vs, t_temporal_ps, static_cast<int>(i), base, vbytes, b.pointer, known);
         }
         int outcome = !base ? kNoBase : (base & 3) || !shape ? kUnaligned : kUnmapped;
         // Past the longest binding the range takes the page table: no one buffer need hold it.

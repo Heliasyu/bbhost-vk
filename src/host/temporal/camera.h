@@ -152,6 +152,15 @@ inline bool parse_scene_constants(const float* f, std::size_t count, SceneCamera
 // - not which size (test2 required the render or output size and found
 // nothing). Cheap: what every candidate buffer is tested with before the
 // full parse. NaN fails every comparison.
+// The signature's head alone: [0], [1], [4], [5] (24 bytes), for a V# that
+// carries no size (test3: most of the GX token draws' V#s have 0 records).
+inline bool scene_constants_head(const float* f) {
+    if (!f) return false;
+    const float far = f[0];
+    if (!(far >= 100.0f && far <= 100000.0f) || !(std::fabs(f[1] * far - 1.0f) <= 1e-3f)) return false;
+    return f[4] >= 64.0f && f[4] <= 16384.0f && f[5] >= 64.0f && f[5] <= 16384.0f;
+}
+
 inline bool scene_constants_signature(const float* f, std::size_t count) {
     if (!f || count < 192) return false;
     const float far = f[0];

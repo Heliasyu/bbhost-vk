@@ -42,8 +42,11 @@ void temporal_draw_targets_locked(int color_targets, bool depth);
 // draws' packing scale. `orb_vs` / `orb_ps` are the shaders' hashes.
 // `pointer`: bound by address, not a V# (`bytes` is the shader's extent): only
 // looked at for the scene constants.
+// `size_known`: false for a V# with no records (test3: most GX token draws'),
+// when `bytes` is the shader's extent only - a scene block's head there is
+// read on to its 864 bytes when the memory is mapped.
 void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes,
-                                    bool pointer = false);
+                                    bool pointer = false, bool size_known = true);
 
 // Per draw, with its viewport about to be set: the jitter to add to the
 // viewport's x and y (render pixels), when the draw is one of the scene's
