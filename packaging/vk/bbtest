@@ -249,7 +249,7 @@ cmd_start() {
     local mh=${BBTEST_MANGOHUD:-1}
     if [ "$mh" = 1 ]; then
         export MANGOHUD=1
-        export MANGOHUD_CONFIG="read_cfg,output_folder=$s/mangohud,autostart_log=1,log_interval=0${MANGOHUD_CONFIG:+,$MANGOHUD_CONFIG}"
+        export MANGOHUD_CONFIG="read_cfg,output_folder=$s/mangohud,autostart_log=1,log_interval=0,log_duration=0${MANGOHUD_CONFIG:+,$MANGOHUD_CONFIG}"
     elif [ "$mh" = 0 ]; then
         unset MANGOHUD
     fi
@@ -326,7 +326,16 @@ finish() {
     rmdir "$s/clips" "$s/frames" "$s/mangohud" 2> /dev/null || true
     {
         echo "stopped:  $(now)"
-        echo "errors in the log: $(grep -ciE 'error|fatal|crash|panic|lost' "$s/bbhost.log" 2> /dev/null || true)"
+        # test6: the words alone matched 65 benign lines in test5 (the
+        # occlusion report's "0 lost", "keyboard focus lost", the DL_PANIC
+        # patch, MangoHud's own power/battery notes); those are left out.
+        echo "errors in the log: $(grep -iE 'error|fatal|crash|panic|lost' "$s/bbhost.log" 2> /dev/null |
+            grep -vcE '; 0 lost\)|keyboard focus lost|patched DL_PANIC|error paths would have dropped|\[MANGOHUD\] \[error\] \[(cpu|battery)\.cpp' || true)"
+        # The FPS shown, in game only: the presenter's 300-frame lines after
+        # the first in-game frame (loading screens and menus left out).
+        echo "in-game fps shown: $(awk '/world: the first in-game frame/ { on = 1; next }
+            on && /present: 300 frames in [0-9]+ ms/ { for (i = 1; i <= NF; i++) if ($i == "in") { ms += $(i + 1); n++; break } }
+            END { if (n) printf "%.1f over %.0f s (%d windows of 300)", 300 * n / (ms / 1000), ms / 1000, n; else printf "none" }' "$s/bbhost.log" 2> /dev/null)"
         echo "marks:    $(grep -c ' MARK ' "$s/marks.log" 2> /dev/null || true)"
         echo "shots:    $(find "$s/shots" -type f 2> /dev/null | wc -l)"
         echo "clips:    $(find "$s/clips" -type f -name '*.mp4' 2> /dev/null | wc -l)"

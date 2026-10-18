@@ -133,10 +133,21 @@ void pass_timer_collect_locked() {
         for (int p = 0; p < kPasses; ++p) g_sum[p] = 0.0, g_n[p] = 0;
     }
     if (now - g_logged_at >= std::chrono::seconds(10)) {
+        // The frames counted are the upscaled ones: the game's, loading screens
+        // included, and those the presenter later drops for a newer one. test4
+        // read ~119 of them a second while 112 were shown, so this is not the
+        // FPS; `present: 300 frames in ... (N fps shown)` is. The window is also
+        // the time since the last line, not exactly 10 s.
+        const double secs = std::chrono::duration<double>(now - g_logged_at).count();
+        const bool first = g_logged_at == std::chrono::steady_clock::time_point{};
         g_logged_at = now;
         int frames = 0;
         for (int p = 0; p < kPasses; ++p) frames = g_log_n[p] > frames ? g_log_n[p] : frames;
-        if (frames) host_log("pass-timer: GPU per pass over the last 10 s (%d frames): %s", frames, line(g_log_sum, g_log_n, ", ").c_str());
+        if (frames && !first)
+            host_log("pass-timer: GPU per pass over the last %.1f s (%d upscaled frames, %.1f a second - not the FPS shown): %s", secs, frames,
+                     frames / secs, line(g_log_sum, g_log_n, ", ").c_str());
+        else if (frames)
+            host_log("pass-timer: GPU per pass over the first upscaled frames (%d): %s", frames, line(g_log_sum, g_log_n, ", ").c_str());
         for (int p = 0; p < kPasses; ++p) g_log_sum[p] = 0.0, g_log_n[p] = 0;
     }
 }

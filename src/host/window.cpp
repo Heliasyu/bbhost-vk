@@ -1166,9 +1166,10 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     ps.cpu_ns += host_thread_cpu_ns() - cpu_enter;
     if (++presents % 300 == 0) {
         const auto now = std::chrono::steady_clock::now();
-        host_log("present: 300 frames in %lld ms (display wait %llu ms, work %llu ms: submit queued work %llu, lock wait %llu, blit %llu, "
+        const long long win_ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count());
+        host_log("present: 300 frames in %lld ms (%.1f fps shown; display wait %llu ms, work %llu ms: submit queued work %llu, lock wait %llu, blit %llu, "
                  "queue submit %llu, present %llu), %llu dropped so far",
-                 static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count()),
+                 win_ms, win_ms > 0 ? 300000.0 / static_cast<double>(win_ms) : 0.0,
                  static_cast<unsigned long long>(wait_us / 1000), static_cast<unsigned long long>(work_us / 1000),
                  static_cast<unsigned long long>(flush_us / 1000), static_cast<unsigned long long>(lock_us / 1000),
                  static_cast<unsigned long long>(blit_us / 1000), static_cast<unsigned long long>(submit_us / 1000),
