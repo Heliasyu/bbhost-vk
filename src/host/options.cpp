@@ -248,15 +248,16 @@ Setting g_set[kSettingCount] = {
      "Requires a restart. Two invaders in Mensis, Mergo's Loft, the Frontier and the DLC; all players need it.", true},
     // bbhost-vk's upscaler (host/upscaler.h). FSR 1 is what bbhost always did:
     // the presenter's EASU + RCAS when the game renders smaller than the
-    // window (host/fsr.cpp). Phase 0 keeps these to the file and the menus.
+    // window (host/fsr.cpp). Phase 1: with an upscaler on, the quality renders the
+    // scene smaller than the output (engine/scene_split.h).
     {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"}, 1,
-     "FSR 1 is bbhost's own. FSR 3.1 and FSR 4.1.1 are temporal and come in later builds: for now every choice draws as FSR 1.",
+     "FSR 1 is bbhost's own. FSR 3.1 and FSR 4.1.1 are temporal and come in later builds. Any choice but Off lets Upscaling quality render the 3D scene smaller (a bilinear copy for now).",
      false},
     // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
     {"upscale_quality", "Upscaling quality",
      {"Native AA", "Quality", "Balanced", "Performance", "Ultra Performance"}, 0,
      "Render scale for FSR 3.1 / 4.1.1: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. "
-     "Not used yet: the Resolution setting still decides.",
+     "The 3D scene renders at this share of the Resolution setting; menus, text and post-processing stay at the Resolution. Native AA (and Upscaler Off) is stock.",
      false},
     // 0..1 like FSR 3's sharpness; 0.8 is RCAS at 0.2 stops, what FSR 1 uses.
     {"upscale_sharpness", "Upscaling sharpness", {"0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"}, 8,

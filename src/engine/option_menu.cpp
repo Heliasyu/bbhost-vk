@@ -1877,18 +1877,18 @@ void option_menu_poll() {
     push(g_cam_mouse_auto_rotation);
     for (auto& t : g_toggles) push(t);
     for (auto& t : g_enhance) push(t);
-    // bbhost-vk's PC Upscaling and Upscaling Quality (stored only, Phase 0).
+    // bbhost-vk's PC Upscaling and Upscaling Quality (Phase 1: the quality sizes the scene).
     for (auto& t : g_up_toggles) push(t);
     push(g_up_sharpness);
     if (g_upscaler != g_upscaler_last) {
         g_upscaler_last = g_upscaler;
         host_opt_set_index("upscaler", g_upscaler);
-        host_log("pc-options: upscaler entry %d from the System menu (not used yet)", g_upscaler);
+        host_log("pc-options: upscaler entry %d from the System menu", g_upscaler);
     }
     if (g_up_quality != g_up_quality_last) {
         g_up_quality_last = g_up_quality;
         host_opt_set_index("upscale_quality", g_up_quality);
-        host_log("pc-options: upscaling quality entry %d from the System menu (not used yet)", g_up_quality);
+        host_log("pc-options: upscaling quality entry %d from the System menu", g_up_quality);
     }
     // Steam Deck: the frame rate sets the frame cap, the resolution and the
     // model detail at once, and the model detail row then shows what it set -

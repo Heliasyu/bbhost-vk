@@ -188,8 +188,9 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     bool debug_camera = host_opt_get("debug_camera");
     int frame_cap = host_opt_frame_cap();
     int resolution = host_opt_resolution_index();
-    // bbhost-vk's upscaler and its quality (host/upscaler_presets.h): stored
-    // only in Phase 0; the picture is FSR 1 at the render resolution.
+    // bbhost-vk's upscaler and its quality (host/upscaler_presets.h). Phase 1:
+    // the quality sets the scene's render size (engine/scene_split.h); the
+    // presenter is still FSR 1 at the render resolution.
     int upscaler = std::clamp(host_opt_index("upscaler"), 0, 3);
     int upscale_quality = std::clamp(host_opt_index("upscale_quality"), 0, 4);
     int upscale_sharpness = std::clamp(host_opt_index("upscale_sharpness"), 0, 10);  // tenths
@@ -643,13 +644,13 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
         ImGui::Combo("Upscaler", &upscaler, kUpscalers, 4);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk: saved, not used yet. Every choice is still FSR 1 at the render resolution, as stock bbhost.");
+            ImGui::SetTooltip("bbhost-vk: Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (a bilinear copy for now; FSR 3.1 / 4.1.1 come later).");
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kQualities[] = {"Native AA (100%)", "Quality (67%)", "Balanced (58%)", "Performance (50%)",
                                                  "Ultra Performance (33%)"};
         ImGui::Combo("Upscaling quality", &upscale_quality, kQualities, 5);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk: the render scale the upscaler will use. Saved, not used yet: the render resolution still decides.");
+            ImGui::SetTooltip("bbhost-vk: the 3D scene's render scale, with the menus, text and post-processing kept at the render resolution. Native AA is stock. Not used while Upscaler is Off.");
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::SliderInt("Upscaler sharpness", &upscale_sharpness, 0, 10, "%d / 10");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: saved, not used yet. 8 is stock bbhost's FSR 1 sharpening.");
