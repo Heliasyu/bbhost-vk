@@ -29,6 +29,20 @@ bool upscaler_fsr3_linked();
 // choices once per change, so a test session's log says what was picked.
 void upscaler_note_settings();
 
+// Who does the game's scene-to-output pass - the one pass that scales the
+// HDR scene up to the output size before post-processing (pixel shader
+// ccbf44a6, IFreemz's "decoupled UI" finding; engine/scene_split.h). The
+// renderer asks per draw of that pass; each backend is one value here, so
+// FSR 3.1 (Phase 3), FSR 4.1.1 (Phase 4) and FSR 4 INT8 / DLSS / XeSS
+// (Phase 7) plug in at the same point.
+enum class ScenePass : int {
+    Game = 0,      // the game's own pass as it is: the scene is not split (stock)
+    Bilinear = 1,  // Phase 1: the same pass with a bilinear, clamped sampler
+};
+// Any thread; cheap (one atomic load).
+ScenePass upscaler_scene_pass();
+const char* upscaler_scene_pass_name(ScenePass p);
+
 // The motion-vector view (settings debug_motion_vectors). A hook the
 // presenter calls each frame it is on; it draws nothing until Phase 2 makes
 // motion vectors, and logs that once.

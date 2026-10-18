@@ -6,11 +6,14 @@
 #include "core/image_file.h"
 #include "core/portable.h"
 #include "engine/gx_resources.h"
+#include "engine/live_resolution.h"
+#include "engine/scene_split_sites.h"
 #include "engine/gx_state.h"
 #include "host/gpu_internal.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
+#include "host/upscaler.h"
 
 #include "host/draw_capture.h"
 #include "gcn/container.h"
@@ -248,6 +251,9 @@ struct GfxPipeline {
     // 1 for d3ca03f3+111fce32, 2 for 7d668276+e0305cef (the YEBIS probes in
     // draw_impl, which log once), 0 for the rest; -1 until a draw asks.
     std::int8_t yebis_probe = -1;
+    // bbhost-vk: 1 when the pixel shader is the game's scene-to-output scale
+    // pass (ccbf44a6, host/upscaler.h ScenePass), 0 not, -1 until a draw asks.
+    std::int8_t scale_pass = -1;
     // The optimized relink, queued at the pipeline's first draw
     // (queue_library_relink): its libraries, and the vertex library's
     // specialization - the elements' formats, the state it was made with.
@@ -812,7 +818,10 @@ std::atomic<int> g_order_logs{0};
 DrawRec g_draw_recs[kDrawRecs];
 std::uint64_t g_draw_rec_next = 0;
 std::uint32_t g_draw_dummies = 0;
-thread_local const char* t_draw_pipeline = nullptr;  // the draw being resolved, for the glitch hunt's lines
+thread_local const char* t_draw_pipeline = nullptr;
+// bbhost-vk: the stage being prefetched is the scale pass drawn as a bilinear
+// copy (host/upscaler.h): its samplers' S# made bilinear and clamped.
+thread_local bool t_bilinear_samplers = false;  // the draw being resolved, for the glitch hunt's lines
 // The draw being resolved came from a Scaleform (or wrapper) token: its
 // constant buffers are bound from a copy taken now (resolve_stage_buffers).
 thread_local bool t_snapshot_cbs = false;
@@ -7556,6 +7565,26 @@ bool key_stage_matches(const gcn::TranslateResult& meta, const gcn::TranslateRes
     return true;
 }
 
+// The first scale-pass draw after each change of the scene's size, and one
+// line every 3000 flips while split, so a test session's log shows it ran.
+void note_scale_pass(const std::string& pipeline) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    static std::uint64_t last_size = 0, last_flip = 0, draws = 0;
+    unsigned sw = 0, sh = 0, ow = 0, oh = 0;
+    live_resolution_scene(&sw, &sh);
+    live_resolution_current(&ow, &oh);
+    const std::uint64_t size = static_cast<std::uint64_t>(sw) << 32 | sh, flip = hle_video_flip_count();
+    ++draws;
+    if (size != last_size || flip >= last_flip + 3000) {
+        host_log("scene-split: scale pass %s drawn %s, scene %ux%u -> output %ux%u (%llu draws since the last line)", pipeline.c_str(),
+                 upscaler_scene_pass_name(upscaler_scene_pass()), sw, sh, ow, oh, static_cast<unsigned long long>(draws));
+        last_size = size;
+        last_flip = flip;
+        draws = 0;
+    }
+}
+
 void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t* stage_user, StageImages& out,
                            const GxStageRecords* gx, const KeyStage* resolved) {
     out.images.resize(meta.images.size());
@@ -7620,6 +7649,7 @@ void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t
         } else {
             ok = resolve_binding(b.path, stage_user, gx, 4, w);
         }
+        if (ok && t_bilinear_samplers) scene_split::bilinear_copy_sampler(w);
         out.samplers[k] = ok ? sampler_for(w, b.compare) : VK_NULL_HANDLE;
     }
 }
@@ -11681,7 +11711,14 @@ static bool draw_impl(const GpuDraw& d) {
             }
         }
         prefetch_stage_images(pl.vs.meta(), s.vs_user, stage_images[0], gx_stage[0], pl.paths_match[0] ? &key_stages[0] : nullptr);
+        if (pl.scale_pass < 0) {
+            const std::size_t plus = pl.name.find('+');
+            pl.scale_pass = plus != std::string::npos && pl.name.compare(plus + 1, 8, "ccbf44a6") == 0 ? 1 : 0;
+        }
+        t_bilinear_samplers = pl.scale_pass == 1 && upscaler_scene_pass() == ScenePass::Bilinear;
+        if (t_bilinear_samplers) note_scale_pass(pl.name);
         prefetch_stage_images(pl.ps.meta(), s.ps_user, stage_images[1], gx_stage[1], pl.paths_match[1] ? &key_stages[1] : nullptr);
+        t_bilinear_samplers = false;
         t_resolve_site = kSiteBuffers;
     }
     draw_stamp.to(kRenderCostPrefetch);

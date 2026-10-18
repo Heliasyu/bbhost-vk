@@ -1,6 +1,7 @@
 // bbhost-vk's upscaler settings and their scaffolding (host/upscaler.h).
 #include "host/upscaler.h"
 
+#include "engine/scene_split.h"
 #include "host/options.h"
 #include "host/settings.h"
 #include "log.h"
@@ -21,7 +22,7 @@ void log_settings(const char* why) {
     std::uint32_t w = 0, h = 0;
     upscaler::render_size(s.upscale_quality, 3840, 2160, &w, &h);
     host_log("upscaler: %s: %s, %s (%ux%u from 3840x2160), sharpness %.1f; motion vectors view %s, GPU time %s "
-             "(Phase 0: the picture is FSR 1 at the Resolution setting, as stock bbhost)",
+             "(Phase 1: a preset below Native AA renders the scene smaller, scaled up bilinear; the window still gets FSR 1)",
              why, upscaler::kind_name(s.upscaler), upscaler::preset_name(s.upscale_quality), w, h, static_cast<double>(s.upscale_sharpness),
              s.debug_motion_vectors ? "on" : "off", s.debug_upscaler_time ? "on" : "off");
 }
@@ -57,4 +58,18 @@ void upscaler_debug_motion_vectors_hook() {
     // toggle is only remembered.
     static std::atomic<bool> said{false};
     if (!said.exchange(true)) host_log("upscaler: the motion-vector view is on, but this build has no motion vectors yet (Phase 2)");
+}
+
+ScenePass upscaler_scene_pass() {
+    // Phase 1: the split always takes the bilinear copy, whichever upscaler
+    // is chosen; Phase 3 adds FSR 3.1 here.
+    return scene_split_active() ? ScenePass::Bilinear : ScenePass::Game;
+}
+
+const char* upscaler_scene_pass_name(ScenePass p) {
+    switch (p) {
+    case ScenePass::Game: return "the game's own";
+    case ScenePass::Bilinear: return "bilinear";
+    }
+    return "?";
 }
