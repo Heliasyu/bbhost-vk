@@ -5,19 +5,23 @@
 //
 // With the setting off, shader_patch.cpp makes the blur's compare always
 // false, so each draw writes its colour input through unchanged: draw 1
-// copies A into B, draw 2 copies B back into A (ping-pong). Leaving both out
-// gives the same A exactly, as long as nothing else uses B - the copy in
-// between is the only thing that would differ (B keeps an older picture).
+// copies S into B, draw 2 copies B into D. In the game (t10's post-chain
+// log) S is the depth of field's output 0x165e30000, B 0x169e00000 and D the
+// chain's colour 0x161e60000. Leaving both out and copying S into D gives
+// the same D exactly, as long as nothing else uses B (it keeps an older
+// picture). One copy instead of two draws; when S is D (a ping-pong), not
+// even that. test8 only took S == D and so never skipped (t10: 0 pairs).
 // That is what this policy proves before it skips anything, and keeps
 // checking while it does:
 //   - learning: a frame counts only if its motion-blur draws were exactly
-//     (A -> B, B -> A), with no blending, and nothing else read or wrote B
+//     (S -> B, B -> D), with no blending, and nothing else read or wrote B
 //     that frame (draws, dispatches, copies; render.cpp reports them).
-//     kLearnFrames such frames in a row, the same A and B, arm it.
-//   - armed: draw 1 matching (A -> B) is skipped and remembered; draw 2
-//     matching (B -> A) is skipped too. Anything else first - another draw,
-//     a dispatch, a copy, or a second draw that does not match - makes draw 1
-//     happen after all (Materialize: the caller copies A into B, which is
+//     kLearnFrames such frames in a row, the same S, B and D, arm it.
+//   - armed: draw 1 matching (S -> B) is skipped and remembered; draw 2
+//     matching (B -> D) is skipped too, and the caller copies S into D
+//     (SkipCopy; Skip when S is D). Anything else first - another draw, a
+//     dispatch, a copy, or a second draw that does not match - makes draw 1
+//     happen after all (Materialize: the caller copies S into B, which is
 //     what the patched draw writes) and disarms.
 //   - B read or written by anything else while armed: disarm (a trip,
 //     logged) and learn again. A new size, new targets or the setting on: the
@@ -32,7 +36,7 @@ class MotionBlurSkip {
 public:
     static constexpr int kLearnFrames = 120;
 
-    enum class Action { Draw, Skip, MaterializeThenDraw };
+    enum class Action { Draw, Skip, SkipCopy, MaterializeThenDraw };
 
     // One of the motion blur's draws: its colour input and target, whether it
     // blends, and the flip it is in. `eligible`: the skip is on, motion blur
@@ -61,10 +65,10 @@ public:
             pending_ = true;
             return Action::Skip;
         }
-        if (idx == 1 && pending_ && src == b_ && dst == a_) {
+        if (idx == 1 && pending_ && src == b_ && dst == d_) {
             pending_ = false;
             ++pairs_skipped_;
-            return Action::Skip;
+            return d_ == a_ ? Action::Skip : Action::SkipCopy;
         }
         return disarm_pending(Action::Draw);
     }
@@ -86,8 +90,9 @@ public:
         if (armed_) trip();
     }
 
-    std::uint64_t a() const { return a_; }
-    std::uint64_t b() const { return b_; }
+    std::uint64_t a() const { return a_; }  // S, draw 1's input
+    std::uint64_t b() const { return b_; }  // B, the scratch between the draws
+    std::uint64_t d() const { return d_; }  // D, draw 2's target
     // The scratch target the policy watches (learning or armed), else 0.
     std::uint64_t watched() const { return b_; }
     bool armed() const { return armed_; }
@@ -97,6 +102,8 @@ public:
     std::uint64_t materialized() const { return materialized_; }
     std::uint64_t arms() const { return arms_; }
     int good_frames() const { return good_; }
+    // Why the last frame judged did not count ("" when it did).
+    const char* last_reject() const { return reject_; }
 
 private:
     // True: the last frame ended with draw 1 still held back.
@@ -114,16 +121,20 @@ private:
     // The finished frame: was it the pattern?
     void judge() {
         const bool ok = frame_draws_ == 2 && !frame_blends_ && !frame_ineligible_ && !frame_touched_ && d1_src_ && d1_dst_ &&
-                        d1_src_ != d1_dst_ && d2_src_ == d1_dst_ && d2_dst_ == d1_src_;
+                        d1_src_ != d1_dst_ && d2_src_ == d1_dst_ && d2_dst_ && d2_dst_ != d1_dst_;
+        reject_ = frame_draws_ != 2 ? "not two draws" : frame_blends_ ? "blending" : frame_ineligible_ ? "not eligible (blur on, or no single colour input)"
+                  : frame_touched_ ? "B used elsewhere" : !(d1_src_ && d1_dst_ && d1_src_ != d1_dst_ && d2_src_ == d1_dst_ && d2_dst_ && d2_dst_ != d1_dst_) ? "not S->B, B->D"
+                  : "";
         if (!ok) {
             if (armed_) trip();
             good_ = 0;
             return;
         }
-        if (d1_src_ != a_ || d1_dst_ != b_) {
+        if (d1_src_ != a_ || d1_dst_ != b_ || d2_dst_ != d_) {
             if (armed_) trip();
             a_ = d1_src_;
             b_ = d1_dst_;
+            d_ = d2_dst_;
             good_ = 1;
             return;
         }
@@ -152,7 +163,8 @@ private:
     int frame_draws_ = 0;
     bool frame_blends_ = false, frame_ineligible_ = false, frame_touched_ = false;
     std::uint64_t d1_src_ = 0, d1_dst_ = 0, d2_src_ = 0, d2_dst_ = 0;
-    std::uint64_t a_ = 0, b_ = 0;
+    std::uint64_t a_ = 0, b_ = 0, d_ = 0;
+    const char* reject_ = "";
     int good_ = 0;
     bool armed_ = false, pending_ = false;
     std::uint64_t pairs_skipped_ = 0, trips_ = 0, materialized_ = 0, arms_ = 0;

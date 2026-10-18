@@ -75,6 +75,29 @@ int main() {
         p.b_touched(kB);
         CHECK(!p.armed() && p.trips() == 1);
     }
+    {  // The game's chain (t10): S -> B, B -> D. Skip, then the caller copies S into D.
+        MotionBlurSkip p;
+        std::uint64_t f = 1;
+        for (; f <= MotionBlurSkip::kLearnFrames; ++f) {
+            CHECK(p.draw(f, kC, kB, false, true) == A::Draw);
+            CHECK(p.draw(f, kB, kA, false, true) == A::Draw);
+        }
+        CHECK(p.draw(f, kC, kB, false, true) == A::Skip);  // judged the 120th on entering this one
+        CHECK(p.armed() && p.a() == kC && p.b() == kB && p.d() == kA);
+        CHECK(p.draw(f, kB, kA, false, true) == A::SkipCopy);
+        ++f;
+        // A different D: not the pattern; drawn, and learning again.
+        CHECK(p.draw(f, kC, kB, false, true) == A::Skip);
+        CHECK(p.draw(f, kB, kC + 0x10, false, true) == A::MaterializeThenDraw);
+        CHECK(!p.armed());
+        // Draw 2 into B itself is never a pattern.
+        MotionBlurSkip q;
+        for (std::uint64_t g = 1; g <= 2 * MotionBlurSkip::kLearnFrames; ++g) {
+            q.draw(g, kC, kB, false, true);
+            q.draw(g, kB, kB, false, true);
+        }
+        CHECK(!q.armed());
+    }
     {  // Blending, ineligible (setting on), a third draw, one draw: never armed.
         for (int mode = 0; mode < 4; ++mode) {
             MotionBlurSkip p;

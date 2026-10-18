@@ -1200,6 +1200,11 @@ const bool g_mb_skip_mode = [] {
 bool g_mb_skip_on = g_mb_skip_mode;
 temporal::MotionBlurSkip g_mb_skip;
 thread_local bool t_mb_exempt = false;
+// A draw marks its target written when it binds it (find_rt's memo), before
+// its pipeline - and so whether it is the motion blur's - is known. B written
+// that way is held here and judged at the draw's prefetch: the motion blur's
+// draw 1 clears it (it is the pattern), anything else makes it a use of B.
+bool g_mb_b_bound = false;
 void mb_skip_touched(std::uint64_t base) {
     if (!g_mb_skip_mode || t_mb_exempt || !base || base != g_mb_skip.watched()) return;
     const bool was = g_mb_skip.armed();
@@ -1211,12 +1216,16 @@ void mb_skip_touched(std::uint64_t base) {
 void mb_skip_materialize_locked();  // below copy_layers_locked
 // Other work is about to be recorded: a held-back draw 1 is done first.
 void mb_skip_other_work_locked() {
+    if (g_mb_skip_mode && !t_mb_exempt && g_mb_b_bound) {  // B written by something other than draw 1
+        g_mb_b_bound = false;
+        mb_skip_touched(g_mb_skip.watched());
+    }
     if (g_mb_skip_mode && !t_mb_exempt && g_mb_skip.pending() && g_mb_skip.other_work()) mb_skip_materialize_locked();
 }
 
 // A draw, a fill or a copy wrote the target (the reuse retire's age and order).
 void rt_written(RtImage& r) {
-    mb_skip_touched(r.base);
+    if (g_mb_skip_mode && !t_mb_exempt && r.base && r.base == g_mb_skip.watched()) g_mb_b_bound = true;
     r.written_flip = hle_video_flip_count();
     r.written_ms = steady_ms();
 }
@@ -12216,9 +12225,10 @@ static bool draw_impl(const GpuDraw& d) {
         static bool said = false;
         if (!said) {
             said = true;
-            host_log("render: motion blur skip on (BBHOST_MOTION_BLUR_SKIP=0 turns it off): with motion blur off, its two draws are left out once proven to copy and copy back");
+            host_log("render: motion blur skip on (BBHOST_MOTION_BLUR_SKIP=0 turns it off): with motion blur off, its two draws become one copy once proven to pass the picture through");
         }
         RtImage& t = *s.color[0];
+        if (t.base == g_mb_skip.watched()) g_mb_b_bound = false;  // draw 1 bound B: the pattern itself
         std::uint64_t src = 0;
         int inputs = 0;
         for (const StageImages::Image& im : stage_images[1].images) {
@@ -12238,11 +12248,28 @@ static bool draw_impl(const GpuDraw& d) {
         const bool was_armed = g_mb_skip.armed();
         const auto act = g_mb_skip.draw(hle_video_flip_count(), src, t.base, blends, eligible);
         if (!was_armed && g_mb_skip.armed())
-            host_log("render: motion blur skip on: its two draws copy 0x%llx -> 0x%llx -> back with blur off, %d frames in a row (flip %llu)",
+            host_log("render: motion blur skip on: its two draws copy 0x%llx -> 0x%llx -> 0x%llx with blur off, %d frames in a row (flip %llu); now one copy",
                      static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
+                     static_cast<unsigned long long>(g_mb_skip.d()),
                      temporal::MotionBlurSkip::kLearnFrames, static_cast<unsigned long long>(hle_video_flip_count()));
+        {  // why it is not skipping, now and then (test8 never said)
+            static std::uint64_t next_why = 1200;
+            const std::uint64_t fl = hle_video_flip_count();
+            if (!g_mb_skip.armed() && fl >= next_why && (t.base == g_mb_skip.b() || !g_mb_skip.b())) {
+                next_why = fl + 3600;
+                host_log("render: motion blur skip learning (flip %llu): %d good frames; last frame not counted: %s; S 0x%llx B 0x%llx D 0x%llx",
+                         static_cast<unsigned long long>(fl), g_mb_skip.good_frames(), *g_mb_skip.last_reject() ? g_mb_skip.last_reject() : "-",
+                         static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
+                         static_cast<unsigned long long>(g_mb_skip.d()));
+            }
+        }
         if (act == temporal::MotionBlurSkip::Action::MaterializeThenDraw) mb_skip_materialize_locked();
-        if (act == temporal::MotionBlurSkip::Action::Skip) {
+        if (act == temporal::MotionBlurSkip::Action::SkipCopy) {
+            // Draw 2 into D: the blur-off result is draw 1's input S, as is.
+            RtImage* from = find_render_target(g_mb_skip.a());
+            if (from && from != &t) copy_layers_locked(*from, t);
+        }
+        if (act == temporal::MotionBlurSkip::Action::Skip || act == temporal::MotionBlurSkip::Action::SkipCopy) {
             rt_written(t);
             t.fill_last = false;
             const std::uint64_t pairs = g_mb_skip.pairs_skipped();
