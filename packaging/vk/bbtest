@@ -1,0 +1,417 @@
+#!/bin/bash
+# bbtest - bbhost-vk's test sessions on the player's PC (docs/vk/TESTING.md).
+#
+#   bbtest start <phase> [--record] [--capture] [--detach] [-- bbhost args...]
+#                  launch ./bbhost from the game folder, log everything into a
+#                  new session folder: the bbhost log, MangoHud frame times
+#                  (CSV), a screenshot of the game's monitor every few seconds;
+#                  --record keeps a 30 s gpu-screen-recorder replay buffer;
+#                  --capture also lets bbhost dump the presented frame
+#                  (BBHOST_VK_CAPTURE=1) at every mark; --detach returns at once.
+#   bbtest mark [note...]   screenshot + last 30 s clip + a timestamped marker line
+#   bbtest clip             save the last 30 s (with --record)
+#   bbtest shot             one screenshot now
+#   bbtest status           what is running, and where the session is
+#   bbtest stop             stop the game and the helpers, bundle the session
+#
+# Sessions: ~/.local/share/bbtest/sessions/<YYYYmmdd-HHMMSS>-<phase>/
+# It installs nothing and needs nothing beyond bash and coreutils; it uses
+# what it finds: spectacle or gpu-screen-recorder (screenshots),
+# gpu-screen-recorder (--record), MangoHud, kscreen-doctor + python3
+# (finding the game's monitor), ImageMagick (cropping spectacle's shots).
+#
+# Settings (environment):
+#   BBTEST_GAME_DIR    the folder with ./bbhost
+#                      (default: "$HOME/BloodBorne PC/bbhost-linux-v0.2.18")
+#   BBTEST_MONITOR     the game's monitor's output name, e.g. DP-1
+#                      (default: the enabled output with the most pixels)
+#   BBTEST_SHOT_EVERY  seconds between screenshots (default 10; 0 = none)
+#   BBTEST_REPLAY_SECS replay buffer length (default 30)
+#   BBTEST_FPS         recording frame rate (default 60)
+#   BBTEST_MANGOHUD    1 (default) = MANGOHUD=1 with logging; keep = leave
+#                      MANGOHUD alone (goverlay's setup); 0 = no MangoHud
+#   BBTEST_ROOT        where sessions go (default ~/.local/share/bbtest)
+set -u
+
+ROOT=${BBTEST_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/bbtest}
+GAME_DIR=${BBTEST_GAME_DIR:-$HOME/BloodBorne PC/bbhost-linux-v0.2.18}
+STATE=${XDG_RUNTIME_DIR:-/tmp}/bbtest-$(id -u)
+SHOT_EVERY=${BBTEST_SHOT_EVERY:-10}
+REPLAY_SECS=${BBTEST_REPLAY_SECS:-30}
+REC_FPS=${BBTEST_FPS:-60}
+
+say() { printf 'bbtest: %s\n' "$*" >&2; }
+now() { date '+%Y-%m-%d %H:%M:%S.%3N %Z'; }
+have() { command -v "$1" > /dev/null 2>&1; }
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2> /dev/null; }
+session() { [ -f "$STATE/session" ] && cat "$STATE/session"; }
+pid_of() { [ -f "$STATE/$1.pid" ] && cat "$STATE/$1.pid"; }
+
+notify() {
+    have notify-send && notify-send -a bbtest -t 2500 "bbtest" "$*" > /dev/null 2>&1 &
+}
+
+# The game's monitor: BBTEST_MONITOR, else the enabled output with the most
+# pixels (the 4K one on a 4K + 1440p desk). Prints "name x y w h scale" in
+# logical coordinates when kscreen-doctor and python3 can say, else the name only.
+monitor_info() {
+    if have kscreen-doctor && have python3; then
+        kscreen-doctor -j 2> /dev/null | BBTEST_MONITOR=${BBTEST_MONITOR:-} python3 -c '
+import json, os, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+want = os.environ.get("BBTEST_MONITOR", "")
+best = None
+for o in d.get("outputs", []):
+    if not o.get("enabled"):
+        continue
+    mode = next((m for m in o.get("modes", []) if str(m.get("id")) == str(o.get("currentModeId"))), None)
+    if not mode:
+        continue
+    w, h = mode["size"]["width"], mode["size"]["height"]
+    s = float(o.get("scale", 1) or 1)
+    rot = o.get("rotation", 1)
+    if rot in (2, 8):
+        w, h = h, w
+    rec = (o["name"], o["pos"]["x"], o["pos"]["y"], w, h, s)
+    if want and o["name"] == want:
+        best = rec
+        break
+    if not want and (best is None or w * h > best[3] * best[4]):
+        best = rec
+if best:
+    print("%s %d %d %d %d %s" % best)
+' && return 0
+    fi
+    [ -n "${BBTEST_MONITOR:-}" ] && echo "$BBTEST_MONITOR"
+}
+
+# A screenshot of the game's monitor into $1 (a .png path).
+screenshot() {
+    local out=$1 info name
+    info=$(monitor_info)
+    name=${info%% *}
+    # gpu-screen-recorder takes one monitor's own pixels directly.
+    # Tried once; when it fails (an older version, or no KMS permission) the
+    # session uses spectacle from then on.
+    if have gpu-screen-recorder && [ -n "$name" ] && [ ! -f "$STATE/gsr-shot-failed" ]; then
+        if timeout 10 gpu-screen-recorder -w "$name" -o "$out" > /dev/null 2>&1 && [ -s "$out" ]; then
+            return 0
+        fi
+        rm -f "$out"
+        [ -d "$STATE" ] && : > "$STATE/gsr-shot-failed"
+    fi
+    if have spectacle; then
+        local full=${out%.png}-full.png
+        timeout 15 spectacle -b -n -f -o "$full" > /dev/null 2>&1
+        [ -s "$full" ] || { rm -f "$full"; return 1; }
+        local im=""
+        have magick && im="magick"
+        [ -z "$im" ] && have convert && im="convert"
+        set -- $info
+        if [ -n "$im" ] && [ $# -ge 6 ] && have python3; then
+            # Spectacle's full shot covers every output; the crop is the game's
+            # monitor scaled from logical coordinates to the image's pixels.
+            local crop
+            crop=$(python3 - "$full" "$2" "$3" "$4" "$5" "$6" <<'PY' 2> /dev/null
+import json, struct, subprocess, sys
+path, x, y, w, h, s = sys.argv[1], *map(float, sys.argv[2:])
+with open(path, "rb") as f:
+    head = f.read(24)
+iw, ih = struct.unpack(">II", head[16:24])
+d = json.loads(subprocess.run(["kscreen-doctor", "-j"], capture_output=True, text=True).stdout)
+right = bottom = 0.0
+for o in d.get("outputs", []):
+    if not o.get("enabled"):
+        continue
+    mode = next((m for m in o.get("modes", []) if str(m.get("id")) == str(o.get("currentModeId"))), None)
+    if not mode:
+        continue
+    sc = float(o.get("scale", 1) or 1)
+    right = max(right, o["pos"]["x"] + mode["size"]["width"] / sc)
+    bottom = max(bottom, o["pos"]["y"] + mode["size"]["height"] / sc)
+k = iw / right if right else 1.0
+lw, lh = w / s, h / s
+print("%dx%d+%d+%d" % (round(lw * k), round(lh * k), round(x * k), round(y * k)))
+PY
+)
+            if [ -n "$crop" ] && $im "$full" -crop "$crop" +repage "$out" 2> /dev/null; then
+                rm -f "$full"
+                return 0
+            fi
+        fi
+        mv -f "$full" "$out"
+        return 0
+    fi
+    return 1
+}
+
+shot_loop() {
+    local s=$1
+    while [ -f "$STATE/session" ]; do
+        sleep "$SHOT_EVERY"
+        [ -f "$STATE/session" ] || break
+        screenshot "$s/shots/auto-$(date +%H%M%S).png" || true
+    done
+}
+
+redacted_toml() {  # the options file without its [account] section (the token)
+    local f=$1
+    [ -f "$f" ] || return 1
+    awk '/^\[account\]/{skip=1; print "[account]  # removed by bbtest"; next} /^\[/{skip=0} !skip' "$f"
+}
+
+options_file() {
+    local d=${BBHOST_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/bbhost}
+    echo "$d/bbhost-options.toml"
+}
+
+save_clip() {  # $1: a name for the log
+    local gsr
+    gsr=$(pid_of gsr)
+    if ! alive "$gsr"; then
+        say "no replay buffer (start with --record, and gpu-screen-recorder installed)"
+        return 1
+    fi
+    local s n0 n1 i
+    s=$(session)
+    n0=$(find "$s/clips" -maxdepth 2 -type f -name '*.mp4' 2> /dev/null | wc -l)
+    kill -USR1 "$gsr"
+    for i in $(seq 1 40); do
+        sleep 0.25
+        n1=$(find "$s/clips" -maxdepth 2 -type f -name '*.mp4' 2> /dev/null | wc -l)
+        [ "$n1" -gt "$n0" ] && break
+    done
+    local f
+    f=$(find "$s/clips" -maxdepth 2 -type f -name '*.mp4' -printf '%T@ %p\n' 2> /dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+    echo "$(now) CLIP $1 ${f:-(still being written)}" >> "$s/marks.log"
+    say "clip: ${f:-asked for; it lands in $s/clips}"
+}
+
+cmd_start() {
+    local phase="" record=0 capture=0 detach=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --record) record=1 ;;
+            --capture) capture=1 ;;
+            --detach|-d) detach=1 ;;
+            --) shift; break ;;
+            -*) say "unknown option $1"; exit 2 ;;
+            *) [ -z "$phase" ] && phase=$1 || { say "one phase name, e.g. p0"; exit 2; } ;;
+        esac
+        shift
+    done
+    [ -n "$phase" ] || { say "usage: bbtest start <phase> [--record] [--capture] [--detach]"; exit 2; }
+    if [ -f "$STATE/session" ] && alive "$(pid_of game)"; then
+        say "a session is running: $(session) (bbtest stop first)"
+        exit 1
+    fi
+    [ -x "$GAME_DIR/bbhost" ] || { say "no ./bbhost in $GAME_DIR (set BBTEST_GAME_DIR)"; exit 1; }
+    if [ "$detach" = 1 ]; then
+        local args=(start "$phase")
+        [ "$record" = 1 ] && args+=(--record)
+        [ "$capture" = 1 ] && args+=(--capture)
+        setsid -f "$0" "${args[@]}" -- "$@" > /dev/null 2>&1 < /dev/null
+        sleep 1
+        say "started in the background; bbtest status / bbtest stop"
+        exit 0
+    fi
+
+    rm -rf "$STATE"
+    mkdir -p "$STATE"
+    local s
+    s="$ROOT/sessions/$(date +%Y%m%d-%H%M%S)-$phase"
+    mkdir -p "$s/shots" "$s/clips" "$s/mangohud" "$s/frames"
+    echo "$s" > "$STATE/session"
+    echo "$phase" > "$STATE/phase"
+    date +%s > "$STATE/started"
+
+    {
+        echo "phase:    $phase"
+        echo "started:  $(now)"
+        echo "game dir: $GAME_DIR"
+        echo "options:  record=$record capture=$capture shots-every=${SHOT_EVERY}s"
+        echo "monitor:  $(monitor_info || echo '?')"
+        [ -f "$GAME_DIR/bbhost.bin" ] && echo "bbhost.bin sha256: $(sha256sum "$GAME_DIR/bbhost.bin" | cut -d' ' -f1)"
+        [ -f "$GAME_DIR/BUILDINFO.txt" ] && sed 's/^/build: /' "$GAME_DIR/BUILDINFO.txt"
+        echo "kernel:   $(uname -r)"
+        have vulkaninfo && vulkaninfo --summary 2> /dev/null | grep -E 'deviceName|driverInfo|apiVersion' | head -6 | sed 's/^ */vulkan:   /'
+        have mangohud && echo "mangohud: present"
+        have gpu-screen-recorder && echo "gpu-screen-recorder: present"
+        have spectacle && echo "spectacle: present"
+    } > "$s/session.txt"
+    redacted_toml "$(options_file)" > "$s/options-before.toml" 2> /dev/null || rm -f "$s/options-before.toml"
+
+    # MangoHud: frame times to CSV in the session. read_cfg keeps the
+    # player's own MangoHud.conf (goverlay's layout) and adds the logging.
+    local mh=${BBTEST_MANGOHUD:-1}
+    if [ "$mh" = 1 ]; then
+        export MANGOHUD=1
+        export MANGOHUD_CONFIG="read_cfg,output_folder=$s/mangohud,autostart_log=1,log_interval=0${MANGOHUD_CONFIG:+,$MANGOHUD_CONFIG}"
+    elif [ "$mh" = 0 ]; then
+        unset MANGOHUD
+    fi
+    if [ "$capture" = 1 ]; then
+        export BBHOST_VK_CAPTURE=1
+        export BBHOST_VK_CAPTURE_DIR="$s/frames"
+    fi
+
+    # The replay buffer of the game's monitor.
+    if [ "$record" = 1 ]; then
+        if have gpu-screen-recorder; then
+            local name
+            name=$(monitor_info)
+            name=${name%% *}
+            gpu-screen-recorder -w "${name:-screen}" -f "$REC_FPS" -r "$REPLAY_SECS" -c mp4 -o "$s/clips" \
+                > "$s/gsr.log" 2>&1 &
+            echo $! > "$STATE/gsr.pid"
+            say "recording: the last ${REPLAY_SECS}s of ${name:-screen} (bbtest clip saves them)"
+        else
+            say "--record: gpu-screen-recorder is not installed; no clips this session"
+        fi
+    fi
+
+    echo "$(now) START $phase" >> "$s/marks.log"
+    say "session: $s"
+    # The game, with its output appended to the log (bbtest mark appends too).
+    (cd "$GAME_DIR" && exec ./bbhost "$@") > >(exec tee -a "$s/bbhost.log") 2>&1 &
+    local game=$!
+    echo "$game" > "$STATE/game.pid"
+    echo "$$" > "$STATE/start.pid"
+    if [ "$SHOT_EVERY" != 0 ]; then
+        shot_loop "$s" &
+        echo $! > "$STATE/shots.pid"
+    fi
+    trap 'kill -TERM "$game" 2> /dev/null' INT TERM
+    wait "$game"
+    local rc=$?
+    # wait returns early on a trapped signal: wait for the game itself.
+    while alive "$game"; do sleep 0.5; done
+    trap - INT TERM
+    echo "$(now) GAME-EXIT $rc" >> "$s/marks.log"
+    finish "$s"
+}
+
+# Stops the helpers and bundles the session.
+finish() {
+    local s=$1
+    [ -n "$s" ] && [ -d "$s" ] || return 0
+    local p
+    for p in shots gsr; do
+        local pid
+        pid=$(pid_of "$p")
+        if alive "$pid"; then
+            # TERM for the screenshot loop (a background job ignores INT);
+            # INT for gpu-screen-recorder, its own way to stop.
+            if [ "$p" = gsr ]; then kill -INT "$pid" 2> /dev/null; else kill -TERM "$pid" 2> /dev/null; fi
+            for _ in $(seq 1 20); do alive "$pid" || break; sleep 0.25; done
+            alive "$pid" && kill -KILL "$pid" 2> /dev/null
+        fi
+    done
+    redacted_toml "$(options_file)" > "$s/options-after.toml" 2> /dev/null || rm -f "$s/options-after.toml"
+    if [ -f "$s/options-before.toml" ] && [ -f "$s/options-after.toml" ]; then
+        diff -u "$s/options-before.toml" "$s/options-after.toml" > "$s/options.diff" || true
+    fi
+    # bbhost's own log files written during the session (logs/ beside it).
+    local started
+    started=$(cat "$STATE/started" 2> /dev/null || echo 0)
+    if [ -d "$GAME_DIR/logs" ]; then
+        mkdir -p "$s/game-logs"
+        find "$GAME_DIR/logs" -maxdepth 1 -type f -newermt "@$started" -exec cp -p {} "$s/game-logs/" \; 2> /dev/null
+        rmdir "$s/game-logs" 2> /dev/null || true
+    fi
+    rm -f "$s/frames/capture.request"
+    rmdir "$s/clips" "$s/frames" "$s/mangohud" 2> /dev/null || true
+    {
+        echo "stopped:  $(now)"
+        echo "errors in the log: $(grep -ciE 'error|fatal|crash|panic|lost' "$s/bbhost.log" 2> /dev/null || true)"
+        echo "marks:    $(grep -c ' MARK ' "$s/marks.log" 2> /dev/null || true)"
+        echo "shots:    $(find "$s/shots" -type f 2> /dev/null | wc -l)"
+        echo "clips:    $(find "$s/clips" -type f -name '*.mp4' 2> /dev/null | wc -l)"
+        echo "frames:   $(find "$s/frames" -type f -name '*.png' 2> /dev/null | wc -l)"
+        echo "mangohud: $(find "$s/mangohud" -type f -name '*.csv' 2> /dev/null | wc -l) CSV"
+    } >> "$s/session.txt"
+    echo "$(now) STOP" >> "$s/marks.log"
+    rm -rf "$STATE"
+    say "session bundled: $s"
+    notify "session saved: $(basename "$s")"
+}
+
+cmd_mark() {
+    local s
+    s=$(session)
+    [ -n "$s" ] || { say "no session (bbtest start first)"; exit 1; }
+    local t note=${*:-}
+    t=$(date +%H%M%S-%3N)
+    echo "$(now) MARK $t ${note}" >> "$s/marks.log"
+    echo "[bbtest] ===== MARK $t $(now) ${note} =====" >> "$s/bbhost.log"
+    # bbhost's own copy of the presented frame (bbtest start --capture).
+    [ -d "$s/frames" ] && [ -n "$(pid_of game)" ] && grep -q "capture=1" "$s/session.txt" && : > "$s/frames/capture.request"
+    screenshot "$s/shots/mark-$t.png" && echo "$(now) SHOT mark-$t.png" >> "$s/marks.log"
+    alive "$(pid_of gsr)" && save_clip "mark-$t" > /dev/null 2>&1
+    say "mark $t"
+    notify "mark $t"
+}
+
+cmd_clip() {
+    [ -n "$(session)" ] || { say "no session"; exit 1; }
+    save_clip "clip"
+}
+
+cmd_shot() {
+    local s
+    s=$(session)
+    [ -n "$s" ] || { say "no session"; exit 1; }
+    local f
+    f="$s/shots/shot-$(date +%H%M%S).png"
+    screenshot "$f" && say "$f" || say "no screenshot tool worked (spectacle or gpu-screen-recorder)"
+}
+
+cmd_status() {
+    local s
+    s=$(session)
+    if [ -z "$s" ]; then
+        echo "no session"
+        return 0
+    fi
+    echo "session: $s"
+    for p in game shots gsr; do
+        local pid
+        pid=$(pid_of "$p")
+        [ -n "$pid" ] && echo "$p: $pid $(alive "$pid" && echo running || echo gone)"
+    done
+    tail -3 "$s/marks.log" 2> /dev/null
+}
+
+cmd_stop() {
+    local s
+    s=$(session)
+    [ -n "$s" ] || { say "no session"; exit 0; }
+    local game start
+    game=$(pid_of game)
+    start=$(pid_of start)
+    echo "$(now) STOP-ASKED" >> "$s/marks.log"
+    if alive "$game"; then
+        kill -TERM "$game" 2> /dev/null
+        for _ in $(seq 1 40); do alive "$game" || break; sleep 0.25; done
+        alive "$game" && { say "bbhost did not quit in 10 s; killing it"; kill -KILL "$game" 2> /dev/null; }
+    fi
+    # The start command bundles once the game is gone; wait for it.
+    if alive "$start"; then
+        for _ in $(seq 1 60); do [ -f "$STATE/session" ] || break; sleep 0.25; done
+    fi
+    [ -f "$STATE/session" ] && finish "$s"
+    return 0
+}
+
+case "${1:-}" in
+    start) shift; cmd_start "$@" ;;
+    mark) shift; cmd_mark "$@" ;;
+    clip) cmd_clip ;;
+    shot) cmd_shot ;;
+    status) cmd_status ;;
+    stop) cmd_stop ;;
+    *) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
