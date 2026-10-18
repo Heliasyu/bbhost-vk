@@ -53,4 +53,9 @@ inline Jitter jitter_offset(std::uint64_t frame, std::uint32_t phases) {
     return j;
 }
 
+// test3: the jitter pauses once this many frames ran without a scene camera
+// (every one a history reset: the jitter would only flicker).
+constexpr std::uint64_t kJitterPauseFrames = 60;
+inline bool jitter_paused_without_camera(std::uint64_t frames_without_camera) { return frames_without_camera >= kJitterPauseFrames; }
+
 }  // namespace temporal

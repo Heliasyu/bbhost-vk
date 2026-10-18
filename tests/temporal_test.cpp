@@ -99,6 +99,8 @@ void test_halton() {
         sy += j.y;
     }
     CHECK(std::fabs(sx / 32) < 0.03 && std::fabs(sy / 32) < 0.03);
+    // test3: paused after a run without a camera, not before.
+    CHECK(!jitter_paused_without_camera(0) && !jitter_paused_without_camera(59) && jitter_paused_without_camera(60));
 }
 
 void test_parse() {

@@ -782,7 +782,22 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
     // The next frame's jitter.
     ++g_frames;
     const std::uint32_t phases = temporal::jitter_phase_count(rw, output_w ? output_w : rw);
-    g_jitter = g_cfg.jitter ? temporal::jitter_offset(g_frames, phases) : temporal::Jitter{};
+    // test3: with no scene camera FSR resets its history every frame, and a
+    // jittered frame it cannot accumulate is the jitter on screen - small
+    // lights and edges flicker. So after 60 frames without a camera the
+    // jitter pauses until one is found again (BBHOST_JITTER_NO_CAMERA=1 keeps it).
+    static const bool jitter_anyway = [] {
+        const char* e = std::getenv("BBHOST_JITTER_NO_CAMERA");
+        return e && e[0] == '1';
+    }();
+    const bool paused = g_cfg.jitter && !jitter_anyway && temporal::jitter_paused_without_camera(g_no_camera_run);
+    static bool paused_said = false;
+    if (paused != paused_said) {
+        paused_said = paused;
+        host_log("jitter: %s", paused ? "paused - no scene camera for 60 frames, so FSR cannot accumulate it and it would only flicker"
+                                      : "resumed - the scene camera is back");
+    }
+    g_jitter = g_cfg.jitter && !paused ? temporal::jitter_offset(g_frames, phases) : temporal::Jitter{};
     if (g_cfg.jitter && phases != g_phases_logged) {
         g_phases_logged = phases;
         host_log("jitter: Halton(2,3), %u phases (scene %ux%u, output %ux%u)", phases, rw, rh, output_w, output_h);
