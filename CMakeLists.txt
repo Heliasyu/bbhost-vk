@@ -302,6 +302,10 @@ if(SDL3_FOUND AND Vulkan_FOUND)
   target_compile_options(imgui PRIVATE -w)
   target_sources(bbhost PRIVATE src/host/launcher.cpp src/host/plugin_ui.cpp)
   target_link_libraries(bbhost PRIVATE imgui)
+  # bbhost-vk debug tooling (docs/vk/PLAN.md, Phase 0): the presenter's
+  # per-pass GPU timer and the presented-frame capture.
+  target_sources(bbhost PRIVATE src/host/gpu_timer.cpp src/host/frame_capture.cpp)
+  set_source_files_properties(src/host/gpu_timer.cpp src/host/frame_capture.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   set_source_files_properties(src/host/window.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   set_source_files_properties(src/host/overlay.cpp src/host/present_pass.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   set_source_files_properties(src/host/ingame_menu.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")

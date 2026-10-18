@@ -18,6 +18,7 @@
 #include "host/audio.h"
 #include "host/foreign_hooks.h"
 #include "host/gpu.h"
+#include "host/upscaler.h"
 #include "log.h"
 #if !defined(_WIN32)
 #include <pthread.h>
@@ -42,6 +43,9 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
+
+#include "host/frame_capture.h"  // bbhost-vk debug tooling
+#include "host/gpu_timer.h"
 #endif
 
 // The swapchain's extent (width << 32 | height) for host_window_pixels; 0 before one.
@@ -509,6 +513,9 @@ bool vk_create_swapchain() {
                        (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
         if (g_vk.storage) sci.imageUsage |= VK_IMAGE_USAGE_STORAGE_BIT;
     }
+    // bbhost-vk: transfer reads too, only with BBHOST_VK_CAPTURE=1 (the
+    // presented-frame capture, host/frame_capture.h); otherwise nothing.
+    sci.imageUsage |= frame_capture::swapchain_usage(caps.supportedUsageFlags);
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     sci.preTransform = caps.currentTransform;
     sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -671,6 +678,24 @@ bool vk_start() {
 
 std::atomic<std::uint64_t> g_present_dropped{0};
 
+// bbhost-vk's per-pass GPU timer (host/gpu_timer.h) over the presenter's
+// command buffer, while debug_upscaler_time is on: made the first frame it is
+// on, and not touched otherwise (the command buffer is then stock).
+GpuTimer g_pass_timer;
+bool g_pass_timer_tried = false;
+
+bool vk_pass_timer_frame_begin(VkCommandBuffer cmd) {
+    if (!host_settings().debug_upscaler_time) return false;
+    if (!g_pass_timer_tried) {
+        g_pass_timer_tried = true;
+        if (!g_pass_timer.init(g_vk.device, g_vk.phys, g_vk.family, "present-timer"))
+            host_log("present-timer: this GPU's queue keeps no timestamps; the upscaler GPU time is not shown");
+    }
+    if (!g_pass_timer.ready()) return false;
+    g_pass_timer.frame_begin(cmd);
+    return true;
+}
+
 // The FPS counter (host setting fps_counter): what reaches the screen - every
 // present vk_present makes, not the flips it drops - over the last second.
 std::mutex g_fps_mu;
@@ -740,6 +765,7 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     present_step("waiting for the last present");
     vkWaitForFences(g_vk.device, 1, &g_vk.fence, VK_TRUE, UINT64_MAX);
     host_gpu_busy_present_done();  // the last blit's two timestamps, before this one rewrites them
+    frame_capture::after_fence(g_vk.device);  // bbhost-vk: a captured frame has landed (BBHOST_VK_CAPTURE=1 only)
     // A V-Sync change has no surface event behind it, so the options screen
     // asks for the rebuild the acquire would otherwise never be told to do.
     if (g_swap_dirty.exchange(false)) {
@@ -842,6 +868,12 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_vk.cmd, &bi);
     host_gpu_busy_present_begin(g_vk.cmd);  // the busy meter's first timestamp (host/gpu_busy.cpp)
+    // bbhost-vk debug tooling, only while its toggles are on: the presenter's
+    // own passes timed (debug_upscaler_time), and the motion-vector view's
+    // hook (debug_motion_vectors; nothing to show before a temporal upscaler).
+    const bool timed = vk_pass_timer_frame_begin(g_vk.cmd);
+    const int t_present = timed ? g_pass_timer.begin(g_vk.cmd, "present") : -1;
+    if (host_settings().debug_motion_vectors) upscaler_debug_motion_vectors_hook();
     // The picture's rectangle (fit_picture); what it does not cover is black.
     VkRect2D area{{0, 0}, g_vk.extent};
     if (display_w && display_h) {
@@ -909,12 +941,14 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
             // not produced the frame yet, as the blit's path clears.
             const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
             const float none[4] = {0.06f + 0.04f * static_cast<float>(buffer_index % 3), 0.0f, 0.02f, 1.0f};
+            const int t_pass = timed ? g_pass_timer.begin(g_vk.cmd, "one pass") : -1;
             if (present_pass_begin(g_vk.cmd, g_vk.images[idx], g_vk.views[idx], g_vk.extent, shown, have ? &src : nullptr,
                                    have ? black : none)) {
                 const std::uint32_t verts = host_overlay_record(g_vk.cmd, area, overlay_w, overlay_h);
                 // The plugin menu (F9) over everything else (host/ingame_menu.h).
                 const bool menu = ingame_menu_record_in_pass(g_vk.cmd, g_vk.extent);
                 present_pass_end(g_vk.cmd, g_vk.images[idx]);
+                if (timed) g_pass_timer.end(g_vk.cmd, t_pass);
                 recorded = true;
                 wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
                 ++g_pstats.one_pass;
@@ -960,8 +994,12 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
         // Blit the game's display buffer; dark red (cycling with the buffer
         // index) when the renderer has not produced it yet.
         void* const storage_view = g_vk.storage && idx < g_vk.views.size() ? static_cast<void*>(g_vk.views[idx]) : nullptr;
-        if (!display_va || !host_gpu_blit_display(g_vk.cmd, display_va, g_vk.images[idx], shown.offset.x, shown.offset.y,
-                                                  shown.extent.width, shown.extent.height, src_w, src_h, src_x, src_y, storage_view)) {
+        const int t_upscale = timed ? g_pass_timer.begin(g_vk.cmd, "upscale") : -1;
+        const bool blitted = display_va && host_gpu_blit_display(g_vk.cmd, display_va, g_vk.images[idx], shown.offset.x, shown.offset.y,
+                                                                 shown.extent.width, shown.extent.height, src_w, src_h, src_x, src_y,
+                                                                 storage_view);
+        if (timed) g_pass_timer.end(g_vk.cmd, t_upscale);
+        if (!blitted) {
             VkClearColorValue color{{0.06f + 0.04f * (buffer_index % 3), 0.0f, 0.02f, 1.0f}};
             VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(g_vk.cmd, g_vk.images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &range);
@@ -1004,6 +1042,9 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
                              as_colour ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_present);
     }
+    if (timed) g_pass_timer.end(g_vk.cmd, t_present);
+    // bbhost-vk: the presented frame copied out (BBHOST_VK_CAPTURE=1 and asked for).
+    frame_capture::record(g_vk.cmd, g_vk.device, g_vk.phys, g_vk.images[idx], g_vk.format, g_vk.extent);
     host_gpu_busy_present_end(g_vk.cmd);  // counted as on its way from here: it is always submitted below
     vkEndCommandBuffer(g_vk.cmd);
     const auto t_recorded = std::chrono::steady_clock::now();
@@ -1662,6 +1703,11 @@ bool host_window_pump() {
                     g_ime_test_reopen.store(true, std::memory_order_relaxed);
                     break;
                 }
+                if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_F12 && (e.key.mod & SDL_KMOD_SHIFT) &&
+                    frame_capture::enabled()) {
+                    frame_capture::request("Shift+F12");  // bbhost-vk: the presented frame (BBHOST_VK_CAPTURE=1)
+                    break;
+                }
                 if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_F12) {
                     host_gpu_request_dump();  // it logs the capture's folder
                     break;
@@ -1908,6 +1954,24 @@ bool host_window_pump() {
         host_overlay_rect(x - 8.0f, y - 4.0f, w + 16.0f, 24.0f * scale + 8.0f, 0x000000a0u);
         host_overlay_text(x, y, scale, 0xe6e6e6ffu, text);
     }
+    // bbhost-vk (debug_upscaler_time): the presenter's passes on the GPU,
+    // under the FPS counter (host/gpu_timer.h; also in the log every 300
+    // frames). Nothing while the toggle is off.
+    if (host_settings().debug_upscaler_time) {
+        std::string line = g_pass_timer.ready() ? g_pass_timer.summary() : std::string();
+        line = "GPU " + (line.empty() ? std::string("timing...") : line);
+        float dw = 0.0f;
+        {
+            std::lock_guard<std::mutex> ml(g_mouse_mu);
+            dw = g_display_w ? static_cast<float>(g_display_w) : 1920.0f;
+        }
+        const float scale = 0.7f, w = host_overlay_text_width(scale, line.c_str());
+        const float x = dw - w - 20.0f, y = host_settings().fps_counter ? 14.0f + 24.0f * 0.8f + 16.0f : 14.0f;
+        host_overlay_rect(x - 8.0f, y - 4.0f, w + 16.0f, 24.0f * scale + 8.0f, 0x000000a0u);
+        host_overlay_text(x, y, scale, 0xe6e6e6ffu, line.c_str());
+    }
+    upscaler_note_settings();  // bbhost-vk: logs a change of the (not yet used) upscaler settings
+    frame_capture::poll();     // bbhost-vk: BBHOST_VK_CAPTURE=1's trigger file and timer
     {
         // A plugin's banner (host_message_show): centred in the upper third,
         // fading over its last half second.
@@ -1964,7 +2028,9 @@ bool host_window_pump() {
             char text[64];
             std::snprintf(text, sizeof(text), "Building shaders: %zu left", left);
             const float scale = 0.8f, w = host_overlay_text_width(scale, text);
-            const float x = dw - w - 20.0f, y = host_settings().fps_counter ? 14.0f + 24.0f * scale + 16.0f : 14.0f;
+            float y = host_settings().fps_counter ? 14.0f + 24.0f * scale + 16.0f : 14.0f;
+            if (host_settings().debug_upscaler_time) y += 24.0f * 0.7f + 16.0f;  // bbhost-vk: under the GPU time line
+            const float x = dw - w - 20.0f;
             host_overlay_rect(x - 8.0f, y - 4.0f, w + 16.0f, 24.0f * scale + 8.0f, 0x000000a0u);
             host_overlay_text(x, y, scale, 0xe8dcc0ffu, text);
         }
@@ -2208,6 +2274,8 @@ void host_window_stop() {
         host_gpu_lock();
         host_gpu_queue_lock();
         vkDeviceWaitIdle(g_vk.device);
+        g_pass_timer.shutdown();                // bbhost-vk debug tooling
+        frame_capture::shutdown(g_vk.device);
         host_gpu_queue_unlock();
         host_gpu_unlock();
     }
