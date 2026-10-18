@@ -275,4 +275,8 @@ ran against the game yet.
   failures (16 skip without game files). `scene_split_test`: "24 sites
   match Kyo's Decoupled UI patches at 4 sizes; render sizes and the bilinear
   S# ok".
+- Phase 1 binary: built by `packaging/vk/build.sh` from d38480b
+  (`v0.2.18-vk.0-19-gd38480b`), stripped, needs GLIBC_2.38, SHA-256
+  `96bfcf84d6ef42f2fa77f9c6e7335aa49ee6e77309c97ac86a507b8275f60f2c`
+  (on the build box at /workspace/bbhost-vk-builds/phase1/; not released).
 - Player's PC test: pending (TESTING.md, "Pending combined test session").
