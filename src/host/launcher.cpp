@@ -196,6 +196,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     int upscale_sharpness = std::clamp(host_opt_index("upscale_sharpness"), 0, 10);  // tenths
     bool debug_motion_vectors = host_opt_get("debug_motion_vectors");
     bool debug_upscaler_time = host_opt_get("debug_upscaler_time");
+    bool upscale_reactive = host_opt_get("upscale_reactive");
     static const char* const kResolutions[] = {"1280x720",         "1600x900",         "1920x1080",        "2560x1440",
                                                "3200x1800",        "3840x2160",        "2560x1080 (21:9)", "3440x1440 (21:9)",
                                                "5120x2160 (21:9)", "3840x1080 (32:9)", "5120x1440 (32:9)", "1280x800 (16:10)",
@@ -332,6 +333,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         host_opt_set_index("upscale_sharpness", upscale_sharpness);
         host_opt_set("debug_motion_vectors", debug_motion_vectors);
         host_opt_set("debug_upscaler_time", debug_upscaler_time);
+        host_opt_set("upscale_reactive", upscale_reactive);
         for (const Enhancement& x : enhancements) host_opt_set(x.key, x.on);
         host_options_save_now();
         saved_note = "Saved to " + file;
@@ -644,7 +646,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
         ImGui::Combo("Upscaler", &upscaler, kUpscalers, 4);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk: Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (a bilinear copy for now; FSR 3.1 / 4.1.1 come later).");
+            ImGui::SetTooltip("bbhost-vk: Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (FSR 3.1 is temporal; FSR 4.1.1 comes later and uses FSR 3.1 until then).");
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kQualities[] = {"Native AA (100%)", "Quality (67%)", "Balanced (58%)", "Performance (50%)",
                                                  "Ultra Performance (33%)"};
@@ -653,7 +655,10 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::SetTooltip("bbhost-vk: the 3D scene's render scale, with the menus, text and post-processing kept at the render resolution. Native AA is stock. Not used while Upscaler is Off.");
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::SliderInt("Upscaler sharpness", &upscale_sharpness, 0, 10, "%d / 10");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: saved, not used yet. 8 is stock bbhost's FSR 1 sharpening.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: FSR 3.1's sharpening (RCAS); 0 turns it off. 8 matches stock bbhost's FSR 1, which keeps its own.");
+        ImGui::Checkbox("Upscaler reactive mask", &upscale_reactive);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk, FSR 3.1: keeps particles, fog, Blood Echoes and the lantern's glow from smearing. Off for comparison.");
         ImGui::Checkbox("Show motion vectors", &debug_motion_vectors);
         ImGui::SameLine(260 * scale);
         ImGui::Checkbox("Show upscaler GPU time", &debug_upscaler_time);
