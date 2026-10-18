@@ -26,3 +26,16 @@ build-linux-portable/
 # Private working notes and the eboot's symbol files stay out of the repository.
 /notes/
 /symbols/
+
+# bbhost-vk: never commit game data, saves, user-built FSR 4.1.1 assets, logs or account files
+CUSA*/
+dvdroot_ps4/
+*.pkg
+eboot*.bin
+fsr4_411/
+amd_fidelityfx_*.dll
+logs/
+*Recovery Code*
+*.recovery
+user/
+build-ci/
