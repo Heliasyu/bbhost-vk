@@ -12213,6 +12213,21 @@ static bool draw_impl(const GpuDraw& d) {
                                                (im.w[2] & 0x3fff) + 1, ((im.w[2] >> 14) & 0x3fff) + 1, (im.w[1] >> 20) & 0x3f);
                     }
                     host_log("%s", line);
+                    // test9: the constants of the passes before the bloom
+                    // (#1-#10), for finding the pixel-size ones (test10's
+                    // render-size chain): the user-data pointers' first 32 dwords.
+                    if (chain_n >= 1 && chain_n <= 10) {
+                        for (int k = 0; k + 1 < 8; k += 2) {
+                            const std::uint64_t ptr = static_cast<std::uint64_t>(s.ps_user[k]) |
+                                                      (static_cast<std::uint64_t>(s.ps_user[k + 1] & 0xff) << 32);
+                            if (!ptr || !hle_kernel_va_mapped(ptr, 128)) continue;
+                            const auto* f = reinterpret_cast<const float*>(static_cast<std::uintptr_t>(ptr));
+                            int m = std::snprintf(line, sizeof(line), "post-chain:   #%d ps s[%d:%d] 0x%llx:", chain_n, k, k + 1,
+                                                  static_cast<unsigned long long>(ptr));
+                            for (int q = 0; q < 32 && m < static_cast<int>(sizeof(line)) - 20; ++q) m += std::snprintf(line + m, sizeof(line) - m, " %g", f[q]);
+                            host_log("%s", line);
+                        }
+                    }
                     ++chain_n;
                 }
             }
