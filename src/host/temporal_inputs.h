@@ -34,7 +34,10 @@ bool temporal_watching();
 // A constant buffer a draw binds (VS stage 0, PS stage 1), its V#'s base
 // and size: the scene constants, bone palettes (survey), the velocity
 // draws' packing scale. `orb_vs` / `orb_ps` are the shaders' hashes.
-void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes);
+// `pointer`: bound by address, not a V# (`bytes` is the shader's extent): only
+// looked at for the scene constants.
+void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes,
+                                    bool pointer = false);
 
 // Per draw, with its viewport about to be set: the jitter to add to the
 // viewport's x and y (render pixels), when the draw is one of the scene's

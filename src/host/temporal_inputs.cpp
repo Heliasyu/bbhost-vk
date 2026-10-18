@@ -349,17 +349,39 @@ void temporal_frame_locked(std::uint64_t flip) {
 
 bool temporal_watching() { return g_cfg.watching; }
 
-void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes) {
+void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes,
+                                    bool pointer) {
     if (!g_cfg.watching || !base) return;
     const auto* p = reinterpret_cast<const float*>(static_cast<std::uintptr_t>(base));
     if (stage == 1) {
+        if (pointer) return;
         if (index == temporal::velocity_scale_buffer(orb_ps) && bytes >= 8) {
             std::memcpy(g_velocity_scale, p, 8);
             g_velocity_scale_ok = std::isfinite(g_velocity_scale[0]) && std::isfinite(g_velocity_scale[1]);
         }
         return;
     }
-    const temporal::BufferKind kind = temporal::classify_buffer(bytes);
+    temporal::BufferKind kind = pointer ? temporal::BufferKind::Other : temporal::classify_buffer(bytes);
+    // test2: test1 found no 864-byte block at all (3000 cuts in 3000 frames,
+    // so FSR reset its history every frame). The block may come with another
+    // V# size (more records, a stride) or through a pointer: any buffer that
+    // holds 192 floats and carries the signature - far and 1/far, the scene's
+    // or output's size - is a candidate, and the full parse decides.
+    if (kind != temporal::BufferKind::Scene && stage == 0 && bytes >= 768) {
+        const float far = p[0];
+        const bool sig = far >= 100.0f && far <= 100000.0f && std::fabs(p[1] * far - 1.0f) < 1e-3f &&
+                         ((p[4] == static_cast<float>(g_cfg.render_w) && p[5] == static_cast<float>(g_cfg.render_h)) ||
+                          (p[4] == static_cast<float>(g_cfg.output_w) && p[5] == static_cast<float>(g_cfg.output_h)));
+        if (sig) {
+            kind = temporal::BufferKind::Scene;
+            static bool said = false;
+            if (!said) {
+                said = true;
+                host_log("motion: the scene constants found by their contents in a %llu-byte %s (VS %08x, binding %d), not an 864-byte V#",
+                         static_cast<unsigned long long>(bytes), pointer ? "pointer" : "V#", orb_vs, index);
+            }
+        }
+    }
     if (kind == temporal::BufferKind::Scene) {
         ++g_window.scene_blocks;
         float raw[16];
@@ -493,6 +515,19 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
     if (scene_color) g_scene_color_base = scene_color->base;
     if (g_history.cameras_this_frame() > 1) ++g_window.cameras_multi;
     const temporal::Cut cut = g_history.end_frame(flip);
+    // test1: no scene camera at all, so every frame was a cut and FSR reset
+    // its history every frame. Said once, plainly.
+    static std::uint64_t no_camera_run = 0;
+    no_camera_run = cut == temporal::Cut::NoCamera ? no_camera_run + 1 : 0;
+    if (no_camera_run == 600) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            host_log("motion: no scene camera in 600 frames running (scene blocks seen %llu): every frame is a cut, so FSR resets its "
+                     "history every frame - no temporal accumulation, and the motion vectors are zero",
+                     static_cast<unsigned long long>(g_window.scene_blocks));
+        }
+    }
     // Cuts: each one logged, a run of the same one counted.
     if (cut != temporal::Cut::None) {
         ++g_window.cuts;
