@@ -16,7 +16,9 @@ its own license file there), bbhost-vk links:
   per-file notices are kept in those files.
 - What bbhost-vk builds from it: the portable FSR 3.1.4 upscaler and the FSR
   3.1.5 upscaler with their embedded SPIR-V shader tables
-  (`cmake/fsr_vulkan.cmake`). Its experimental "source-v07 FSR4" provider is
+  (`cmake/fsr_vulkan.cmake`). From Phase 3 bbhost calls the FSR 3.1.5
+  upscaler through its public bridge API (`src/host/fsr3_upscaler.cpp`);
+  none of its code is copied into bbhost's sources. Its experimental "source-v07 FSR4" provider is
   **not** built, and it is not AMD FSR 4.1.1.
 - MIT is GPL-3.0-compatible; the Linux package (`tools/package_linux.sh`)
   ships these notices under `licenses/`.
@@ -64,3 +66,14 @@ docs/vk/DEVLOG.md; none of their code is in bbhost-vk:
 AMD's FSR 4.1.1 (`amd_fidelityfx_upscaler_dx12.dll`) and anything built from
 it are never part of this repository or its packages (docs/vk/PLAN.md,
 Phase 4: built on the player's own PC from their own copy).
+
+## Ideas used (Phase 3)
+- **AMD FidelityFX** (MIT): the reactive mask in
+  `src/host/shaders/reactive.comp` follows the rule of the SDK's
+  GenerateReactiveMask (tonemap, the largest component of the change against
+  the opaque colour, a scale, a threshold, a binary value) with its sample's
+  defaults; bbhost-vk's shader is its own and credits it.
+- **IFreemz**, [shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR)
+  (GPL-2.0-or-later): the approach of running the upscaler at the
+  `HdrSceneCopy` pass into its own image and copying that into the pass's
+  target instead of the game's draw. No code copied.

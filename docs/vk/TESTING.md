@@ -112,10 +112,12 @@ Pass: every option is in `options-after.toml` with the value last set; the
 log has `upscaler:` lines for each change and no new errors; the picture looks
 identical to stock (Phase 0 changes nothing on screen).
 
-## Pending combined test session (Phase 0 + Phase 1 + Phase 2, ~35 min)
-The Phase 0, 1 and 2 checks in one sitting, with the Phase 2 binary
-(`/workspace/bbhost-vk-builds/phase2/bbhost.bin` on the build box; check its
-SHA-256 against `bbhost.bin.sha256`). Install it over `bbhost.bin` (keep the
+## Pending combined test session (Phase 0 to Phase 3 and online, ~65 min)
+The Phase 0, 1, 2 and 3 checks and the online check in one sitting, with
+the Phase 3 binary (`/workspace/bbhost-vk-builds/phase3/bbhost.bin` on the
+build box; check its SHA-256 against `bbhost.bin.sha256`). The Phase 2
+binary's parts still apply to it; with FSR 3.1 the Phase 2 shimmer of part C
+is now resolved by FSR (part D). Install it over `bbhost.bin` (keep the
 old one: `mv bbhost.bin bbhost.bin.vk0` first). No `--capture` for part A.
 
 ### A. Phase 0 checks (5 min): `bbtest start p0`
@@ -184,4 +186,60 @@ Halton(2,3), 18 phases`, a handful of `camera-cut:` lines (lamp warps,
 loading, cutscenes; not one per roll), and the `motion:` summaries
 (velocity draws per frame, `after the scale pass` should be 0). If blue
 never appears on enemies, run once with `BBHOST_OBJECT_MOTION=0` and
+compare.
+
+### D. Phase 3 checks (20 min): `bbtest start p3 --record`
+Resolution 3840x2160 (4K), **Show FPS** and **Show Upscaler GPU Time** on,
+MangoHud/goverlay as usual (it should keep working).
+1. Setup window: **Upscaler FSR 3.1**, **Upscaling quality Quality (67%)**,
+   **Upscaler sharpness** at its default, **Upscaler reactive mask** On.
+   Play, load your save (Central Yharnam or anywhere with enemies).
+2. Look for ~10 s each, `bbtest clip` after each, `bbtest mark <what>` when
+   something looks wrong:
+   - stand still at a detailed spot (fences, railings, roof tiles, hair,
+     coat fringes): stable, no crawling or shimmer, sharper than FSR 1 at
+     the same preset;
+   - walk and strafe, spin the camera: no smearing of the world, no
+     wobble/jelly (if the whole picture wobbles or doubles when still, run
+     once with `BBHOST_FSR_JITTER_SIGN=xy`, then `=x`, `=y`, and note which
+     fixes it);
+   - fight a group of enemies, roll around them: ghost trails behind
+     enemies, weapons, cloth and the character's coat;
+   - particles: the lantern on/off, a Beast Blood pellet or fire paper,
+     fog, Blood Echoes collecting: trails or smears behind them;
+   - a lamp warp and a cutscene: the first frame after the cut is clean
+     (no blend of the old picture).
+3. F10: **Upscaling quality Performance (50%)**: repeat the still spot and
+   the fight briefly. Then **Upscaler reactive mask** Off: the particles
+   again (more trails expected), back On.
+4. GPU time and frame rate: note the FPS and the `FSR 3.1 x.xx ms` on the
+   GPU line at Quality, Performance, and with **Upscaler FSR 1** at
+   **Native AA** (the native comparison). Target: 120 fps at Quality or
+   Performance where native does not reach it.
+5. Once **Upscaler FSR 4.1.1**: it should look like FSR 3.1 (the log says
+   it uses FSR 3.1 until Phase 4). Back to FSR 3.1; quit from the menu.
+
+Pass: no crash; a sharp, stable picture at Quality; little ghosting; FSR 1
+and Native unchanged from stock. In the log: `fsr3: FSR 3.1.5 context for
+scene 2560x1440 -> output 3840x2160 ... MiB, made in ... ms`, `fsr3: first
+FSR 3.1 frame ...`, `motion: first reactive mask ...`, `fsr3: history
+reset ... a camera cut` near warps/cutscenes (not every roll), the `fsr3:`
+summaries (`bilinear frames:` should be only menus/loads), and `fsr3: the
+dispatch takes x.xx ms`. If FSR is never used, the `fsr3: the scale pass
+is drawn bilinear this frame: <reason>` line says why; `BBHOST_FSR3=0`
+gives the bilinear copy for comparison.
+
+### E. Online check (5 min), with FSR 3.1 at Quality
+Online must work exactly as with upstream bbhost (same servers, sign-in and
+networking; bbhost-vk does not touch them).
+1. Start as usual and sign in (the same account flow as upstream); the log
+   shows the sign-in succeeding and the user agent `bbhost/v0.2.18-vk...`.
+2. In an online area: other players' messages and bloodstains are visible
+   (read one, touch one).
+3. Either put down a summon sign (Beckoning Bell or Small Resonant Bell) or
+   ring a bell, and see it is accepted (a co-op/summon round trip if
+   someone answers).
+
+Pass: sign-in, messages, bloodstains and the bell/sign behave as with
+upstream bbhost. If not, note it and run once with upstream's binary to
 compare.

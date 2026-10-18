@@ -1,5 +1,36 @@
 # Changelog (bbhost-vk)
 
+## Unreleased (Phase 3: FSR 3.1 temporal, branch `phase-3-fsr31`)
+With Upscaler Off or FSR 1, or Upscaling quality at Native AA, nothing
+changes. Online play (servers, sign-in, networking), HDR and motion blur are
+untouched.
+- **FSR 3.1 upscales the 3D scene.** With the split active and Upscaler FSR
+  3.1, FidelityFX FSR 3.1.5 (FireBurn/FSR-Vulkan, MIT) runs at the game's
+  scale pass with the scene colour, depth, motion vectors, jitter and a
+  reactive mask, resets its history on camera cuts, uses its own auto
+  exposure and sharpens with RCAS from **Upscaler sharpness** (0 = off).
+  Its output replaces the game's bilinear copy; the UI is drawn on top at
+  the output size as before. Every preset (Native AA to Ultra Performance)
+  works; a preset or resolution change makes a new context.
+- **FSR 4.1.1** selected uses FSR 3.1 until Phase 4 (logged once).
+- **Fallback**: if FSR 3.1's context cannot be made, or a frame lacks its
+  inputs, the frame is drawn with the Phase 1 bilinear copy and the reason
+  is logged (`fsr3:`).
+- **Upscaler reactive mask** (F10 and the setup window, default On): a mask
+  from the scene against the opaque snapshot - particles, fog, transparents,
+  Blood Echoes, the lantern's glow - so FSR keeps less history there.
+- **Show Upscaler GPU Time** adds the FSR 3.1 dispatch's own GPU time to the
+  GPU line (`FSR 3.1 x.xx ms`) and to the log.
+- Test switches: `BBHOST_FSR3=0` (bilinear copy instead of FSR 3.1),
+  `BBHOST_REACTIVE=0`, `BBHOST_FSR_JITTER_SIGN=x|y|xy` (flip the jitter
+  FSR is told, should the picture wobble), `BBHOST_REACTIVE_SCALE`,
+  `_THRESHOLD`, `_VALUE`.
+- Tests: `fsr3_upscaler_test` (contexts at every preset for 720p and 4K
+  on software Vulkan, resource sizes, flat frames, reset on a cut) and the
+  FSR 3.1 policy in `temporal_test`.
+- Not done: object motion from skinned meshes' previous bone palettes
+  (bbport) - deferred, see docs/vk/DEVLOG.md.
+
 ## Unreleased (Phase 2: inputs for temporal upscaling, branch `phase-2-mv-jitter`)
 With Upscaler Off or FSR 1, or Upscaling quality at Native AA, nothing
 changes: no draw, viewport or pass is touched. Online play, HDR and motion

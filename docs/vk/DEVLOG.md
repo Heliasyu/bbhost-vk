@@ -455,3 +455,148 @@ Phase 0).
   (on the build box at /workspace/bbhost-vk-builds/phase2/; not released).
 - Player's PC test: pending (TESTING.md, "Pending combined test session",
   part C).
+
+## 2026-10-18 (Sun), Phase 3: FSR 3.1 temporal (branch `phase-3-fsr31`)
+
+Base: `phase-2-mv-jitter` (PR #3, unmerged); this branch's PR is stacked on
+it. Work done on the build box with no game dump: FSR 3.1 itself is tested
+on lavapipe (software Vulkan), everything that depends on the game's frames
+is logged for the first test. No upscaler files were needed: no OptiScaler
+release was downloaded and no FSR DLLs were used (FSR 3.1.5 comes from the
+FSR-Vulkan submodule linked in Phase 0).
+
+### Done
+- `src/host/fsr3_upscaler.{h,cpp}`: FSR 3.1.5 over FSR-Vulkan's bridge,
+  independent of the renderer (the test drives it on its own device): a
+  context for exact render/output sizes with HDR input and FSR's auto
+  exposure; its three shared resources (dilated depth R32F, dilated motion
+  RG16F, reconstructed previous depth R32UI, all at the render size) and an
+  RGBA16F output, allocated by bbhost and imported; per-frame imports of
+  the inputs, released only once their submission has retired (the bridge
+  destroys the views at release).
+- `src/host/fsr3_pass.{h,cpp}`: the renderer's side. At the scale pass
+  (`ccbf44a6`) with FSR 3.1 chosen and the split active: checks the frame's
+  inputs, makes or reuses the context, decides the history reset, records
+  FSR into the frame's command buffer, copies its output into the pass's
+  target (or blits, for a non-RGBA16F target) and drops the game's draw.
+- `src/host/temporal/fsr3_policy.h`: the pure rules (sizes FSR takes,
+  resets, sharpening, conventions, camera), tested in `temporal_test`.
+- The motion pass also writes an R32F copy of the scene depth (the bridge
+  imports colour images only). A new reactive pass
+  (`src/host/shaders/reactive.comp`) builds an R8 reactive mask from the
+  scene against Phase 2's opaque snapshot.
+- Settings: **Upscaler reactive mask** (F10 and the setup window; not in
+  the in-game System menu, which needs game message ids), and FSR 3.1 help
+  text for the upscaler, sharpness and GPU-time rows.
+- **Show Upscaler GPU Time**: timestamps around the FSR dispatch, read when
+  the submission retired, averaged over 0.5 s, shown on the GPU line and
+  logged.
+- `gpu.cpp` enables `shaderStorageImageExtendedFormats` where the GPU has
+  it (FSR's shaders and the R8 mask need it); enabling a feature changes no
+  draw.
+
+### Decisions and why
+- **Where FSR runs: at the scale pass, instead of the game's draw.** The
+  scene is complete there and the UI is not yet drawn, the same point
+  Phase 1 made its bilinear copy and Phase 2 took its inputs. FSR writes its
+  own image (FSR's output must be a storage image; the game's target is a
+  colour attachment), then a `vkCmdCopyImage` (same format) or a blit (any
+  other) puts it in the target, with the target's bookkeeping (written,
+  pending clears dropped) as for a draw.
+- **Exact-size contexts.** FSR's internal resources are sized at creation;
+  a context is made per (render, output) size, so a preset or resolution
+  change makes a new one (with a reset) and the old one is destroyed once
+  the GPU is past its last frame. A failed creation is remembered for those
+  sizes and logged once, not retried every frame.
+- **Fallback = Phase 1's bilinear copy.** Any frame FSR cannot do (no
+  context, no inputs - menus, loads -, a ratio over 3x, a target it cannot
+  copy to, `BBHOST_FSR3=0`) runs the game's draw with the bilinear samplers,
+  and the reason is logged when it changes.
+- **Native AA stays stock.** At Native AA the split is off, so FSR 3.1 is
+  not used (no native-resolution AA mode in this phase); it keeps "Native
+  identical to stock" simple and true.
+- **FSR 4.1.1** uses FSR 3.1 until Phase 4, logged once.
+- **Resets**: a camera cut (Phase 2's history), a new context, or a gap of
+  more than 3 flips without FSR (its history is of another picture).
+- **Conventions, checked in the FidelityFX 2.3 source**: FSR samples
+  `pixel + 0.5 - jitter`, so its jitter offset is bbhost's viewport shift
+  in render pixels as is; motion vectors are scaled by `scale / renderSize`
+  and added to the UV, so bbhost's pixel vectors (current to previous) go
+  in with scale 1. Depth is not reversed. `BBHOST_FSR_JITTER_SIGN` flips an
+  axis should the hardware test show a wobble.
+- **Exposure**: FSR's auto exposure, pre-exposure 1 (Phase 2 found no
+  exposure value worth trusting).
+- **Sharpening**: FSR's RCAS from **Upscaler sharpness**, 0 = off.
+- **Reactive mask**: AMD's GenerateReactiveMask rule (tonemap, max
+  component of the change, scale 1, threshold 0.2, binary 0.9; tunable with
+  `BBHOST_REACTIVE_SCALE/_THRESHOLD/_VALUE`). The opaque snapshot is taken
+  before the first blended draw, so everything blended after it -
+  particles, fog, transparents, Blood Echoes, the lantern's glow - is in
+  the mask.
+- **Skeleton-based object motion (bbport): deferred.** Doing it properly
+  means running the skinned meshes' guest vertex shaders a second time with
+  last frame's bone palettes (a translator change: a second output, palette
+  history per draw), and none of it can be checked without game data. The
+  game's own velocity target (Phase 2) already gives object motion for
+  characters and enemies, and the moving gate keeps static map pieces out.
+  The value is in the details (cloth, weapon trails) and is worth revisiting
+  once the hardware test shows how much ghosting remains on them.
+- **A test that did not hold**: comparing a small change with and without
+  a reset assumed FSR would keep the old history without one. For a flat
+  picture FSR's shading-change detection takes the new colour anyway (0.0029
+  without vs 0.0034 with), so the test checks only that a reset takes the
+  new picture at once; the reset rule itself is tested in `temporal_test`.
+
+### What the other projects taught
+- **IFreemz** (shadPS4-Bloodborne-DLSS-FSR): run the upscaler at
+  `HdrSceneCopy` into its own image and copy it over the target instead of
+  the game's draw ("CopyInsteadOfDraw"), RGBA16F scene and target. No code
+  copied; bbhost's copy has its own fallback for other formats.
+- **AMD FidelityFX** (MIT): the reactive-mask rule and the conventions
+  above. Credited in `reactive.comp` and THIRD_PARTY_NOTICES.md.
+- **bbport / Supermedo / Awakenchan**: nothing new this phase beyond
+  Phase 2's (bbport's previous-palette approach is the deferred item).
+
+### Online play check (the hard rule)
+`git diff c421ea0..HEAD` over phases 0-3:
+- `src/net/` (HTTP, auth, STUN, the account flow, the updater's user
+  agent): **no changes**.
+- `src/hle/`: only `modules.h` and `video.cpp`, the 120 fps pacing (commit
+  e9d124d) - no network, HTTP or NP code.
+- `src/core/` (config, server defaults): no changes; `bbhost.example.toml`
+  only an upscaler comment; `online.host`, `auth_server` and the STUN server
+  defaults are upstream's.
+- The user agent is `bbhost/` + `BBHOST_VERSION` (`src/net/http.cpp`,
+  `updater.cpp`, unchanged), and the version is `git describe`, e.g.
+  `bbhost/v0.2.18-vk.0-37-g...`: upstream's base version first.
+TESTING.md's combined session now has an online check (part E: sign-in,
+messages and bloodstains, a summon sign or bell).
+
+### Open risks (only the hardware test can answer)
+- **Jitter and motion conventions on real frames**: a wobble when still
+  means the jitter sign (`BBHOST_FSR_JITTER_SIGN`); smearing when moving
+  means the motion vectors' scale or direction.
+- **Ghosting** on enemies, cloth, weapons and particles: depends on the
+  velocity target's coarse edges (Phase 2), the reactive mask's threshold,
+  and the missing skinned-mesh motion.
+- **Whether the scene is RGBA16F at the scale pass** and the target's
+  format (copy or blit; logged with the context).
+- **Cost**: FSR at 2560x1440 -> 4K on the PC's GPU (shown on the GPU line);
+  FSR-Vulkan allocates its constant buffers per pass per dispatch, a known
+  cost to look at in Phase 5 if the time is high. Memory: 346 MiB at
+  Quality 4K, 281 MiB at Performance (measured on lavapipe).
+- **Camera cuts** missed (a blend of two pictures for a few frames after a
+  warp or cutscene) or too many (a softer picture after each roll).
+- **Driver**: FSR 3.1.5's shaders on RADV/the PC's driver; a failure is
+  logged and falls back to the bilinear copy.
+
+### Test results (build box)
+- `ninja` and `ctest`: 47 tests, 0 failures (19 skip without game files).
+- `fsr3_upscaler_test` on llvmpipe: contexts at all five presets for 720p
+  and 4K, shared resources at the render size in the formats FSR asks
+  (100 R32F, 83 RG16F, 98 R32UI); memory 26-59 MiB at 720p, 235-531 MiB at
+  4K; a flat frame reproduced within 0.0017 on the reset frame and 0.0020
+  at frame 5; a cut with a reset within 0.0078.
+- `temporal_test`: the FSR 3.1 policy (sizes, every reset kind, sharpening,
+  conventions, camera defaults).
+- `motion_shader_test`: the depth copy is bit-exact.
