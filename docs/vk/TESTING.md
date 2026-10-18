@@ -93,6 +93,48 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test5 checks (~40 min)
+
+As before: set the upscaler, quality and Resolution (3840x2160) **before** launching. Use
+test4's spot, plus a spot with your character and an NPC or enemy moving in view.
+
+A. **FSR 3.1 Quality, shimmer check:** `bbtest start t5-fsr3 --record`.
+   - Look at your character (hair, coat, cloth) standing still and walking.
+   - In the log: the `motion:` summaries say `scale 8.88889 -5` (or another scale with
+     the scene's aspect), not `1 1`. Any `motion: velocity draw PS ... not a packing scale`
+     lines are reads that were skipped.
+   - If the shimmer is still there, narrow it down one switch per run (in this order):
+     1. Upscaler settings: **Reactive mask off** (FSR 3.1 uses it, FSR 4.1.1 does not).
+     2. **Sharpness 0**.
+     3. `BBHOST_FSR_DIRECT_TARGET=0 bbtest start t5-copy`.
+     4. `BBHOST_OBJECT_MOTION=0 bbtest start t5-noobj` (camera motion only).
+     5. `BBHOST_OBJECT_MOTION_MIN=3 bbtest start t5-min3`.
+     Note which one makes it go away. For a still character, a `bbtest mark` with
+     `BBHOST_FSR_DUMP=1` writes the reactive mask (`4-reactive.png`). If the character
+     lights up there, the mask is the cause.
+B. **Motion-vector view, characters:** Upscaler settings > **Show motion vectors** on (FSR
+   3.1 or 4.1.1 chosen). Red and green are the motion (8 render pixels a frame is full).
+   - Bright blue: the game's object velocity is used (a moving enemy or your character
+     walking while the camera holds still).
+   - Dim blue: covered by the game's velocity target, but the camera's motion is kept (a
+     still object).
+   - Darkened: no camera motion.
+   - Expected: a character who moves on screen against the camera is bright blue inside
+     and has no blue halo around it. Still scenery has no bright blue. Screenshot it with
+     `bbtest mark`.
+C. **FSR 4.1.1 Quality** at 3840x2160: `bbtest start t5-fsr4 --capture`.
+   - `fsr4: FSR 4.1.1 writes the scale pass's 3840x2160 target directly`.
+   - The `pass-timer:` line has no `copy`, and the `fsr3:` summary says `N written directly`.
+D. **FSR 4.1.1 Performance** (1920x1080 -> 3840x2160, the goal): `bbtest start t5-fsr4p`.
+   - `fsr4: FSR 4.1.1 replay, FP8 t2160_m0 output 3840x2160 (scene 1920x1080 -> 3840x2160)`.
+   - Note FPS (goal: a 120 hold), 1% low, `gpu busy:` and `FSR 4.1.1 x.xx ms`. FSR 4.1.1's
+     cost is mostly at the output size, so it costs about the same as at Quality (~2.1 ms).
+     The saving is in the scene.
+   - If 120 is not held, also try sharpness 0: that skips FSR 4.1.1's RCAS pass and its
+     extra 3840x2160 image.
+
+Not to use: `BBHOST_SUBMIT_EVERY_JOB=0` (test4 run C: 64 fps, flashing effects).
+
 ## test4 checks (~40 min)
 
 Same as test3: set the upscaler and the Resolution **before** launching. Stand at the same
@@ -112,8 +154,8 @@ B. **The same with the copy** (the direct write's A/B):
    `BBHOST_FSR_DIRECT_TARGET=0 bbtest start t4-copy`. Expected: about 0.2 ms more GPU
    time a frame, and the `copy` figure is back.
 C. **Merged submissions** (the gaps between command buffers, ~9% of the GPU's time):
-   `BBHOST_SUBMIT_EVERY_JOB=0 bbtest start t4-merge`. Compare FPS and `gpu busy:` with A.
-   Upstream bbhost's default. Only make it the default if it is faster and nothing breaks.
+   `BBHOST_SUBMIT_EVERY_JOB=0 bbtest start t4-merge`. Result: REJECTED (64 fps, 1% low
+   14.5, flashing effects). The default stays a submit per job.
 D. **The cheaper FSR inputs:** in A's setup, turn the reactive mask off, then sharpening
    to 0 (Upscaler settings). Note the FPS and the `FSR 3.1` / `reactive` figures for each.
 E. **Where the GPU time goes** (the game's passes at 4K; FPS here is not representative):

@@ -1,6 +1,21 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test5 (character shimmer with FSR 3.1, FSR 4.1.1 copy):**
+  - The game's object-velocity scale is now checked before use. test4 read (1, 1) for two
+    of its three windows. That decodes a still character's velocity texel to a 5-pixel
+    motion, and anything else to hundreds of pixels. A real scale (test4's third window:
+    8.89, -5, the 160x90 target's size / 18) keeps the scene's aspect. Anything else is
+    skipped and logged (`motion: velocity draw ... not a packing scale`).
+  - Object motion now replaces the camera's only inside the velocity target's objects (not
+    on their 16x16-pixel edges). It is also used only where it differs from the camera's
+    motion by more than `BBHOST_OBJECT_MOTION_MIN` (1.5 render pixels; one 8-bit step is
+    ~1.1). The motion-vector view shows such pixels dim blue, and used object motion
+    bright blue.
+  - FSR 4.1.1 also writes the scale pass's target directly (test4: copy 0.26 ms).
+    `BBHOST_FSR_DIRECT_TARGET=0` keeps the copy for both upscalers.
+  - Rejected and documented: `BBHOST_SUBMIT_EVERY_JOB=0` (test4 run C: 64 fps, 1% low
+    14.5, flashing effects). The default stays a submit per job.
 - **test4 (performance at 4K output, camera):**
   - The scene camera is now found every frame. test3's probe showed that most of the
     G-buffer draws' V#s carry no record count, so their size read as 0 and their scene

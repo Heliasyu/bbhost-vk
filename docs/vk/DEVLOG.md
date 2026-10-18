@@ -1025,3 +1025,50 @@ itself alone, so no view in another format gets STORAGE. FSR 4.1.1 and FSR 1 sti
 - Barriers, copies and fills between the game's draws: measure with BBHOST_GPU_PROFILE=2
   first. Any change there is correctness-sensitive (upstream renderer).
 - FSR 3.1's own 1.23 ms at 2560x1440 -> 3840x2160 is AMD's cost on this GPU.
+
+## test4 hardware result and the test5 changes (2026-10-18)
+
+- **Run A (FSR 3.1 Quality, 3840x2160):** the camera fix works: 3000 dispatches with 0-2
+  resets, 3000 written directly. MangoHud 117.7 fps (from ~113), gpu busy ~91%. The user
+  saw "strange shimmering on character", with FSR 3.1 only.
+- **Run C (`BBHOST_SUBMIT_EVERY_JOB=0`):** 64 fps, 1% low 14.5, flashing effects.
+  Rejected. The default stays a submit per job.
+- **FSR 4.1.1 (Quality, FP8 t2160_m0):** works. The user says it looks cleaner. 101.6 fps,
+  FSR 4.1.1 2.11 ms plus a 0.26 ms copy (`pass-timer:`).
+
+### The shimmer on characters (FSR 3.1)
+- The `motion:` summaries' velocity packing scale was `1 1` in the first two windows and
+  `8.88889 -5` in the third. The real one is the 160x90 target's size / 18, y negative:
+  it decodes the 8-bit texel to +-144 render pixels. With (1, 1) the decode is
+  (rg - 0.5) x (-2560, 1440): a still character's 128/255 is a 5-pixel motion, and moving
+  ones hundreds. Every object the game draws velocity for (characters, enemies: 32-36 draws
+  a frame) got wrong motion in those windows. The 0-record V# fix (test4) lets the scale
+  be read from more buffers, and some of them hold (1, 1).
+- Even the right scale has limits. The target is 160x90 RGBA8: a texel is 16x16 render
+  pixels and a step ~1.1 pixels, and 128/255 is not 0.5 (a still object reads 0.56 pixels
+  of motion). FSR 3.1 trusts the motion vectors and shows such errors as shimmer and
+  ghosting. FSR 4.1.1's network is far more tolerant, which fits "FSR 3.1 only" without
+  clearing the vectors. The other FSR 3.1-only input is the reactive mask (FSR 4.1.1 takes
+  none). TESTING test5 A has the one-switch-at-a-time order.
+- Changes:
+  - `velocity_scale_plausible`: both sides >= 1.5, the scene's aspect within 10%.
+    Otherwise the last good scale is kept, the read is counted and logged.
+  - `motion.comp`: object motion only where the 2x2 texel neighbourhood is all object
+    (FSR's depth dilation carries it onto the edges), and only where it differs from the
+    camera's by more than `BBHOST_OBJECT_MOTION_MIN` (1.5 px).
+  - The view's dim blue marks the rest.
+- IFreemz replays the velocity draws at render size into RGBA16F, the exact fix (Phase 2's
+  deferred item). Worth doing if test5 still shows object-motion errors.
+
+### FSR 4.1.1
+- The replay writes its output only (its history is internal: `history`, `recurrent`,
+  `reprojected`), so the target is as safe a destination as for FSR 3.1:
+  `Fsr4Params::direct_image/direct_view`, the same `direct_output_ok` rule. It saves the
+  0.26 ms copy.
+- The replay's per-frame CPU work: push descriptors per pass and a constant ring of 8
+  frames (`kFramesInFlight`, so `wait_submission_locked` is never reached at ~1.5 frames of
+  lead). The barriers between its passes are real dependencies. FP8 runs natively on the
+  9070 XT; fp8emu is only taken with `BB_FSR411_VARIANT=fp8emu`. Performance at 3840x2160
+  uses t2160_m0 with a 1920x1080 scene (m1 only for Ultra Performance).
+- With sharpening on, RCAS adds a pass and a 3840x2160 intermediate. At sharpness 0 it is
+  skipped.
