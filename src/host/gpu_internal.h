@@ -572,6 +572,12 @@ std::string staging_pool_stats();  // "chunks created N, uploads placed M"
 // The same for an image and its views: avoids a vkDeviceWaitIdle per surface
 // whose memory the game re-used, which cost most of a world load's GPU time.
 void defer_destroy_image(VkImage image, VkDeviceMemory memory);
+// bbhost-vk Phase 5: a 2D single-mip view of `image` for one of the renderer's
+// own passes (the motion pass's depth and velocity, FSR 4.1.1's inputs), kept
+// from frame to frame instead of made and destroyed each frame. Forgotten
+// (and destroyed deferred) when the image goes through defer_destroy_image,
+// so a view never outlives its image. VK_NULL_HANDLE when it cannot be made.
+VkImageView pass_view_locked(VkImage image, VkFormat format, VkImageAspectFlags aspect);
 // Device-local memory for sampled textures (gpu.cpp image heap): carved out
 // of 256 MiB blocks instead of one vkAllocateMemory - a kernel call - per
 // texture, which was ~10% of the command processor in frames where new

@@ -93,17 +93,8 @@ bool make_output(std::uint32_t w, std::uint32_t h) {
     return g_out.view != VK_NULL_HANDLE;
 }
 
-// A view of an input for this frame, destroyed once the recording retires.
-VkImageView frame_view(const UpscalerImage& img) {
-    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vci.image = img.image;
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format = img.format;
-    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VkImageView v = VK_NULL_HANDLE;
-    if (vkCreateImageView(g.device, &vci, nullptr, &v) != VK_SUCCESS) return VK_NULL_HANDLE;
-    return v;
-}
+// A view of an input, kept while the image lives (pass_view_locked, Phase 5).
+VkImageView frame_view(const UpscalerImage& img) { return pass_view_locked(img.image, img.format, VK_IMAGE_ASPECT_COLOR_BIT); }
 
 }  // namespace
 
@@ -289,9 +280,6 @@ bool fsr4_record_locked(VkCommandBuffer cmd, const UpscalerInputs& in, std::uint
         }
     } else {
         *why = "could not make the inputs' views";
-    }
-    for (VkImageView v : {cv, dv, mv}) {
-        if (v) defer_destroy_private_view(v);
     }
     if (ok) *out = g_out.image;
     return ok;

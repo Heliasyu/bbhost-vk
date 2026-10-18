@@ -4172,11 +4172,14 @@ bool image_memory_alloc(const VkMemoryRequirements& req, ImageMemory& out) {
     return true;
 }
 
+static void pass_views_image_gone_locked(VkImage image);  // below, with pass_view_locked
+
 void defer_destroy_image(VkImage image, const ImageMemory& m) {
     if (m.block < 0) {
         defer_destroy_image(image, m.memory);
         return;
     }
+    if (image) pass_views_image_gone_locked(image);
     bump_view_epoch();
     if (image) g.slots[g.slot].dead_images.push_back(image);
     g.slots[g.slot].dead_ranges.push_back(m);
@@ -4398,7 +4401,56 @@ void start_memory_reserve() {
     }).detach();
 }
 
+namespace {
+// pass_view_locked's views (gpu_internal.h), newest last. A handful: the
+// motion pass's two and FSR 4.1.1's three, plus the ones a resize leaves.
+struct PassView {
+    VkImage image;
+    VkFormat format;
+    VkImageAspectFlags aspect;
+    VkImageView view;
+};
+std::vector<PassView> g_pass_views;
+constexpr std::size_t kMaxPassViews = 16;
+void pass_views_forget_locked(VkImage image) {
+    for (std::size_t i = 0; i < g_pass_views.size();) {
+        if (g_pass_views[i].image == image) {
+            defer_destroy_private_view(g_pass_views[i].view);
+            g_pass_views.erase(g_pass_views.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+}  // namespace
+
+static void pass_views_image_gone_locked(VkImage image) {
+    if (!g_pass_views.empty()) pass_views_forget_locked(image);
+}
+
+VkImageView pass_view_locked(VkImage image, VkFormat format, VkImageAspectFlags aspect) {
+    if (!image) return VK_NULL_HANDLE;
+    for (std::size_t i = 0; i < g_pass_views.size(); ++i) {
+        const PassView& v = g_pass_views[i];
+        if (v.image == image && v.format == format && v.aspect == aspect) return v.view;
+    }
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = format;
+    vci.subresourceRange = {aspect, 0, 1, 0, 1};
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(g.device, &vci, nullptr, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (g_pass_views.size() >= kMaxPassViews) {  // the oldest goes (deferred: a recording may still use it)
+        defer_destroy_private_view(g_pass_views.front().view);
+        g_pass_views.erase(g_pass_views.begin());
+    }
+    g_pass_views.push_back({image, format, aspect, view});
+    return view;
+}
+
 void defer_destroy_image(VkImage image, VkDeviceMemory memory) {
+    if (image) pass_views_image_gone_locked(image);
     bump_view_epoch();
     if (image) g.slots[g.slot].dead_images.push_back(image);
     if (memory) g.slots[g.slot].dead_memory.push_back(memory);

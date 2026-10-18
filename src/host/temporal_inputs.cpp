@@ -21,6 +21,7 @@
 //     target), the camera history moves on (cuts logged), the jitter phase
 //     advances.
 #include "host/temporal_inputs.h"
+#include "host/pass_timer.h"
 
 #include "engine/scene_split.h"
 #include "hle/modules.h"
@@ -476,7 +477,9 @@ bool temporal_before_blend_locked(RtImage* color0, const RtImage* depth) {
     c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.dstSubresource = c.srcSubresource;
     c.extent = {color0->width, color0->height, 1};
+    const std::int32_t timed = pass_timer_begin_locked(g_cmd(), TimedPass::Opaque);
     vkCmdCopyImage(g_cmd(), color0->image, VK_IMAGE_LAYOUT_GENERAL, g_opaque.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    pass_timer_end_locked(g_cmd(), timed);
     memory_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                    VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
     ++g_window.opaque_snapshots;
@@ -548,20 +551,10 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
         to_general(g_depth_copy);
         memory_barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        vci.image = depth->image;
-        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format = depth->format;
-        vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-        VkImageView depth_view = VK_NULL_HANDLE, velocity_view = VK_NULL_HANDLE;
-        const VkDescriptorSet set =
-            vkCreateImageView(g.device, &vci, nullptr, &depth_view) == VK_SUCCESS ? alloc_set_locked(g_motion_pass.set_layout) : VK_NULL_HANDLE;
-        if (velocity) {
-            vci.image = velocity->image;
-            vci.format = velocity->format;
-            vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            if (vkCreateImageView(g.device, &vci, nullptr, &velocity_view) != VK_SUCCESS) velocity_view = VK_NULL_HANDLE;
-        }
+        // Phase 5: the two views are kept while their targets live (pass_view_locked).
+        const VkImageView depth_view = pass_view_locked(depth->image, depth->format, VK_IMAGE_ASPECT_DEPTH_BIT);
+        const VkImageView velocity_view = velocity ? pass_view_locked(velocity->image, velocity->format, VK_IMAGE_ASPECT_COLOR_BIT) : VK_NULL_HANDLE;
+        const VkDescriptorSet set = depth_view ? alloc_set_locked(g_motion_pass.set_layout) : VK_NULL_HANDLE;
         if (set && g_motion.view && g_depth_copy.view) {
             const VkDescriptorImageInfo infos[5] = {
                 {VK_NULL_HANDLE, depth_view, VK_IMAGE_LAYOUT_GENERAL},
@@ -587,10 +580,12 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
             push.extent[1] = rh;
             push.flags = (camera ? 1u : 0u) | (velocity_view ? 2u : 0u);
             VkCommandBuffer cmd = g_cmd();
+            const std::int32_t timed = pass_timer_begin_locked(cmd, TimedPass::Motion);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_motion_pass.pipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_motion_pass.layout, 0, 1, &set, 0, nullptr);
             vkCmdPushConstants(cmd, g_motion_pass.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
             vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);
+            pass_timer_end_locked(cmd, timed);
             memory_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
             in.motion = {g_motion.image, g_motion.format, g_motion.w, g_motion.h, rw, rh};
@@ -606,8 +601,6 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
                          camera ? "valid" : "not yet (a cut)", velocity_view ? "from the game's target" : "none");
             }
         }
-        if (depth_view) defer_destroy_private_view(depth_view);
-        if (velocity_view) defer_destroy_private_view(velocity_view);
     }
     // The reactive mask: where the finished scene differs from the opaque snapshot.
     if (g_cfg.reactive && in.opaque_color.image && scene_color && !scene_color->depth && scene_color->view && rw && rh &&
@@ -638,10 +631,12 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
             push.threshold = threshold;
             push.binary_value = value;
             VkCommandBuffer cmd = g_cmd();
+            const std::int32_t timed = pass_timer_begin_locked(cmd, TimedPass::Reactive);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_reactive_pass.pipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_reactive_pass.layout, 0, 1, &set, 0, nullptr);
             vkCmdPushConstants(cmd, g_reactive_pass.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
             vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);
+            pass_timer_end_locked(cmd, timed);
             memory_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
             in.reactive = {g_reactive.image, g_reactive.format, g_reactive.w, g_reactive.h, rw, rh};
