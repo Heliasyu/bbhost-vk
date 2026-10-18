@@ -263,7 +263,7 @@ Setting g_set[kSettingCount] = {
     {"upscale_sharpness", "Upscaling sharpness", {"0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"}, 8,
      "How much the upscaler sharpens. 0.8 matches FSR 1 as bbhost ships it. Not used yet.", false},
     {"debug_motion_vectors", "Show motion vectors", {"Off", "On"}, 0,
-     "Debug: draws the motion vectors over the picture. They exist from a later build; until then it only logs that.", false},
+     "Debug: draws the scene's motion vectors over the picture - red/green how far a pixel moved sideways/up-down, blue where a moving object (not the camera) moved it, dark where there is no camera. Needs the scene/UI split; computes motion vectors even with no temporal upscaler.", false},
     {"debug_upscaler_time", "Show upscaler GPU time", {"Off", "On"}, 0,
      "Debug: the GPU time of the presenter's passes (the upscale, the whole present) under the FPS counter, and in the log.",
      false},

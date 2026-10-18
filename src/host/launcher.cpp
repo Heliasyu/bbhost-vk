@@ -658,7 +658,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         ImGui::SameLine(260 * scale);
         ImGui::Checkbox("Show upscaler GPU time", &debug_upscaler_time);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk debug: the presenter's GPU time per pass under the FPS counter. Motion vectors: nothing to show yet.");
+            ImGui::SetTooltip("bbhost-vk debug: the presenter's GPU time per pass under the FPS counter. Motion vectors: red/green = horizontal/vertical motion, blue = object motion, dark = no camera found (needs the scene/UI split).");
         ImGui::TextDisabled("F10 in the game has every other setting.");
 
         ImGui::SeparatorText("Updates");
