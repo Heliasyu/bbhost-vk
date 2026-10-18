@@ -1,5 +1,26 @@
 # Changelog (bbhost-vk)
 
+## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **Per-pass GPU timing:** **Show Upscaler GPU Time** now breaks the renderer's work down: the
+  motion vectors, reactive mask, opaque snapshot, FSR 3.1 or 4.1.1 dispatch, and output copy.
+  It is on the overlay and in the log (`pass-timer:` every 10 s).
+- **Fewer allocations per frame:**
+  - The FSR 3.1 backend reuses its constant buffers and descriptor pools. Before, it made a
+    driver memory allocation and a descriptor pool for every dispatch. This comes from a
+    build-time patch to copies of FSR-Vulkan's files (`cmake/patches/`); the submodule is
+    unmodified.
+  - The motion pass's and FSR 4.1.1's image views are kept while their images live.
+- **Game Settings menu resolution freeze:** a resolution, upscaler or quality change made in
+  the game's own System menu now waits for the pick list to close before it resizes. A
+  never-shown question is withdrawn. F10 is unchanged.
+- **Packaging:** `tools/package_linux.sh` names the tarball for `git describe` and adds
+  `build-fsr4.sh` with the FSR 4.1.1 builder. It refuses to package any DLL, game file or FSR
+  4.1.1 asset, and writes a `.sha256`.
+- **Docs:**
+  - README: a "Testing bbhost-vk" section.
+  - TESTING.md: the test-build session.
+  - The updater needs no token (the repository is public).
+
 ## Unreleased (Phase 4 groundwork and test-build prep, branch `phase-4-fsr411`)
 - **FSR 4.1.1** replays AMD's 4.1.1 upscaler on Vulkan (ported from
   bbport) from assets you build once from your own

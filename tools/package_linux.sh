@@ -17,15 +17,15 @@ cd "$(dirname "$0")/.."
 bin=${1:-build-linux-portable/build/bbhost}
 out=${2:-build/linux}
 [ -x "$bin" ] || { echo "no binary at $bin (tools/linux_portable_build.sh builds it)"; exit 1; }
-rev=$(git -c core.excludesFile=/dev/null rev-parse --short HEAD 2>/dev/null || echo unknown)
-# A release (HEAD at a v* tag) is named for its version, anything else for its revision.
-if tag=$(git -c core.excludesFile=/dev/null describe --tags --exact-match --match 'v[0-9]*' 2>/dev/null); then
-    rev=$tag
-fi
+# bbhost-vk: named for `git describe` (v0.2.18-vk.0-55-gabc1234: the last
+# version tag, the commits since, the revision), so a test build says exactly
+# what it is; a bare revision when there is no tag to describe from.
+rev=$(git -c core.excludesFile=/dev/null describe --tags --match 'v[0-9]*' --always 2>/dev/null ||
+      git -c core.excludesFile=/dev/null rev-parse --short HEAD 2>/dev/null || echo unknown)
 if [ -n "$(git -c core.excludesFile=/dev/null status --porcelain --untracked-files=no 2>/dev/null)" ]; then
     rev="$rev+"
 fi
-name=bbhost-linux-$rev
+name=bbhost-vk-linux-$rev
 dir=$out/$name
 rm -rf "$dir"
 mkdir -p "$dir/data" "$dir/logs" "$dir/plugins" "$dir/build"
@@ -41,6 +41,45 @@ if [ -f third_party/FSR-Vulkan/LICENSE.txt ]; then
     cp third_party/FSR-Vulkan/upstream/ffx-1.1.4/sdk/LICENSE.txt "$dir/licenses/FSR-Vulkan/FidelityFX-SDK-LICENSE.txt"
 fi
 tools/package_plugins.sh "$(dirname "$bin")/plugins" "$dir/plugins"
+# bbhost-vk: the FSR 4.1.1 asset builder (GPL-2.0-or-later sources, from
+# bbport) and the testers' documents. Never AMD's DLL or the assets built from
+# it: those are each player's own (the check below refuses a package with any).
+mkdir -p "$dir/tools" "$dir/docs"
+cp -r tools/fsr4cap "$dir/tools/fsr4cap"
+rm -rf "$dir/tools/fsr4cap/__pycache__"
+# BBHOST_FSR4CAP_TOOLS=<folder with dxil-spirv and fsr4cap.exe>: built
+# beforehand, so build_assets.sh needs no MinGW, cmake or network (it reads
+# them through BB_FSR4CAP_TOOLS; run-fsr4cap.sh below sets it).
+if [ -n "${BBHOST_FSR4CAP_TOOLS:-}" ]; then
+    mkdir -p "$dir/tools/fsr4cap/bin"
+    # dxil-spirv with its library (rpath $ORIGIN), fsr4cap.exe, SOURCES.txt.
+    cp "$BBHOST_FSR4CAP_TOOLS"/* "$dir/tools/fsr4cap/bin/"
+fi
+cat > "$dir/build-fsr4.sh" <<'EOF2'
+#!/bin/bash
+# Builds FSR 4.1.1 once from your own amd_fidelityfx_upscaler_dx12.dll (4.1.x,
+# e.g. from the latest OptiScaler release) into ~/.local/share/bbhost/fsr4_411.
+# Needs Proton (GE-Proton 10+, Proton-CachyOS or Proton Experimental), python3
+# and spirv-dis/spirv-as; without tools/fsr4cap/bin also MinGW, cmake, ninja,
+# git and network. See README-TESTING.txt.
+#   ./build-fsr4.sh /path/to/amd_fidelityfx_upscaler_dx12.dll
+cd "$(dirname "$0")" || exit 1
+[ -n "${1:-}" ] || { echo "usage: ./build-fsr4.sh /path/to/amd_fidelityfx_upscaler_dx12.dll"; exit 2; }
+if [ -x tools/fsr4cap/bin/dxil-spirv ] && [ -f tools/fsr4cap/bin/fsr4cap.exe ]; then
+    export BB_FSR4CAP_TOOLS=${BB_FSR4CAP_TOOLS:-$(pwd)/tools/fsr4cap/bin}
+fi
+export BB_FSR4CAP_WORK=${BB_FSR4CAP_WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/bbhost/fsr4cap}
+exec tools/fsr4cap/build_assets.sh "$@"
+EOF2
+chmod +x "$dir/build-fsr4.sh"
+[ -f docs/vk/TESTING.md ] && cp docs/vk/TESTING.md "$dir/docs/TESTING.md"
+[ -f docs/vk/KNOWN_ISSUES.md ] && cp docs/vk/KNOWN_ISSUES.md "$dir/docs/KNOWN_ISSUES.md"
+[ -f CHANGELOG.md ] && cp CHANGELOG.md "$dir/docs/CHANGELOG.md"
+# The README's "Testing bbhost-vk" section, as plain text beside the binary.
+if [ -f README.md ]; then
+    awk '/^## Testing bbhost-vk/{on=1} on && /^## / && !/^## Testing bbhost-vk/{exit} on' README.md > "$dir/README-TESTING.txt"
+    [ -s "$dir/README-TESTING.txt" ] || rm -f "$dir/README-TESTING.txt"
+fi
 objcopy --strip-debug "$bin" "$dir/bbhost" 2>/dev/null || llvm-objcopy --strip-debug "$bin" "$dir/bbhost"
 chmod +x "$dir/bbhost"
 cp "$bin" "$out/$name.debug"
@@ -79,6 +118,12 @@ bbhost runs Bloodborne on PC: the game's own 1.09 executable, its calls into
 the PS4's system libraries answered by bbhost and its graphics recompiled for
 Vulkan. Free software under the GNU GPL, version 3 or later (LICENSE); the
 source is at https://github.com/droogie/bbhost.
+
+This is bbhost-vk, a test build of a fork of bbhost with FSR 3.1 and FSR 4.1.1
+upscaling (https://github.com/Heliasyu/bbhost-vk). README-TESTING.txt says how
+to install it over an existing bbhost, build FSR 4.1.1 and what to test;
+docs/TESTING.md is the full test session. Online is unchanged: the same
+community server as bbhost (https://thehuntersdream.com).
 
 You need
   - x86-64 Linux with glibc ${glibc#GLIBC_} or newer (Ubuntu 24.04, Linux Mint 22, Debian 13,
@@ -188,12 +233,23 @@ Reporting a problem
   every texture the frame used (the game pauses while it writes them).
 EOF
 
+# bbhost-vk: nothing proprietary goes out - no DLL, no game files, no
+# FSR 4.1.1 assets (they are built from AMD's DLL and stay on each machine).
+bad=$(find "$dir" \( -iname '*.dll' -o -iname 'eboot*' -o -iname '*.pkg' -o -iname 'initializer.bin' -o -iname 'param.sfo' \
+       -o -iname '*.sprx' -o -iname '*.self' -o -path '*fsr4_411*' -o -path '*dvdroot*' -o -iname 'keys*' \) -print)
+if [ -n "$bad" ]; then
+    echo "package: refusing - these must not be in a package:"; echo "$bad"; exit 1
+fi
+
 # Packed from a local copy with plain modes: on a filesystem without them
 # (NFS here) every file would go out executable.
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
 cp -r "$dir" "$stage/"
 find "$stage" -type d -exec chmod 755 {} + && find "$stage" -type f -exec chmod 644 {} +
-chmod 755 "$stage/$name/bbhost" "$stage/$name/run-bbhost.sh"
+chmod 755 "$stage/$name/bbhost" "$stage/$name/run-bbhost.sh" "$stage/$name/build-fsr4.sh"
+find "$stage/$name/tools" -name '*.sh' -exec chmod 755 {} +
+if [ -d "$stage/$name/tools/fsr4cap/bin" ]; then chmod 755 "$stage/$name/tools/fsr4cap/bin/dxil-spirv" "$stage/$name/tools/fsr4cap/bin/"*.so*; fi
 rm -f "$out/$name.tar.gz"
 tar czf "$out/$name.tar.gz" -C "$stage" --owner=0 --group=0 "$name"
-echo "package: $out/$name.tar.gz ($(( $(stat -c %s "$out/$name.tar.gz") / 1048576 )) MB); symbols: $out/$name.debug"
+( cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+echo "package: $out/$name.tar.gz ($(( $(stat -c %s "$out/$name.tar.gz") / 1048576 )) MB, sha256 $(cut -d' ' -f1 "$out/$name.tar.gz.sha256")); symbols: $out/$name.debug"

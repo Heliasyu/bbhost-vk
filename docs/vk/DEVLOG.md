@@ -713,3 +713,48 @@ while the pick list is still up.
 - **Updater:** Heliasyu/bbhost-vk is public, so the update check needs no
   token. The private-repo hints are gone (the optional token_file still
   works, as upstream's).
+
+## 2026-10-18 (Sun), Phase 5 low-risk performance and the first test build
+
+**Per-dispatch allocations: FSR-Vulkan's bridge.** For every FSR 3.1 pass, a constant buffer
+was a vkCreateBuffer plus a vkAllocateMemory, and a descriptor set got a descriptor pool of its
+own (about a dozen dispatches a frame). All of it was destroyed again at the retire.
+- A wrapper can't reach these, so `cmake/patches/fsr-vulkan-recycle.patch` keeps them instead:
+  - buffers by capacity, rewritten through map/memcpy/flush;
+  - pools reset and keyed by the pipeline's set layout, with a retry on a fresh pool if a
+    reused one fails.
+- The patch is applied at configure time to copies of the three files in the build tree. The
+  submodule stays at its pinned commit, unmodified.
+- If it stops applying (a new pin), the build warns and uses the files as they ship.
+  `-DBBHOST_FSR_VULKAN_PATCHES=OFF` skips it.
+- fsr3_upscaler_test (real dispatches on lavapipe over several frames, with retires) passes
+  with the same error figures.
+
+**Persistent resources.**
+- The motion pass's depth and velocity views, and FSR 4.1.1's three input views, used to be
+  made and destroyed every frame. They now come from `pass_view_locked`.
+- Those views are forgotten (and destroyed deferred) in both `defer_destroy_image` overloads,
+  so none outlives its image, including the image-heap path render targets use.
+- The motion, depth-copy, reactive and opaque images and FSR 4.1.1's output were already
+  persistent (resized only with the scene).
+
+**No stalls.** Nothing on the hot path waits. The timers read only retired submissions. FSR
+4.1.1 waits only if 8 of its frames are in flight (never in practice).
+
+**Timing.** `host/pass_timer.cpp` puts timestamp pairs in a 64-slot ring around the motion
+pass, reactive mask, opaque snapshot, upscaler dispatch and output copy. It feeds the overlay
+(`scene: ...`) and a `pass-timer:` log line every 10 s. Test session part 5 is a 1080p -> 4K
+table built from it.
+
+**Test build.**
+- `tools/package_linux.sh` changes:
+  - The tarball is named for `git describe`.
+  - It adds `tools/fsr4cap` and `build-fsr4.sh`, plus the testers' docs.
+  - A guard refuses any DLL, eboot, PKG, param.sfo, keys or fsr4_411.
+  - It writes a `.sha256`.
+- The FSR 4.1.1 helpers were prebuilt on the box (MinGW installed for it):
+  - `fsr4cap.exe` (MinGW, static);
+  - dxil-spirv at its pinned commit, with the class-bindings patch and rpath `$ORIGIN`, so
+    testers need only Proton, python3 and spirv-tools.
+- The plugins in the package are unsigned (there is no release key here). Testers keep their
+  own signed `plugins/`.

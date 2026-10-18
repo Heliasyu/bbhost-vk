@@ -93,186 +93,160 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
-## Phase 0 test (5 min)
-1. Install the Phase 0 `bbhost.bin` into the game folder (keep the old one:
-   `mv bbhost.bin bbhost.bin.vk0` first).
-2. `bbtest start p0`. In the setup window: set **Upscaler**, **Upscaling
-   quality**, **Upscaler sharpness** and the two debug checkboxes to
-   non-default values, press Play.
-3. In game, F10: the **UPSCALING** rows - flip each one (Upscaler through all
-   four, Quality through all five, Sharpness, both debug toggles). Turn on
-   **Show Upscaler GPU Time** once and check the GPU line under the FPS
-   counter (turn on the FPS counter too).
-4. Esc -> System: **PC Upscaling** and **Upscaling Quality** - flip each row
-   there too.
-5. Load your save, look around for a minute, quit from the menu.
-6. `bbtest stop` if the session did not end by itself.
+## Test build session (test1, ~90 min)
+This session covers the first test build from start to finish. The most important checks come
+first, so if time runs out, stop after part 4. The build is
+`/workspace/bbhost-vk-builds/test1/bbhost-vk-linux-<version>.tar.gz` on the build box; check it
+against its `.sha256`. Install it as the README's "Testing bbhost-vk" section describes:
+`cp bbhost.bin bbhost.bin.upstream` first, then copy the tarball's `bbhost` over `bbhost.bin`,
+and keep your own `plugins/`. Resolution is 3840x2160 (4K) unless a part says otherwise. Keep
+**Show FPS** on throughout, and MangoHud/goverlay as usual.
 
-Pass: every option is in `options-after.toml` with the value last set; the
-log has `upscaler:` lines for each change and no new errors; the picture looks
-identical to stock (Phase 0 changes nothing on screen).
+### 1. Launches (A, 5 min): `bbtest start t1-launch`
+1. The setup window opens. Under the upscaling options: **Upscaler** has Off / FSR 1 / FSR 3.1 /
+   FSR 4.1.1, and **Upscaling quality**, **Upscaler sharpness**, **Upscaler reactive mask**,
+   **Upscaler jitter**, the two debug checkboxes and the **FSR 4.1.1 DLL** path row are all
+   there. Frame rate offers **120**.
+2. Set them all to non-default values, then back to **FSR 1** / **Native AA**, and press Play.
+3. In the game: F10 > UPSCALING, flip every row once (Upscaler through all four, Quality
+   through all five, Sharpness, the toggles). Then Esc > System > **PC Upscaling** and
+   **Upscaling Quality**, and flip their rows too. End on **FSR 1** / **Native AA**.
+4. Load your save, look around for a minute.
 
-## Pending combined test session (Phase 0 to Phase 3, online, FaceGen, resolution menu, ~75 min)
-The Phase 0, 1, 2 and 3 checks and the online check in one sitting, with
-the Phase 3 binary (`/workspace/bbhost-vk-builds/phase3/bbhost.bin` on the
-build box; check its SHA-256 against `bbhost.bin.sha256`). The Phase 2
-binary's parts still apply to it; with FSR 3.1 the Phase 2 shimmer of part C
-is now resolved by FSR (part D). Install it over `bbhost.bin` (keep the
-old one: `mv bbhost.bin bbhost.bin.vk0` first). No `--capture` for part A.
+Pass:
+- It starts.
+- Every option is in `options-after.toml` with its last value.
+- The log has `upscaler:` lines for each change and no new errors.
+- With FSR 1 / Off at Native AA the picture looks exactly like stock (`scene-split: ... (not
+  split ...)`).
 
-### A. Phase 0 checks (5 min): `bbtest start p0`
-1. In the setup window: set **Upscaler**, **Upscaling quality**,
-   **Upscaler sharpness** and the two debug checkboxes to non-default
-   values, then back to **Upscaler FSR 1** (or Off) and **Native AA**; Play.
-2. In game, F10: flip every **UPSCALING** row (Upscaler through all four,
-   Quality through all five, Sharpness, both debug toggles), turning on
-   **Show Upscaler GPU Time** once with the FPS counter on. End on
-   **FSR 1** (then once on **Off**) with **Native AA**.
-3. Load your save, look around a minute, quit from the menu.
+### 2. Online (E, 5 min), FSR 3.1 at Quality
+Online must work exactly as with upstream bbhost: same servers, sign-in and networking.
+1. Sign in as usual. The log shows sign-in succeeding and the user agent `bbhost/v0.2.18-vk...`.
+2. In an online area: other players' messages and bloodstains are visible (read one, touch one).
+3. Put down a summon sign or ring a bell (Beckoning or Small Resonant Bell) and check it is
+   accepted. If someone answers, do a summon round trip.
 
-Pass: every option is in `options-after.toml` with its last value; `upscaler:`
-lines for each change, no new errors; with Off / FSR 1 at Native AA the
-picture looks exactly like stock (the log says `scene-split: render size ... (not
-split - the game's own bytes at every site)`, no `scale pass` lines).
+Pass: as with upstream. If not, run once with `bbhost.bin.upstream` to compare.
 
-### B. Phase 1 checks (15 min): `bbtest start p1` (add `--record` if you can)
-1. Setup window: **Upscaler FSR 1**, **Upscaling quality Quality (67%)**,
-   your usual Resolution. Play, load your save.
-2. Visit each spot below. At each: look for a few seconds, then F10 ->
-   Upscaling quality **Native AA**, wait ~2 s (the change waits for the menu
-   to settle), close F10, look; then back to **Quality (67%)**, look again.
-   - the Hunter's Dream (outdoors, the doll, the workshop);
-   - a lamp menu (the lamp's own menu and its sub-menus);
-   - the inventory / item screens (item icons, descriptions);
-   - a cutscene (any that you can trigger: a boss intro, or the Dream's
-     first visit);
-   - an area with messages and bloodstains (read one of each).
-3. `bbtest mark <what>` whenever something looks wrong: UI blurry at 67%,
-   a black or grey band or border, garbage in a menu or cutscene, blocky
-   effects (fog, bloom, depth of field), icons missing or wrong-sized,
-   message text unreadable, a hitch on the toggle.
-4. Quit from the menu.
+### 3. FSR 3.1 picture (D, 20 min): `bbtest start t1-fsr3 --record`
+Turn on **Show Upscaler GPU Time**. The GPU line now also shows `scene: MV x  reactive x
+opaque x  FSR 3.1 x  copy x ms`.
+1. Setup: **FSR 3.1**, **Quality**, default sharpness, reactive mask **On**, jitter **On**.
+   Load your save (Central Yharnam or anywhere with enemies).
+2. Spend ~10 s on each of the following. Run `bbtest clip` after each, and `bbtest mark <what>`
+   when something looks wrong.
+   - **Stand still at a detailed spot** (fences, railings, roof tiles, hair, coat fringes):
+     stable, no crawling, sharper than FSR 1 at the same preset.
+   - **Walk, strafe, spin the camera:** no smearing, no wobble or jelly. If the whole picture
+     wobbles while still, run once with `BBHOST_FSR_JITTER_SIGN=xy`, then `=x`, then `=y`, and
+     note which one fixes it.
+   - **Fight a group, roll around them:** look for ghost trails behind enemies, weapons, cloth
+     and your coat.
+   - **Particles** (lantern, Beast Blood pellet or fire paper, fog, Blood Echoes): look for
+     trails behind them.
+   - **A lamp warp and a cutscene:** the first frame after the cut is clean.
+3. F10: **Performance**, then repeat the still spot and the fight briefly. Turn **reactive
+   mask** Off and look at the particles again (more trails expected), then back On. Turn
+   **Upscaler jitter** Off once (softer and more aliased expected), then back On.
 
-Pass: at 67% the 3D scene is softer but the UI, text and icons are as sharp as
-at Native; nothing is corrupt; no crash. In the log: one `scene-split: render
-size` line per toggle, `the graphics manager's scene is ...` without
-`not the ... asked for`, `scale pass ... drawn`, `heap:` with free space left,
-and `yebis: restart` lines only next to size changes (none while just playing). If 67% shows a band or corruption,
-run once with `BBHOST_SCENE_SPLIT=0` to confirm it is the split.
+Pass:
+- No crash, a sharp and stable picture at Quality, little ghosting.
+- Log lines to look for:
+  - `fsr3: FSR 3.1.5 context for scene 2560x1440 -> output 3840x2160 ...`
+  - `fsr3: first FSR 3.1 frame ...`
+  - `motion: first reactive mask ...`
+  - `fsr3: history reset ... a camera cut` near warps and cutscenes only
+- The `fsr3:` summaries show `bilinear frames:` only for menus and loads.
+- If FSR 3.1 is never used, `fsr3: the scale pass is drawn bilinear this frame: <reason>`
+  says why.
 
-### C. Phase 2 checks (15 min): `bbtest start p2 --record`
-1. Setup window: **Upscaler FSR 3.1**, **Upscaling quality Quality (67%)**,
-   **Show motion vectors** on. Play, load your save (somewhere with enemies,
-   e.g. Central Yharnam). The 3D scene may shimmer slightly: the jitter is
-   on and nothing resolves it until Phase 3 (expected).
-2. With the motion-vector overlay on, do each for ~10 s and `bbtest clip`
-   after each (or `bbtest mark <what>` if it looks wrong):
-   - walk forward, then strafe: the world turns red/green evenly, stronger
-     at the sides and near the floor; standing still: dark/black;
-   - spin the camera fast both ways: strong red, no blocky holes;
-   - roll and quickstep: the character shows blue (object motion);
-   - light/close the lantern; use a Beast Blood pellet (particles, glow);
-   - fight a group of enemies: moving enemies and weapons blue;
-   - one boss fight (its arena entry and camera).
-3. F10: Show Motion Vectors off; look ~10 s at a detailed area; then quit
-   from the menu. Optional: one run with `BBHOST_JITTER=0` for comparison of
-   the shimmer.
+### 4. FSR 4.1.1 build and run (new, 15 min)
+1. Build the assets once:
+   - Get `amd_fidelityfx_upscaler_dx12.dll` from the latest OptiScaler release.
+   - From the unpacked tarball, run `./build-fsr4.sh /path/to/amd_fidelityfx_upscaler_dx12.dll`.
+   - Note how long it took and its last lines. The exit codes are in
+     `tools/fsr4cap/build_assets.sh`'s header: 3 means no Proton, 5 means the DLL's FSR 4.1
+     did not run under Proton.
+   - The setup window then says "FSR 4.1.1 assets built in ~/.local/share/bbhost/fsr4_411".
+2. `bbtest start t1-fsr4 --record`. Choose **FSR 4.1.1** at **Quality**, load your save, and
+   repeat part 3's still spot, the fight, the particles and a warp. Then **Performance**.
+3. Note the GPU line (`FSR 4.1.1 x.xx ms`) and the FPS, compared with FSR 3.1.
 
-Pass: no crash, no change at FSR 1 / Native (part A); the overlay follows the
-camera and shows dark when still. In the log: `motion: scene constants
-found ...` (with the render size, not `the output's`), `motion: the scene
-depth is ...`, `motion: first motion pass ... camera valid`, `jitter:
-Halton(2,3), 18 phases`, a handful of `camera-cut:` lines (lamp warps,
-loading, cutscenes; not one per roll), and the `motion:` summaries
-(velocity draws per frame, `after the scale pass` should be 0). If blue
-never appears on enemies, run once with `BBHOST_OBJECT_MOTION=0` and
-compare.
+Pass:
+- No crash.
+- The log has `fsr4: FSR 4.1.1 replay, <int8|fp8> ...` and no `fsr4: ...: FSR 3.1
+  upscales instead`.
+- The picture is at least as stable as FSR 3.1, with less ghosting.
+- If it falls back, the `fsr4:` line says why. Keep the log.
 
-### D. Phase 3 checks (20 min): `bbtest start p3 --record`
-Resolution 3840x2160 (4K), **Show FPS** and **Show Upscaler GPU Time** on,
-MangoHud/goverlay as usual (it should keep working).
-1. Setup window: **Upscaler FSR 3.1**, **Upscaling quality Quality (67%)**,
-   **Upscaler sharpness** at its default, **Upscaler reactive mask** On.
-   Play, load your save (Central Yharnam or anywhere with enemies).
-2. Look for ~10 s each, `bbtest clip` after each, `bbtest mark <what>` when
-   something looks wrong:
-   - stand still at a detailed spot (fences, railings, roof tiles, hair,
-     coat fringes): stable, no crawling or shimmer, sharper than FSR 1 at
-     the same preset;
-   - walk and strafe, spin the camera: no smearing of the world, no
-     wobble/jelly (if the whole picture wobbles or doubles when still, run
-     once with `BBHOST_FSR_JITTER_SIGN=xy`, then `=x`, `=y`, and note which
-     fixes it);
-   - fight a group of enemies, roll around them: ghost trails behind
-     enemies, weapons, cloth and the character's coat;
-   - particles: the lantern on/off, a Beast Blood pellet or fire paper,
-     fog, Blood Echoes collecting: trails or smears behind them;
-   - a lamp warp and a cutscene: the first frame after the cut is clean
-     (no blend of the old picture).
-3. F10: **Upscaling quality Performance (50%)**: repeat the still spot and
-   the fight briefly. Then **Upscaler reactive mask** Off: the particles
-   again (more trails expected), back On.
-4. GPU time and frame rate: note the FPS and the `FSR 3.1 x.xx ms` on the
-   GPU line at Quality, Performance, and with **Upscaler FSR 1** at
-   **Native AA** (the native comparison). Target: 120 fps at Quality or
-   Performance where native does not reach it.
-5. Once **Upscaler FSR 4.1.1**: it should look like FSR 3.1 (the log says
-   it uses FSR 3.1 until Phase 4). Back to FSR 3.1; quit from the menu.
+### 5. Where the frame time goes, 1080p -> 4K (new, 10 min)
+Stand at one busy, repeatable spot (the same view each time) with **Show Upscaler GPU Time**
+on. For each row, wait ~10 s and write down the FPS, `GPU %`, and the whole GPU line (the
+presenter's passes plus `scene: ...`). The log's `pass-timer:` line every 10 s has the same
+numbers.
 
-Pass: no crash; a sharp, stable picture at Quality; little ghosting; FSR 1
-and Native unchanged from stock. In the log: `fsr3: FSR 3.1.5 context for
-scene 2560x1440 -> output 3840x2160 ... MiB, made in ... ms`, `fsr3: first
-FSR 3.1 frame ...`, `motion: first reactive mask ...`, `fsr3: history
-reset ... a camera cut` near warps/cutscenes (not every roll), the `fsr3:`
-summaries (`bilinear frames:` should be only menus/loads), and `fsr3: the
-dispatch takes x.xx ms`. If FSR is never used, the `fsr3: the scale pass
-is drawn bilinear this frame: <reason>` line says why; `BBHOST_FSR3=0`
-gives the bilinear copy for comparison.
+| Upscaler / quality (4K output) | FPS | GPU % | scene: MV / reactive / opaque / upscaler / copy (ms) |
+|---|---|---|---|
+| FSR 1, Native AA (native 4K) | | | |
+| FSR 3.1, Quality (1440p scene) | | | |
+| FSR 3.1, Performance (1080p scene) | | | |
+| FSR 4.1.1, Quality | | | |
+| FSR 4.1.1, Performance (1080p scene) | | | |
 
-### E. Online check (5 min), with FSR 3.1 at Quality
-Online must work exactly as with upstream bbhost (same servers, sign-in and
-networking; bbhost-vk does not touch them).
-1. Start as usual and sign in (the same account flow as upstream); the log
-   shows the sign-in succeeding and the user agent `bbhost/v0.2.18-vk...`.
-2. In an online area: other players' messages and bloodstains are visible
-   (read one, touch one).
-3. Either put down a summon sign (Beckoning Bell or Small Resonant Bell) or
-   ring a bell, and see it is accepted (a co-op/summon round trip if
-   someone answers).
+Frame cap **120**. This shows whether 120 fps is lost in the game's own rendering (GPU % high,
+small pass times), in the upscaler (a large upscaler time), or on the CPU (GPU % well under 100).
 
-Pass: sign-in, messages, bloodstains and the bell/sign behave as with
-upstream bbhost. If not, note it and run once with upstream's binary to
-compare.
+### 6. Scene/UI split (B, 10 min), FSR 1 at Quality
+1. Visit the Hunter's Dream, a lamp menu, the inventory, a cutscene, and an area with messages.
+2. At each: F10 > **Native AA**, wait ~2 s, look; then back to **Quality**, look again.
+3. `bbtest mark <what>` on: blurry UI at 67%, a black or grey band or border, garbage in a menu
+   or cutscene, blocky effects, wrong-sized icons, a hitch on the toggle.
 
-### F. FaceGen / vertex-explosion check (5 min), with FSR 3.1 at Quality
-shadPS4's "exploding vertices" on faces came from GPU writes (FaceGen)
-the CPU never read back. bbhost imports the game's GPU-visible memory into
-Vulkan, so it should not happen; this checks bbhost-vk's changes kept that.
-Optional: start with `BBHOST_GLITCH=1`.
+Pass:
+- The scene is softer at 67% but the UI and text are sharp, and nothing is corrupt.
+- In the log: one `scene-split: render size` line per toggle, and `yebis: restart` only next
+  to size changes.
+- If you see a band or corruption, run once with `BBHOST_SCENE_SPLIT=0`.
+
+### 7. Motion vectors (C, 10 min), FSR 3.1 at Quality, **Show motion vectors** on
+1. Walk and strafe: red/green, even across the screen. Standing still: dark.
+2. Spin fast: strong red, no holes.
+3. Roll and fight: you and moving enemies show blue.
+4. One boss entry.
+5. Turn the overlay off.
+
+Pass:
+- `motion: first motion pass ... camera valid`, and `camera-cut:` lines only at warps, loads
+  and cutscenes.
+- If blue never appears, run once with `BBHOST_OBJECT_MOTION=0`.
+
+### 8. FaceGen / vertex explosion (F, 5 min), FSR 3.1 at Quality
+shadPS4's "exploding vertices" came from FaceGen GPU writes the CPU never read back. bbhost
+imports the game's GPU-visible memory into Vulkan, so it should not happen here. This part
+checks that bbhost-vk's changes kept it that way. Optional: `BBHOST_GLITCH=1`.
 1. PC enhancements: **Hunter's Dream mirror** on (restart if it was off).
-2. In the Hunter's Dream workshop, use the mirror (Put on Disguise) to open
-   the appearance editor. For ~30 s change face shape, hair, and other face
-   sliders rapidly, rotating the preview; `bbtest clip`.
-3. Leave the editor, die once (anywhere), then rest at a lamp.
+2. Use the mirror and change face shape, hair and the sliders rapidly for ~30 s while rotating
+   the preview. `bbtest clip`.
+3. Leave, die once, rest at a lamp.
 
-Pass: no exploded or stretched vertices, no spikes, and no "veil" over
-faces (yours or NPCs') in the editor, after the death or at the lamp.
+Pass: no exploded or stretched vertices, no spikes, and no "veil" over faces.
 
-### G. Resolution change in the game's own Settings menu (5 min)
-A known issue (docs/vk/KNOWN_ISSUES.md), also seen on upstream bbhost. This is
-Bloodborne's own menu (System > PC Graphics > Resolution), not F10.
-1. In the game: System > PC Graphics > Resolution, pick another size,
-   confirm it. When the "keep this resolution?" question appears, try the
-   keyboard (arrows, Enter), the pad, and a mouse click; `bbtest mark
-   resolution-question`.
-2. If the menus stop responding, wait 15 s without touching anything: does
-   the question close by itself (the size goes back) and do the menus respond
-   again? Note which.
-3. Quit, start again with `BBHOST_SCENE_SPLIT=0`, and repeat steps 1-2.
-4. Repeat once with **Upscaler Off**, and once picking the size *slowly*
-   (wait 3 s on the pick list before confirming).
+### 9. Resolution in the game's own Settings menu (G, 5 min)
+The game's own menu (System > PC Graphics > Resolution) used to freeze at the "keep this
+resolution?" question, also upstream. F10 always worked. This build waits for the pick list to
+close before it changes the size (docs/vk/KNOWN_ISSUES.md).
+1. System > PC Graphics > Resolution: pick another size. Try once quickly, and once holding
+   the confirm key a moment. The question should appear and take the keyboard, the pad and the
+   mouse. Answer **Yes** once and **No** once. `bbtest mark resolution-question`.
+2. Pick a size and leave PC Graphics before the question appears: nothing should pop up later,
+   and the size goes back after ~13 s.
+3. If it still freezes: wait 15 s without input and note whether it recovers. Repeat once with
+   `BBHOST_SCENE_SPLIT=0` and once with **Upscaler Off**.
 
-Pass/notes: whether input works on the question, whether it recovers after
-~13 s, and whether `BBHOST_SCENE_SPLIT=0` or Upscaler Off changes anything.
-The log's `resolution:` lines (asking, answered, no answer in 10 s) and
-`yebis: restart` show how far it got.
+Pass:
+- The question works every time.
+- The log shows `resolution: waiting for the menu's pick list to close before the change` when
+  the gate held the change, then `resolution: asking to keep it` and `answered over PC
+  Graphics`.
+- A freeze has `resolution:` and `pc-options:` lines that show how far it got. Keep that log.
