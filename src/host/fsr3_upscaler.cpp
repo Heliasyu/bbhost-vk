@@ -172,14 +172,17 @@ bool Fsr3Upscaler::record(const Fsr3Frame& f, std::string* why) {
     void* depth = import(f.depth, false);
     void* motion = import(f.motion, false);
     void* reactive = f.reactive.image ? import(f.reactive, false) : nullptr;
+    void* direct = f.output.image ? import(f.output, true) : nullptr;
     for (std::size_t k = first_import; k < imports_.size(); ++k) imports_[k].frame_id = f.frame_id;
-    if (!color || !depth || !motion || (f.reactive.image && !reactive)) {
+    if (!color || !depth || !motion || (f.reactive.image && !reactive) || (f.output.image && !direct)) {
         // Nothing recorded: what was imported goes now.
         FfxVkFsr3_3_1_5Bridge* bridge = ffxVkFsr3_3_1_5UpscalerContextGetBridge(context_);
         for (std::size_t k = first_import; k < imports_.size(); ++k) ffxVkFsr3_3_1_5BridgeReleaseImportedImage(bridge, {imports_[k].token});
         imports_.resize(first_import);
         set_why(why, !color ? "the scene colour's format cannot be imported" : !depth ? "the depth copy could not be imported"
-                     : !motion ? "the motion vectors could not be imported" : "the reactive mask could not be imported");
+                     : !motion ? "the motion vectors could not be imported"
+                     : !direct && f.output.image ? "the scale pass's target could not be imported as the output"
+                                                 : "the reactive mask could not be imported");
         return false;
     }
     if (!owned_general_) {
@@ -208,7 +211,7 @@ bool Fsr3Upscaler::record(const Fsr3Frame& f, std::string* why) {
     d.dilatedDepth = {shared_[0].token};
     d.dilatedMotionVectors = {shared_[1].token};
     d.reconstructedPrevNearestDepth = {shared_[2].token};
-    d.output = {output_.token};
+    d.output = {direct ? direct : output_.token};
     d.jitterOffsetX = f.jitter_x;
     d.jitterOffsetY = f.jitter_y;
     d.motionVectorScaleX = f.mv_scale_x;

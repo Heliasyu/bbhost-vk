@@ -20,6 +20,8 @@
 
 #if BBHOST_HAVE_FSR_VULKAN
 
+#include "engine/live_resolution.h"
+#include "engine/scene_split.h"
 #include "hle/modules.h"
 #include "host/fsr3_upscaler.h"
 #include "host/fsr4_pass.h"
@@ -85,10 +87,11 @@ bool g_fsr4_off = false;  // FSR 4.1.1 cannot run in this session (assets, devic
 temporal::Fsr3History g_history4;
 std::uint64_t g_last_frame4 = ~0ull;
 VkImage g_last_out4 = VK_NULL_HANDLE;
+VkImage g_last_direct = VK_NULL_HANDLE;  // test4: the target FSR 3.1 last wrote directly (a repeat copies from it)
 std::string g_fsr4_described;
 
 struct Stats {
-    std::uint64_t dispatches = 0, fsr4 = 0, copies = 0, blits = 0, repeats = 0, resets = 0, contexts = 0;
+    std::uint64_t dispatches = 0, fsr4 = 0, copies = 0, blits = 0, repeats = 0, resets = 0, contexts = 0, direct = 0;
     std::uint64_t fallbacks[static_cast<int>(Fallback::kCount)] = {};
 };
 Stats g_window;
@@ -356,6 +359,22 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
     if (in.frame == g_last_frame) {
         // A second scale pass in the same frame: the same picture again.
         ++g_window.repeats;
+        if (g_last_direct) {
+            // FSR wrote the first target itself: that picture into this one.
+            if (g_last_direct != target->image) {
+                barrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+                VkImageCopy c{};
+                c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                c.dstSubresource = c.srcSubresource;
+                c.dstOffset = {static_cast<std::int32_t>(out.x), static_cast<std::int32_t>(out.y), 0};
+                c.extent = {g_fsr->output_w(), g_fsr->output_h(), 1};
+                if (target->format == VK_FORMAT_R16G16B16A16_SFLOAT) vkCmdCopyImage(cmd, g_last_direct, VK_IMAGE_LAYOUT_GENERAL, target->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+                barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+            }
+            return true;
+        }
         copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target, out);
         return true;
     }
@@ -403,6 +422,10 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
     barrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     const bool dump = dump_begin_locked(in, *target, out, "FSR 3.1", fr.reset);
+    // test4: straight into the target when it took STORAGE (fsr3_target_storage_wanted).
+    const bool direct = temporal::direct_output_ok(target->upscaler_storage, static_cast<int>(target->format), target->width, target->height, out,
+                                                   g_fsr->output_w(), g_fsr->output_h(), dump);
+    if (direct) fr.output = {target->image, target->format, target->width, target->height, g_fsr->output_w(), g_fsr->output_h()};
     const std::int32_t slot = pass_timer_begin_locked(cmd, TimedPass::Upscale);
     std::string why;
     const bool ok = g_fsr->record(fr, &why);
@@ -414,9 +437,24 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
         g_history = {};  // the next dispatch starts over
         return fall_back(Fallback::Dispatch);
     }
-    const std::int32_t copy_slot = pass_timer_begin_locked(cmd, TimedPass::Copy);
-    copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target, out);
-    pass_timer_end_locked(cmd, copy_slot);
+    if (direct) {
+        // FSR's writes before whatever reads the target next (the game's post-processing).
+        barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+        ++g_window.direct;
+        g_last_direct = target->image;
+        static bool said = false;
+        if (!said) {
+            said = true;
+            host_log("fsr3: FSR 3.1 writes the scale pass's %ux%u target directly (no copy of its output; BBHOST_FSR_DIRECT_TARGET=0: the copy)",
+                     target->width, target->height);
+        }
+    } else {
+        g_last_direct = VK_NULL_HANDLE;
+        const std::int32_t copy_slot = pass_timer_begin_locked(cmd, TimedPass::Copy);
+        copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target, out);
+        pass_timer_end_locked(cmd, copy_slot);
+    }
     pass_timer_upscaler_is_fsr4(false);
     ++g_upscaled;
     dump_end_locked(dump, in.frame, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
@@ -453,6 +491,26 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
     return true;
 }
 
+bool fsr3_target_storage_wanted(int format, std::uint32_t w, std::uint32_t h, std::uint32_t layers) {
+    static const bool off = [] {
+        const char* e = std::getenv("BBHOST_FSR_DIRECT_TARGET");
+        return e && e[0] == '0';
+    }();
+    unsigned dw = 0, dh = 0;
+    live_resolution_display(&dw, &dh);
+    const int kind = host_settings().upscaler;
+    const bool want = temporal::direct_target_wanted(format, w, h, layers, dw, dh, scene_split_available(),
+                                                     kind == upscaler::kFsr31 || kind == upscaler::kFsr411, off);
+    if (want) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            host_log("fsr3: colour targets of %ux%u (RGBA16F) take STORAGE so FSR 3.1 can write the scale pass's directly", w, h);
+        }
+    }
+    return want;
+}
+
 std::string fsr3_report_locked() {
     const Stats& w = g_window;
     std::string falls;
@@ -464,9 +522,10 @@ std::string fsr3_report_locked() {
         falls += part;
     }
     char buf[640];
-    std::snprintf(buf, sizeof(buf), "fsr3: %llu dispatches (%llu FSR 4.1.1, %llu copied, %llu blitted, %llu repeats), %llu resets, %llu contexts made, %.1f MiB; "
+    std::snprintf(buf, sizeof(buf), "fsr3: %llu dispatches (%llu FSR 4.1.1, %llu written directly, %llu copied, %llu blitted, %llu repeats), %llu resets, %llu contexts made, %.1f MiB; "
                   "bilinear frames: %s; GPU per pass: %s",
-                  static_cast<unsigned long long>(w.dispatches), static_cast<unsigned long long>(w.fsr4), static_cast<unsigned long long>(w.copies), static_cast<unsigned long long>(w.blits),
+                  static_cast<unsigned long long>(w.dispatches), static_cast<unsigned long long>(w.fsr4), static_cast<unsigned long long>(w.direct),
+                  static_cast<unsigned long long>(w.copies), static_cast<unsigned long long>(w.blits),
                   static_cast<unsigned long long>(w.repeats), static_cast<unsigned long long>(w.resets), static_cast<unsigned long long>(w.contexts),
                   g_fsr ? static_cast<double>(g_fsr->memory_bytes()) / (1024.0 * 1024.0) : 0.0, falls.empty() ? "none" : falls.c_str(),
                   [] { const std::string t = host_gpu_pass_timing(); return t.empty() ? std::string("not timed") : t; }().c_str());
@@ -481,6 +540,7 @@ std::string host_gpu_upscale_timing() { return host_gpu_pass_timing(); }
 
 namespace gpu {
 bool fsr3_scale_pass_locked(RtImage*, const temporal::OutputRect&) { return false; }
+bool fsr3_target_storage_wanted(int, std::uint32_t, std::uint32_t, std::uint32_t) { return false; }
 temporal::OutputRect fsr3_output_rect_locked(const RtImage*, const float*) { return {}; }
 std::string fsr3_report_locked() { return "fsr3: not built (BBHOST_FSR_VULKAN=OFF)"; }
 }  // namespace gpu

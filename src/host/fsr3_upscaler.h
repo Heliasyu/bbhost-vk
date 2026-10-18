@@ -26,6 +26,7 @@ struct Fsr3Frame {
     UpscalerImage depth;     // R32F, D3D depth 0..1 (not reversed)
     UpscalerImage motion;    // render pixels, current to previous (rg)
     UpscalerImage reactive;  // R8 0..1, optional
+    UpscalerImage output;    // test4: write here (RGBA16F, STORAGE) instead of the owned output; optional
     float jitter_x = 0.0f, jitter_y = 0.0f;  // FSR's jitterOffset (render pixels)
     float mv_scale_x = 1.0f, mv_scale_y = 1.0f;
     bool reset = false;

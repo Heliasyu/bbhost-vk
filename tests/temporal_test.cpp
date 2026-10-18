@@ -415,7 +415,36 @@ void test_dump_pixels() {
     CHECK(drgb[0] == 0 && drgb[3] == 255);
 }
 
+// test4: a V# with no records - the block's head alone - and FSR 3.1 writing the target directly.
+void test_test4() {
+    double p[3] = {1, 2, 3};
+    std::vector<float> f = block(p, 10);
+    CHECK(scene_constants_head(f.data()));
+    std::vector<float> g = f;
+    g[1] = 0.5f;
+    CHECK(!scene_constants_head(g.data()));
+    CHECK(!scene_constants_head(nullptr));
+    std::vector<float> zeros(8, 0.0f);  // test3's probe: what a 0-byte V# printed
+    CHECK(!scene_constants_head(zeros.data()));
+    // STORAGE for the output-sized RGBA16F targets only, with the split and FSR 3.1 / 4.1.1.
+    CHECK(direct_target_wanted(97, 3840, 2160, 1, 3840, 2160, true, true, false));
+    CHECK(!direct_target_wanted(97, 3840, 2160, 1, 3840, 2160, true, true, true));    // BBHOST_FSR_DIRECT_TARGET=0
+    CHECK(!direct_target_wanted(97, 3840, 2160, 1, 3840, 2160, false, true, false));  // not split
+    CHECK(!direct_target_wanted(97, 3840, 2160, 1, 3840, 2160, true, false, false));  // FSR 1, bilinear, off
+    CHECK(!direct_target_wanted(97, 2560, 1440, 1, 3840, 2160, true, true, false));   // a scene-sized target
+    CHECK(!direct_target_wanted(44, 3840, 2160, 1, 3840, 2160, true, true, false));   // RGBA8
+    CHECK(!direct_target_wanted(97, 3840, 2160, 6, 3840, 2160, true, true, false));   // layers
+    CHECK(!direct_target_wanted(97, 0, 0, 1, 0, 0, true, true, false));
+    OutputRect out{0, 0, 3840, 2160};
+    CHECK(direct_output_ok(true, 97, 3840, 2160, out, 3840, 2160, false));
+    CHECK(!direct_output_ok(true, 97, 3840, 2160, out, 3840, 2160, true));   // a dump frame: FSR's own image
+    CHECK(!direct_output_ok(false, 97, 3840, 2160, out, 3840, 2160, false)); // no STORAGE: the copy
+    CHECK(!direct_output_ok(true, 97, 5120, 2160, OutputRect{640, 0, 3840, 2160}, 3840, 2160, false));
+    CHECK(!direct_output_ok(true, 97, 3840, 2160, out, 2560, 1440, false));
+}
+
 int main() {
+    test_test4();
     test_halton();
     test_parse();
     test_history();

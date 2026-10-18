@@ -163,4 +163,22 @@ inline Fsr3Camera fsr3_camera(float near_plane, float far_plane, float fov_y) {
     return c;
 }
 
+// test4: FSR 3.1 writes the scale pass's target directly - no copy of its
+// own output (0.23 ms a frame at 3840x2160 in test3). The target takes
+// STORAGE when it is made (RGBA16F = VkFormat 97, one layer, the display
+// buffers' size, the scene split on and FSR 3.1 or 4.1.1 chosen - 4.1.1
+// falls back to 3.1 without its assets), and a frame goes direct when the
+// output fills it from 0,0 and no stage dump wants FSR's own image.
+constexpr int kRgba16fFormat = 97;
+inline bool direct_target_wanted(int format, std::uint32_t w, std::uint32_t h, std::uint32_t layers, std::uint32_t display_w,
+                                 std::uint32_t display_h, bool split, bool fsr3_kind, bool env_off) {
+    if (env_off || !split || !fsr3_kind || format != kRgba16fFormat || layers != 1) return false;
+    return w && h && w == display_w && h == display_h;
+}
+inline bool direct_output_ok(bool target_storage, int target_format, std::uint32_t target_w, std::uint32_t target_h, const OutputRect& out,
+                             std::uint32_t fsr_w, std::uint32_t fsr_h, bool dumping) {
+    if (!target_storage || target_format != kRgba16fFormat || dumping) return false;
+    return out.x == 0 && out.y == 0 && out.w == fsr_w && out.h == fsr_h && target_w >= fsr_w && target_h >= fsr_h;
+}
+
 }  // namespace temporal

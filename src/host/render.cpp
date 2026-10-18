@@ -1401,6 +1401,11 @@ RtImage* rt_image(std::uint64_t base, VkFormat format, std::uint32_t width, std:
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                 (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    // bbhost-vk test4: the output-sized RGBA16F targets FSR 3.1 may write directly (host/fsr3_pass.h).
+    if (!depth && fsr3_target_storage_wanted(static_cast<int>(format), width, height, r.layers)) {
+        ici.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        r.upscaler_storage = true;
+    }
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(g.device, &ici, nullptr, &r.image) != VK_SUCCESS) {
         host_log("render: image creation failed (format %d %ux%u)", format, width, height);

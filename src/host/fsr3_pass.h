@@ -25,6 +25,11 @@ struct RtImage;
 // `out`: where in the target the scene goes (fsr3_output_rect_locked): FSR's
 // output size and the copy back, never the target's extent.
 bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out);
+// test4: whether a colour target being made should take STORAGE usage so FSR
+// 3.1 writes it directly instead of its own image and a copy (0.23 ms a frame
+// at 3840x2160 in test3): RGBA16F, one layer, exactly the display buffers'
+// size with the scene split and FSR 3.1 chosen. BBHOST_FSR_DIRECT_TARGET=0: never.
+bool fsr3_target_storage_wanted(int vk_format, std::uint32_t w, std::uint32_t h, std::uint32_t layers);
 
 // The scale pass's output rect in its target, from the draw's viewport
 // (`vport`: PA_CL_VPORT_XSCALE, XOFFSET, YSCALE, YOFFSET; null without one),
