@@ -10,6 +10,7 @@
 #include "engine/gx_resources.h"
 #include "engine/option_menu.h"
 #include "engine/scene_split.h"
+#include "engine/scene_split_sites.h"
 #include "hle/modules.h"
 #include "host/gpu.h"
 #include "host/options.h"
@@ -1231,9 +1232,24 @@ bool live_resolution_install(ElfImage* image) {
     g_res_words = static_cast<const std::uint32_t*>(guest_ptr(image->mem, guest(kResWidth)));
     // The widest and tallest entry a live change can reach (above), or the
     // starting size when larger.
-    g_display[0] = std::max<std::uint32_t>(max_w, static_cast<std::uint32_t>(w));
-    g_display[1] = std::max<std::uint32_t>(max_h, static_cast<std::uint32_t>(h));
-    host_log("resolution: live changes up to %ux%u (%s); larger sizes apply at the next start", g_display[0], g_display[1], max_why);
+    // test3: a scene split at the start needs display buffers of the output's
+    // size (scene_split::display_size_at_start): at 5120x2160 for a 3840x2160
+    // output, YEBIS was built at 5120x2160 and test2's picture came out dark
+    // and stretched with a grey band. BBHOST_SPLIT_DISPLAY=max: the largest, as before.
+    const bool split_start = scene_split_planned(image, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+    const bool keep_max = [] {
+        const char* e = std::getenv("BBHOST_SPLIT_DISPLAY");
+        return e && std::strcmp(e, "max") == 0;
+    }();
+    scene_split::display_size_at_start(split_start, keep_max, max_w, max_h, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
+                                       &g_display[0], &g_display[1]);
+    if (split_start && !keep_max)
+        host_log("resolution: display buffers %ux%u, the output's: the scene is split (an upscaler preset), and the split needs them at the "
+                 "output's size; a larger Resolution applies at the next start, another one live runs unsplit until then "
+                 "(BBHOST_SPLIT_DISPLAY=max: the largest, as before)",
+                 g_display[0], g_display[1]);
+    else
+        host_log("resolution: live changes up to %ux%u (%s); larger sizes apply at the next start", g_display[0], g_display[1], max_why);
 
     // Every edit is checked before any is made, so a mismatch leaves the
     // image as it was. The call sites and prologues are checked by the hooks
@@ -1337,6 +1353,11 @@ bool live_resolution_install(ElfImage* image) {
 bool live_resolution_available() {
     std::uint64_t dev = 0, gm = 0;
     return g_installed && device_ready(&dev, &gm);
+}
+
+void live_resolution_display(unsigned* w, unsigned* h) {
+    *w = g_display[0];
+    *h = g_display[1];
 }
 
 bool live_resolution_can(unsigned w, unsigned h) {

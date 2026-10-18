@@ -5,6 +5,7 @@
 #include "core/memory.h"
 #include "engine/addr.h"
 #include "engine/graphics_patch.h"
+#include "engine/live_resolution.h"
 #include "engine/scene_split_sites.h"
 #include "host/settings.h"
 #include "host/upscaler_presets.h"
@@ -148,13 +149,50 @@ bool scene_split_install(ElfImage* image) {
 
 bool scene_split_available() { return g_available; }
 
+namespace {
+// The render size the settings ask for, whether the split can be made or not.
+void settings_render_size(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw, std::uint32_t* rh) {
+    *rw = ow;
+    *rh = oh;
+    const HostSettings s = host_settings();
+    if (s.upscaler == upscaler::kOff || s.upscale_quality == upscaler::kNativeAa) return;
+    scene_split::render_size(upscaler::preset_ratio(s.upscale_quality), ow, oh, rw, rh);
+}
+}  // namespace
+
+bool scene_split_planned(const ElfImage* image, std::uint32_t ow, std::uint32_t oh) {
+    if (const char* e = std::getenv("BBHOST_SCENE_SPLIT"); e && e[0] == '0') return false;
+    if (!image || image->sha256 != kEboot109Sha256) return false;
+    std::uint32_t rw = 0, rh = 0;
+    settings_render_size(ow, oh, &rw, &rh);
+    return rw != ow || rh != oh;
+}
+
 void scene_split_wanted(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw, std::uint32_t* rh) {
     *rw = ow;
     *rh = oh;
     if (!g_available) return;
-    const HostSettings s = host_settings();
-    if (s.upscaler == upscaler::kOff || s.upscale_quality == upscaler::kNativeAa) return;
-    scene_split::render_size(upscaler::preset_ratio(s.upscale_quality), ow, oh, rw, rh);
+    std::uint32_t w = ow, h = oh;
+    settings_render_size(ow, oh, &w, &h);
+    if (w == ow && h == oh) return;
+    // test3: only into display buffers of the output's size
+    // (scene_split::display_fits_split - test2's dark, stretched picture).
+    unsigned dw = 0, dh = 0;
+    live_resolution_display(&dw, &dh);
+    if (!scene_split::display_fits_split(dw, dh, ow, oh)) {
+        static std::uint64_t said = 0;
+        const std::uint64_t key = static_cast<std::uint64_t>(ow) << 32 | oh;
+        if (said != key) {
+            said = key;
+            host_log("scene-split: not split at %ux%u - the display buffers are %ux%u, and the split needs them at the output's size (YEBIS "
+                     "builds its chain at theirs: a dark, stretched picture with a grey band); the scene renders at %ux%u, and the "
+                     "upscaler applies from the next start at this Resolution",
+                     ow, oh, dw, dh, ow, oh);
+        }
+        return;
+    }
+    *rw = w;
+    *rh = h;
 }
 
 bool scene_split_apply(std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_t oh) {

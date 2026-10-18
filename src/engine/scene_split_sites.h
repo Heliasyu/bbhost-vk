@@ -179,6 +179,40 @@ inline void render_size(double ratio, std::uint32_t ow, std::uint32_t oh, std::u
     *h = side(oh);
 }
 
+// test2/test3: the split's Initialize site (0x26c3af3, kKeepColour) makes
+// the graphics manager's scene take the output entry's DefRenderTarget for
+// its colour whatever its size, and YEBIS then takes that target for its back
+// buffer and builds its whole chain at its size. Kyo's patches were made for
+// display buffers of the output's size; live resolution makes them the
+// largest size a change can reach (5120x2160), so a 3840x2160 output built
+// YEBIS at 5120x2160 (2560x1080, 3136x882 ...), read the 3840-wide picture
+// across 5120 and came out dark and stretched by 4/3 with a grey band from
+// x = 3840 * 3840 / 5120 = 2880 - the same picture live resolution's
+// both-sides test fixed for the unsplit scene (engine/live_resolution.cpp).
+// So the split is only made when the display buffers are the output's size
+// on both sides (0 x 0: not known, the buffers are the starting size).
+inline bool display_fits_split(std::uint32_t dw, std::uint32_t dh, std::uint32_t ow, std::uint32_t oh) {
+    return (!dw && !dh) || (dw == ow && dh == oh);
+}
+
+// The display buffers' size at the start: the largest size a live change
+// can reach (max_w x max_h, or the starting size when larger), unless the
+// scene is split at the start, when they are the starting (output) size so
+// the split's DefRenderTarget is the output's (display_fits_split). Then a
+// larger Resolution applies at the next start, and another one live runs
+// unsplit until the next start. `keep_max`: BBHOST_SPLIT_DISPLAY=max, as
+// before.
+inline void display_size_at_start(bool split_at_start, bool keep_max, std::uint32_t max_w, std::uint32_t max_h, std::uint32_t w,
+                                  std::uint32_t h, std::uint32_t* dw, std::uint32_t* dh) {
+    if (split_at_start && !keep_max && w && h) {
+        *dw = w;
+        *dh = h;
+        return;
+    }
+    *dw = max_w > w ? max_w : w;
+    *dh = max_h > h ? max_h : h;
+}
+
 // The S# words of a sampler made a plain bilinear copy: linear min and mag
 // filters, no mip filtering (level 0), no anisotropy, clamp to edge on every
 // axis. The rest (LOD bias, border colour, compare) stays. As Awakenchan's

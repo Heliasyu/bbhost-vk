@@ -31,12 +31,18 @@ struct ElfImage;
 // cannot be used in this run (then the render size is always the output's).
 bool scene_split_install(ElfImage* image);
 
+// Before scene_split_install, for live resolution's display-buffer size: whether
+// the settings will split the scene at an output of ow x oh at the start
+// (BBHOST_SCENE_SPLIT and the eboot permitting).
+bool scene_split_planned(const ElfImage* image, std::uint32_t ow, std::uint32_t oh);
+
 // Whether the split can be used in this run.
 bool scene_split_available();
 
 // The render size the settings ask for at an output of ow x oh: the output
 // itself when the split is unavailable, the upscaler is Off or the preset is
-// Native AA.
+// Native AA - and, test3, when the display buffers are not the output's size
+// (scene_split::display_fits_split; logged once per size).
 void scene_split_wanted(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw, std::uint32_t* rh);
 
 // The sites for a render size of rw x rh at an output of ow x oh: the split's

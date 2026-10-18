@@ -240,6 +240,25 @@ int main() {
     render_size(1.5, 3440, 1440, &w, &h);  // 2293 x 960
     CHECK(w == 2288 && h == 960);
 
+    // test2's picture: the split only into display buffers of the output's size.
+    CHECK(display_fits_split(3840, 2160, 3840, 2160));
+    CHECK(!display_fits_split(5120, 2160, 3840, 2160));  // test2: 5120x2160 buffers, a 3840x2160 output
+    CHECK(!display_fits_split(3840, 2160, 2560, 1440));
+    CHECK(!display_fits_split(3840, 1600, 3840, 2160));
+    CHECK(display_fits_split(0, 0, 2560, 1440));  // not known: the buffers are the starting size
+    // The display buffers at the start: the output's when it starts split.
+    std::uint32_t dw = 0, dh = 0;
+    display_size_at_start(true, false, 5120, 2160, 3840, 2160, &dw, &dh);
+    CHECK(dw == 3840 && dh == 2160);
+    display_size_at_start(false, false, 5120, 2160, 3840, 2160, &dw, &dh);
+    CHECK(dw == 5120 && dh == 2160);
+    display_size_at_start(true, true, 5120, 2160, 3840, 2160, &dw, &dh);  // BBHOST_SPLIT_DISPLAY=max
+    CHECK(dw == 5120 && dh == 2160);
+    display_size_at_start(false, false, 1920, 1080, 2560, 1440, &dw, &dh);  // a start above the largest
+    CHECK(dw == 2560 && dh == 1440);
+    display_size_at_start(true, false, 5120, 2160, 3840, 2160, &dw, &dh);
+    CHECK(display_fits_split(dw, dh, 3840, 2160));
+
     // Branch sites take short conditional jumps only.
     CHECK(is_short_jcc(0x74) && is_short_jcc(0x7f) && !is_short_jcc(0xeb) && !is_short_jcc(0x0f));
 

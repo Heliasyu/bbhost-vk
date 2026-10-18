@@ -52,6 +52,11 @@ void live_resolution_scale_changed();
 // The scene's size now: the render size when split, else the output's.
 void live_resolution_scene(unsigned* w, unsigned* h);
 
+// The display buffers' size (0 x 0 before live resolution sized them, or
+// without it - then they are the starting size). The scene split needs them
+// at the output's size (engine/scene_split_sites.h, display_fits_split).
+void live_resolution_display(unsigned* w, unsigned* h);
+
 // The render size now, and a counter that moves each time a change has been
 // applied (0 before any).
 std::uint64_t live_resolution_current(unsigned* w, unsigned* h);
