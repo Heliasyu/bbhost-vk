@@ -3,6 +3,7 @@
 #include "core/portable.h"
 #include "host/foreign_hooks.h"
 #include "host/gpu_internal.h"
+#include "host/fsr4_pass.h"
 #include "host/shader_patch.h"
 #include "host/translation_cache.h"
 
@@ -2070,6 +2071,8 @@ bool init_locked() {
     f2.features.pipelineStatisticsQuery = g.profile_stats ? VK_TRUE : VK_FALSE;
     glitch_device_features(f2.features);  // BBHOST_GLITCH=1 only: precise occlusion queries
     occlusion_device_features(f2.features, dext, &f13.pNext);  // precise queries, conditional rendering
+    // bbhost-vk Phase 4: FSR 4.1.1's extensions, only with its assets built (host/fsr4_pass.h).
+    fsr4_device_features(f2.features, f12, f13, dext, &f13.pNext);
     // DB_DEPTH_CONTROL bit 3: the deferred lights cull by depth range.
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(g.phys, &supported);

@@ -646,7 +646,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
         ImGui::Combo("Upscaler", &upscaler, kUpscalers, 4);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk: Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (FSR 3.1 is temporal; FSR 4.1.1 comes later and uses FSR 3.1 until then).");
+            ImGui::SetTooltip("bbhost-vk: Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (FSR 3.1 is temporal; FSR 4.1.1 needs assets built once from your own DLL, tools/fsr4cap, and is FSR 3.1 without them).");
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kQualities[] = {"Native AA (100%)", "Quality (67%)", "Balanced (58%)", "Performance (50%)",
                                                  "Ultra Performance (33%)"};

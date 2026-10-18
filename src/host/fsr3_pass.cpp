@@ -22,6 +22,7 @@
 
 #include "hle/modules.h"
 #include "host/fsr3_upscaler.h"
+#include "host/fsr4_pass.h"
 #include "host/gpu_internal.h"
 #include "host/options.h"
 #include "host/settings.h"
@@ -78,10 +79,14 @@ temporal::Fsr3Sizes g_failed_sizes;  // the context failed for these: not retrie
 temporal::Fsr3History g_history;
 std::uint64_t g_last_frame = ~0ull;  // the flip last dispatched (a second scale pass in it copies again)
 Fallback g_last_fallback = Fallback::kCount;
-bool g_said_411 = false;
+bool g_fsr4_off = false;  // FSR 4.1.1 cannot run in this session (assets, device): FSR 3.1
+temporal::Fsr3History g_history4;
+std::uint64_t g_last_frame4 = ~0ull;
+VkImage g_last_out4 = VK_NULL_HANDLE;
+std::string g_fsr4_described;
 
 struct Stats {
-    std::uint64_t dispatches = 0, copies = 0, blits = 0, repeats = 0, resets = 0, contexts = 0;
+    std::uint64_t dispatches = 0, fsr4 = 0, copies = 0, blits = 0, repeats = 0, resets = 0, contexts = 0;
     std::uint64_t fallbacks[static_cast<int>(Fallback::kCount)] = {};
 };
 Stats g_window;
@@ -97,6 +102,7 @@ std::uint32_t g_slot_next = 0;
 double g_ms_sum = 0.0;
 int g_ms_n = 0;
 std::atomic<float> g_shown_ms{-1.0f};
+std::atomic<bool> g_shown_fsr4{false};  // the timed dispatches were FSR 4.1.1's
 std::chrono::steady_clock::time_point g_shown_at{};
 
 bool timer_ready_locked() {
@@ -148,6 +154,21 @@ void timer_collect_locked() {
     }
 }
 
+
+// Timestamps around one dispatch (Show Upscaler GPU Time): the slot, or -1.
+std::int32_t timer_begin_locked(VkCommandBuffer cmd, bool on) {
+    if (!on || !timer_ready_locked() || g_slot_frame[g_slot_next % kTimerSlots]) return -1;
+    const auto slot = static_cast<std::int32_t>(g_slot_next++ % kTimerSlots);
+    vkCmdResetQueryPool(cmd, g_queries, 2 * static_cast<std::uint32_t>(slot), 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_queries, 2 * static_cast<std::uint32_t>(slot));
+    return slot;
+}
+void timer_end_locked(VkCommandBuffer cmd, std::int32_t slot, std::uint64_t frame_id) {
+    if (slot < 0) return;
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_queries, 2 * static_cast<std::uint32_t>(slot) + 1);
+    g_slot_frame[slot] = frame_id;
+}
+
 // ---- the copy into the target ----
 // Whether `format` (optimal tiling) can be a blit's destination, and RGBA16F its source.
 bool blit_ok(VkFormat format) {
@@ -169,23 +190,23 @@ void barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkAccessFlags src_ac
     vkCmdPipelineBarrier(cmd, src, dst, 0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
-bool copy_output(VkCommandBuffer cmd, const Fsr3Upscaler& f, RtImage& target) {
+bool copy_output(VkCommandBuffer cmd, VkImage src, VkFormat src_format, std::uint32_t w, std::uint32_t h, RtImage& target) {
     barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-    if (target.format == f.output_format()) {
+    if (target.format == src_format) {
         VkImageCopy c{};
         c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         c.dstSubresource = c.srcSubresource;
-        c.extent = {f.output_w(), f.output_h(), 1};
-        vkCmdCopyImage(cmd, f.output(), VK_IMAGE_LAYOUT_GENERAL, target.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        c.extent = {w, h, 1};
+        vkCmdCopyImage(cmd, src, VK_IMAGE_LAYOUT_GENERAL, target.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
         ++g_window.copies;
     } else {
         VkImageBlit b{};
         b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         b.dstSubresource = b.srcSubresource;
-        b.srcOffsets[1] = {static_cast<std::int32_t>(f.output_w()), static_cast<std::int32_t>(f.output_h()), 1};
+        b.srcOffsets[1] = {static_cast<std::int32_t>(w), static_cast<std::int32_t>(h), 1};
         b.dstOffsets[1] = b.srcOffsets[1];
-        vkCmdBlitImage(cmd, f.output(), VK_IMAGE_LAYOUT_GENERAL, target.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
+        vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_GENERAL, target.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
         ++g_window.blits;
     }
     barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -239,10 +260,6 @@ bool fsr3_scale_pass_locked(RtImage* target) {
         serial = host_opt_serial();
         hs = host_settings();
     }
-    if (hs.upscaler == upscaler::kFsr411 && !g_said_411) {
-        g_said_411 = true;
-        host_log("fsr3: FSR 4.1.1 is chosen, but it comes in Phase 4 (built from your own DLL): FSR 3.1 upscales until then");
-    }
     const UpscalerInputs& in = temporal_inputs_locked();
     if (!target || target->depth || target->layers != 1) return fall_back(Fallback::Target);
     if (!in.valid || !in.color.image || !in.depth_copy.image || !in.motion.image || in.frame != hle_video_flip_count())
@@ -250,6 +267,59 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     const temporal::Fsr3Sizes sizes{in.render_w, in.render_h, target->width, target->height};
     if (!temporal::fsr3_sizes_ok(sizes) || in.color.width < in.render_w || in.color.height < in.render_h) return fall_back(Fallback::Sizes);
     if (target->format != VK_FORMAT_R16G16B16A16_SFLOAT && !blit_ok(target->format)) return fall_back(Fallback::Format);
+    // FSR 4.1.1 (host/fsr4_pass.h), replayed from the user's DLL; FSR 3.1 below when it cannot.
+    if (hs.upscaler == upscaler::kFsr411 && !g_fsr4_off) {
+        begin_recording_locked();
+        render_end_pass_locked();
+        VkCommandBuffer cmd4 = g_cmd();
+        if (in.frame == g_last_frame4 && g_last_out4) {
+            ++g_window.repeats;
+            copy_output(cmd4, g_last_out4, VK_FORMAT_R16G16B16A16_SFLOAT, target->width, target->height, *target);
+            return true;
+        }
+        barrier(cmd4, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        const temporal::Fsr3Reset reset4 = temporal::fsr3_reset(g_history4, in.frame, in.reset, false);
+        static const int sx = env_sign("BBHOST_FSR_JITTER_SIGN", 0), sy = env_sign("BBHOST_FSR_JITTER_SIGN", 1);
+        const temporal::Fsr3Conventions c4 = temporal::fsr3_conventions(in.jitter_x, in.jitter_y, sx, sy);
+        const temporal::Fsr3Sharpen sh4 = temporal::fsr3_sharpen(hs.upscale_sharpness);
+        Fsr4Params p4;
+        p4.jitter_x = c4.jitter_x;
+        p4.jitter_y = c4.jitter_y;
+        p4.reset = reset4 != temporal::Fsr3Reset::None;
+        p4.sharpen = sh4.enable;
+        p4.sharpness = sh4.sharpness;
+        p4.ultra_performance = hs.upscale_quality >= 4;
+        const std::int32_t slot4 = timer_begin_locked(cmd4, hs.debug_upscaler_time);
+        VkImage out4 = VK_NULL_HANDLE;
+        bool fatal = false;
+        std::string why4;
+        const bool ok4 = fsr4_record_locked(cmd4, in, target->width, target->height, p4, &out4, &fatal, &why4);
+        timer_end_locked(cmd4, slot4, g.flushes + 1);
+        if (ok4) {
+            if (p4.reset) ++g_window.resets;
+            copy_output(cmd4, out4, VK_FORMAT_R16G16B16A16_SFLOAT, target->width, target->height, *target);
+            g_last_frame4 = in.frame;
+            g_last_out4 = out4;
+            ++g_window.dispatches;
+            ++g_window.fsr4;
+            g_shown_fsr4.store(true);
+            if (const std::string d = fsr4_describe_locked(); d != g_fsr4_described) {
+                g_fsr4_described = d;
+                host_log("fsr4: FSR 4.1.1 replay, %s (scene %ux%u -> %ux%u)", d.c_str(), in.render_w, in.render_h, target->width, target->height);
+            }
+            g_last_fallback = Fallback::None;
+            return true;
+        }
+        g_history4 = {};
+        if (fatal) {
+            g_fsr4_off = true;
+            host_log("fsr4: %s: FSR 3.1 upscales instead", why4.c_str());
+        } else {
+            static int said = 0;
+            if (said++ < 8) host_log("fsr4: %s: FSR 3.1 this frame", why4.c_str());
+        }
+    }
     // The context.
     if (!g_fsr || !temporal::fsr3_context_fits({g_fsr->render_w(), g_fsr->render_h(), g_fsr->output_w(), g_fsr->output_h()}, sizes)) {
         if (sizes == g_failed_sizes) return fall_back(Fallback::Context);
@@ -282,7 +352,7 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     if (in.frame == g_last_frame) {
         // A second scale pass in the same frame: the same picture again.
         ++g_window.repeats;
-        copy_output(cmd, *g_fsr, *target);
+        copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
         return true;
     }
     const temporal::Fsr3Reset reset = temporal::fsr3_reset(g_history, in.frame, in.reset, false);
@@ -322,25 +392,18 @@ bool fsr3_scale_pass_locked(RtImage* target) {
     // Every input was written by commands before this point.
     barrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-    std::int32_t slot = -1;
-    if (hs.debug_upscaler_time && timer_ready_locked() && !g_slot_frame[g_slot_next % kTimerSlots]) {
-        slot = static_cast<std::int32_t>(g_slot_next++ % kTimerSlots);
-        vkCmdResetQueryPool(cmd, g_queries, 2 * static_cast<std::uint32_t>(slot), 2);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_queries, 2 * static_cast<std::uint32_t>(slot));
-    }
+    const std::int32_t slot = timer_begin_locked(cmd, hs.debug_upscaler_time);
     std::string why;
     const bool ok = g_fsr->record(fr, &why);
-    if (slot >= 0) {
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_queries, 2 * static_cast<std::uint32_t>(slot) + 1);
-        g_slot_frame[slot] = fr.frame_id;
-    }
+    timer_end_locked(cmd, slot, fr.frame_id);
     if (!ok) {
         static int said = 0;
         if (said++ < 8) host_log("fsr3: %s", why.c_str());
         g_history = {};  // the next dispatch starts over
         return fall_back(Fallback::Dispatch);
     }
-    copy_output(cmd, *g_fsr, *target);
+    copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
+    g_shown_fsr4.store(false);
     g_last_frame = in.frame;
     ++g_window.dispatches;
     if (g_last_fallback != Fallback::None) {
@@ -372,9 +435,9 @@ std::string fsr3_report_locked() {
         falls += part;
     }
     char buf[640];
-    std::snprintf(buf, sizeof(buf), "fsr3: %llu dispatches (%llu copied, %llu blitted, %llu repeats), %llu resets, %llu contexts made, %.1f MiB; "
+    std::snprintf(buf, sizeof(buf), "fsr3: %llu dispatches (%llu FSR 4.1.1, %llu copied, %llu blitted, %llu repeats), %llu resets, %llu contexts made, %.1f MiB; "
                   "bilinear frames: %s; GPU %.2f ms",
-                  static_cast<unsigned long long>(w.dispatches), static_cast<unsigned long long>(w.copies), static_cast<unsigned long long>(w.blits),
+                  static_cast<unsigned long long>(w.dispatches), static_cast<unsigned long long>(w.fsr4), static_cast<unsigned long long>(w.copies), static_cast<unsigned long long>(w.blits),
                   static_cast<unsigned long long>(w.repeats), static_cast<unsigned long long>(w.resets), static_cast<unsigned long long>(w.contexts),
                   g_fsr ? static_cast<double>(g_fsr->memory_bytes()) / (1024.0 * 1024.0) : 0.0, falls.empty() ? "none" : falls.c_str(),
                   static_cast<double>(g_shown_ms.load()));
@@ -387,7 +450,7 @@ std::string host_gpu_upscale_timing() {
     const float ms = gpu::g_shown_ms.load();
     if (ms < 0.0f) return std::string();
     char buf[48];
-    std::snprintf(buf, sizeof(buf), "FSR 3.1 %.2f ms", static_cast<double>(ms));
+    std::snprintf(buf, sizeof(buf), "%s %.2f ms", gpu::g_shown_fsr4.load() ? "FSR 4.1.1" : "FSR 3.1", static_cast<double>(ms));
     return buf;
 }
 

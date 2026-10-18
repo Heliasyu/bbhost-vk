@@ -26,7 +26,7 @@ void log_settings(const char* why) {
     upscaler::render_size(s.upscale_quality, 3840, 2160, &w, &h);
     g_kind.store(s.upscaler, std::memory_order_relaxed);
     host_log("upscaler: %s: %s, %s (%ux%u from 3840x2160), sharpness %.1f, reactive mask %s; motion vectors view %s, GPU time %s "
-             "(a preset below Native AA renders the scene smaller: FSR 3.1 upscales it, otherwise bilinear; FSR 4.1.1 is FSR 3.1 until Phase 4)",
+             "(a preset below Native AA renders the scene smaller: FSR 3.1 upscales it, otherwise bilinear; FSR 4.1.1 replays its assets when built, else FSR 3.1)",
              why, upscaler::kind_name(s.upscaler), upscaler::preset_name(s.upscale_quality), w, h, static_cast<double>(s.upscale_sharpness),
              s.upscale_reactive ? "on" : "off", s.debug_motion_vectors ? "on" : "off", s.debug_upscaler_time ? "on" : "off");
 }
@@ -72,7 +72,7 @@ void upscaler_debug_motion_vectors_hook(bool drawn) {
 
 ScenePass upscaler_scene_pass() {
     // Phase 1: the split takes the bilinear copy. Phase 3: FSR 3.1 (and FSR
-    // 4.1.1, which is FSR 3.1 until Phase 4) upscales instead, where this
+    // 4.1.1, replayed from its assets, else FSR 3.1) upscales instead, where this
     // build links it; the bilinear copy stays its fallback (host/fsr3_pass.h).
     if (!scene_split_active()) return ScenePass::Game;
 #if defined(BBHOST_HAVE_FSR_VULKAN)

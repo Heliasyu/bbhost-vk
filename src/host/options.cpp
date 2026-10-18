@@ -252,7 +252,7 @@ Setting g_set[kSettingCount] = {
     // window (host/fsr.cpp). Phase 1: with an upscaler on, the quality renders the
     // scene smaller than the output (engine/scene_split.h).
     {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"}, 1,
-     "FSR 1 is bbhost's own. FSR 3.1 is temporal: it upscales the 3D scene from Upscaling quality's size using motion vectors (falls back to a bilinear copy if it cannot start). FSR 4.1.1 comes in a later build and uses FSR 3.1 until then.",
+     "FSR 1 is bbhost's own. FSR 3.1 is temporal: it upscales the 3D scene from Upscaling quality's size using motion vectors (falls back to a bilinear copy if it cannot start). FSR 4.1.1 replays AMD's 4.1.1 upscaler from assets built once from your own DLL (tools/fsr4cap); without them it is FSR 3.1.",
      false},
     // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
     {"upscale_quality", "Upscaling quality",
