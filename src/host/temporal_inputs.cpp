@@ -294,6 +294,9 @@ struct Stats {
     std::uint64_t velocity_draws = 0, velocity_after_scale = 0, opaque_snapshots = 0, blended_scene = 0;
     std::uint64_t skeleton_draws = 0, small_moving = 0, small_static = 0, skeleton_moving = 0, skeleton_static = 0;
     std::uint64_t no_depth = 0, cuts = 0, reactive_passes = 0;
+    // test3: where the scene constants came from, and what the draws bound.
+    std::uint64_t buffers_seen = 0, gbuffer_draws = 0, max_colors_with_depth = 0, blocks_ps = 0, blocks_pointer = 0, blocks_other_size = 0;
+    std::uint64_t blocks_inside = 0, blocks_wrong_size = 0;
 };
 Stats g_stats, g_window;  // the run, and since the last summary
 temporal::Cut g_last_cut_logged = temporal::Cut::None;
@@ -301,6 +304,11 @@ std::uint64_t g_cut_repeats = 0;
 bool g_jitter_was = false;
 std::uint32_t g_phases_logged = 0;
 bool g_size_mismatch_logged = false;
+// The draw whose buffers are being resolved (temporal_draw_targets_locked).
+int g_draw_colors = 0;
+bool g_draw_depth = false, g_draw_gbuffer = false;
+std::uint64_t g_no_camera_run = 0;  // frames running without a scene camera
+int g_scans_this_frame = 0;         // G-buffer buffers searched inside this frame
 
 std::uint64_t fnv(const void* p, std::size_t n) {
     const auto* b = static_cast<const std::uint8_t*>(p);
@@ -349,82 +357,154 @@ void temporal_frame_locked(std::uint64_t flip) {
 
 bool temporal_watching() { return g_cfg.watching; }
 
+void temporal_draw_targets_locked(int color_targets, bool depth) {
+    g_draw_colors = color_targets;
+    g_draw_depth = depth;
+    g_draw_gbuffer = color_targets >= 4 && depth;
+    if (!g_cfg.watching) return;
+    if (g_draw_gbuffer) ++g_window.gbuffer_draws;
+    if (depth && color_targets > g_window.max_colors_with_depth) g_window.max_colors_with_depth = static_cast<std::uint64_t>(color_targets);
+}
+
+namespace {
+// BBHOST_MOTION_PROBE=1 (or =<n> lines): the buffers the G-buffer draws bind,
+// each (shader, stage, binding) once, with their first floats - what a hunt
+// for the scene constants needs from a hardware log.
+int probe_lines() {
+    static const int n = [] {
+        const char* e = std::getenv("BBHOST_MOTION_PROBE");
+        if (!e || !*e || e[0] == '0') return 0;
+        const int v = std::atoi(e);
+        return v > 1 ? v : 64;
+    }();
+    return n;
+}
+
+void probe_buffer(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes, bool pointer,
+                  const float* p) {
+    static int said = 0;
+    if (said >= probe_lines() || !g_draw_gbuffer) return;
+    static std::vector<std::uint64_t> seen;
+    const std::uint64_t key = (static_cast<std::uint64_t>(stage ? orb_ps : orb_vs) << 24) ^ (static_cast<std::uint64_t>(stage) << 20) ^
+                              static_cast<std::uint64_t>(index);
+    if (std::find(seen.begin(), seen.end(), key) != seen.end()) return;
+    seen.push_back(key);
+    ++said;
+    float f[8] = {};
+    if (bytes >= 32) std::memcpy(f, p, sizeof(f));
+    const std::size_t floats = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, 4096) / 4);
+    const std::size_t at = temporal::find_scene_constants(p, floats);
+    host_log("motion-probe: G-buffer draw (%d colour targets, depth) VS %08x PS %08x %s binding %d: %s of %llu bytes at 0x%llx; "
+             "[0..7] %g %g %g %g %g %g %g %g; signature %s",
+             g_draw_colors, orb_vs, orb_ps, stage ? "PS" : "VS", index, pointer ? "pointer" : "V#", static_cast<unsigned long long>(bytes),
+             static_cast<unsigned long long>(base), f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
+             at == temporal::kNotFound ? "none in the first 4 KiB" : at == 0 ? "at +0" : "further in");
+    if (at != temporal::kNotFound && at != 0) host_log("motion-probe:   the signature at +%zu bytes", at * 4);
+}
+}  // namespace
+
 void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32_t orb_ps, int index, std::uint64_t base, std::uint64_t bytes,
                                     bool pointer) {
     if (!g_cfg.watching || !base) return;
     const auto* p = reinterpret_cast<const float*>(static_cast<std::uintptr_t>(base));
-    if (stage == 1) {
-        if (pointer) return;
-        if (index == temporal::velocity_scale_buffer(orb_ps) && bytes >= 8) {
-            std::memcpy(g_velocity_scale, p, 8);
-            g_velocity_scale_ok = std::isfinite(g_velocity_scale[0]) && std::isfinite(g_velocity_scale[1]);
-        }
-        return;
+    if (stage == 1 && !pointer && index == temporal::velocity_scale_buffer(orb_ps) && bytes >= 8) {
+        std::memcpy(g_velocity_scale, p, 8);
+        g_velocity_scale_ok = std::isfinite(g_velocity_scale[0]) && std::isfinite(g_velocity_scale[1]);
     }
-    temporal::BufferKind kind = pointer ? temporal::BufferKind::Other : temporal::classify_buffer(bytes);
-    // test2: test1 found no 864-byte block at all (3000 cuts in 3000 frames,
-    // so FSR reset its history every frame). The block may come with another
-    // V# size (more records, a stride) or through a pointer: any buffer that
-    // holds 192 floats and carries the signature - far and 1/far, the scene's
-    // or output's size - is a candidate, and the full parse decides.
-    if (kind != temporal::BufferKind::Scene && stage == 0 && bytes >= 768) {
-        const float far = p[0];
-        const bool sig = far >= 100.0f && far <= 100000.0f && std::fabs(p[1] * far - 1.0f) < 1e-3f &&
-                         ((p[4] == static_cast<float>(g_cfg.render_w) && p[5] == static_cast<float>(g_cfg.render_h)) ||
-                          (p[4] == static_cast<float>(g_cfg.output_w) && p[5] == static_cast<float>(g_cfg.output_h)));
-        if (sig) {
-            kind = temporal::BufferKind::Scene;
+    ++g_window.buffers_seen;
+    if (probe_lines()) probe_buffer(stage, orb_vs, orb_ps, index, base, bytes, pointer, p);
+    // test3: test1 and test2 found no scene block at all - not an 864-byte V#
+    // (test1), nor by its contents in a vertex shader's buffer carrying the
+    // render or output size (test2). Now as bbport finds it: any stage, any
+    // V# or pointer that holds a whole block, by the far plane and a size;
+    // and after a run of frames without a camera, inside the G-buffer draws'
+    // larger buffers too (the first 4 KiB, 16-byte steps, 64 buffers a frame).
+    const temporal::BufferKind kind = pointer ? temporal::BufferKind::Other : temporal::classify_buffer(bytes);
+    const std::size_t floats = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, 4096) / 4);
+    std::size_t at = temporal::kNotFound;
+    if (kind == temporal::BufferKind::Scene || temporal::scene_constants_signature(p, floats)) {
+        at = 0;
+    } else if (g_draw_gbuffer && g_no_camera_run >= 60 && floats > 192 && g_scans_this_frame < 64) {
+        ++g_scans_this_frame;
+        at = temporal::find_scene_constants(p, floats);
+        if (at != temporal::kNotFound) {
+            ++g_window.blocks_inside;
             static bool said = false;
             if (!said) {
                 said = true;
-                host_log("motion: the scene constants found by their contents in a %llu-byte %s (VS %08x, binding %d), not an 864-byte V#",
-                         static_cast<unsigned long long>(bytes), pointer ? "pointer" : "V#", orb_vs, index);
+                host_log("motion: the scene constants found %zu bytes into a %llu-byte %s (%s %08x, binding %d, a G-buffer draw)", at * 4,
+                         static_cast<unsigned long long>(bytes), pointer ? "pointer" : "V#", stage ? "PS" : "VS", stage ? orb_ps : orb_vs, index);
             }
         }
     }
-    if (kind == temporal::BufferKind::Scene) {
+    if (at != temporal::kNotFound) {
+        const float* q = p + at;
         ++g_window.scene_blocks;
+        if (stage) ++g_window.blocks_ps;
+        if (pointer) ++g_window.blocks_pointer;
+        if (bytes != temporal::kSceneConstantBytes && at == 0) {
+            ++g_window.blocks_other_size;
+            static bool said = false;
+            if (!said) {
+                said = true;
+                host_log("motion: the scene constants found by their contents in a %llu-byte %s (%s %08x, binding %d%s), not an 864-byte V#",
+                         static_cast<unsigned long long>(bytes), pointer ? "pointer" : "V#", stage ? "PS" : "VS", stage ? orb_ps : orb_vs, index,
+                         g_draw_gbuffer ? ", a G-buffer draw" : "");
+            }
+        }
         float raw[16];
-        std::memcpy(raw, p + 8, 12 * sizeof(float));
-        raw[12] = p[52];
-        raw[13] = p[57];
-        raw[14] = p[62];
-        raw[15] = p[63];
+        std::memcpy(raw, q + 8, 12 * sizeof(float));
+        raw[12] = q[52];
+        raw[13] = q[57];
+        raw[14] = q[62];
+        raw[15] = q[63];
         if (g_last_raw_ok && std::memcmp(raw, g_last_raw, sizeof(raw)) == 0) {
             g_history.observe(g_last_cam);
             return;
         }
         temporal::SceneCamera c;
         const char* why = nullptr;
-        const bool ok = temporal::parse_scene_constants(p, temporal::kSceneConstantFloats, &c, &why);
+        const bool ok = temporal::parse_scene_constants(q, temporal::kSceneConstantFloats, &c, &why);
         static int said = 0;
         if (!ok) {
             ++g_window.blocks_rejected;
             if (said < 4) {
                 ++said;
-                host_log("motion: an 864-byte constant buffer at 0x%llx (%s %08x) is not the scene constants: %s; [0..7] %g %g %g %g %g %g %g %g",
-                         static_cast<unsigned long long>(base), "VS", orb_vs, why ? why : "?", p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+                host_log("motion: a %llu-byte constant buffer at 0x%llx (%s %08x) is not the scene constants: %s; [0..7] %g %g %g %g %g %g %g %g",
+                         static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(base), stage ? "PS" : "VS", stage ? orb_ps : orb_vs,
+                         why ? why : "?", q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]);
             }
             return;
         }
         // The scene's camera carries the scene's size; other cameras (item
-        // previews, reflections) another.
+        // previews, reflections) another - taken only from a G-buffer draw.
+        if (!temporal::camera_size_accepted(c.width, c.height, g_cfg.render_w, g_cfg.render_h, g_cfg.output_w, g_cfg.output_h, g_draw_gbuffer)) {
+            ++g_window.blocks_wrong_size;
+            static int size_said = 0;
+            if (size_said < 4) {
+                ++size_said;
+                host_log("motion: a camera block of %ux%u (far %g) from a draw with %d colour targets%s is not taken: neither the scene's %ux%u nor "
+                         "the output's %ux%u, and not a G-buffer draw",
+                         c.width, c.height, c.far_plane, g_draw_colors, g_draw_depth ? " and a depth" : "", g_cfg.render_w, g_cfg.render_h,
+                         g_cfg.output_w, g_cfg.output_h);
+            }
+            return;
+        }
         const bool scene_sized = c.width == g_cfg.render_w && c.height == g_cfg.render_h;
-        const bool output_sized = c.width == g_cfg.output_w && c.height == g_cfg.output_h;
-        if (!scene_sized && !output_sized) return;
         if (!scene_sized && !g_size_mismatch_logged) {
             g_size_mismatch_logged = true;
-            host_log("motion: the scene constants carry %ux%u, the output's, not the scene's %ux%u (taken anyway)", c.width, c.height,
-                     g_cfg.render_w, g_cfg.render_h);
+            host_log("motion: the scene constants carry %ux%u, not the scene's %ux%u (taken: %s)", c.width, c.height, g_cfg.render_w, g_cfg.render_h,
+                     c.width == g_cfg.output_w && c.height == g_cfg.output_h ? "the output's size" : "from a G-buffer draw");
         }
         static bool first = true;
         if (first) {
             first = false;
-            host_log("motion: scene constants found at 0x%llx (VS %08x): far %g, %ux%u, camera at (%.2f, %.2f, %.2f), projection %g %g %g %g",
-                     static_cast<unsigned long long>(base), orb_vs, c.far_plane, c.width, c.height, c.position[0], c.position[1], c.position[2],
-                     c.proj.x, c.proj.y, c.proj.zs, c.proj.zo);
-            if (p[54] != 0.0f || p[58] != 0.0f)
-                host_log("motion: the projection has off-centre terms ([54] %g, [58] %g): not used", p[54], p[58]);
+            host_log("motion: scene constants found at 0x%llx+%zu (%s %08x, binding %d, %s of %llu bytes%s): far %g, %ux%u, camera at (%.2f, %.2f, "
+                     "%.2f), projection %g %g %g %g",
+                     static_cast<unsigned long long>(base), at * 4, stage ? "PS" : "VS", stage ? orb_ps : orb_vs, index, pointer ? "pointer" : "V#",
+                     static_cast<unsigned long long>(bytes), g_draw_gbuffer ? ", a G-buffer draw" : "", c.far_plane, c.width, c.height,
+                     c.position[0], c.position[1], c.position[2], c.proj.x, c.proj.y, c.proj.zs, c.proj.zo);
+            if (q[54] != 0.0f || q[58] != 0.0f) host_log("motion: the projection has off-centre terms ([54] %g, [58] %g): not used", q[54], q[58]);
         }
         std::memcpy(g_last_raw, raw, sizeof(raw));
         g_last_raw_ok = true;
@@ -432,6 +512,7 @@ void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32
         g_history.observe(c);
         return;
     }
+    if (stage != 0 || pointer) return;
     // bbport's palettes: surveyed every 30th frame (what object motion from
     // previous-frame positions would have to keep).
     if ((kind == temporal::BufferKind::Skeleton || kind == temporal::BufferKind::SmallSkeleton) && g_frames % 30 == 0) {
@@ -517,15 +598,19 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
     const temporal::Cut cut = g_history.end_frame(flip);
     // test1: no scene camera at all, so every frame was a cut and FSR reset
     // its history every frame. Said once, plainly.
-    static std::uint64_t no_camera_run = 0;
-    no_camera_run = cut == temporal::Cut::NoCamera ? no_camera_run + 1 : 0;
-    if (no_camera_run == 600) {
+    g_no_camera_run = cut == temporal::Cut::NoCamera ? g_no_camera_run + 1 : 0;
+    g_scans_this_frame = 0;
+    if (g_no_camera_run == 600) {
         static bool said = false;
         if (!said) {
             said = true;
-            host_log("motion: no scene camera in 600 frames running (scene blocks seen %llu): every frame is a cut, so FSR resets its "
-                     "history every frame - no temporal accumulation, and the motion vectors are zero",
-                     static_cast<unsigned long long>(g_window.scene_blocks));
+            host_log("motion: no scene camera in 600 frames running (scene blocks seen %llu, rejected %llu, another size %llu; buffers looked at "
+                     "%llu, G-buffer draws %llu, most colour targets with a depth %llu): every frame is a cut, so FSR resets its history every "
+                     "frame - no temporal accumulation, and the camera motion vectors are zero (the jitter does not depend on it). "
+                     "BBHOST_MOTION_PROBE=1 logs what the G-buffer draws bind",
+                     static_cast<unsigned long long>(g_window.scene_blocks), static_cast<unsigned long long>(g_window.blocks_rejected),
+                     static_cast<unsigned long long>(g_window.blocks_wrong_size), static_cast<unsigned long long>(g_window.buffers_seen),
+                     static_cast<unsigned long long>(g_window.gbuffer_draws), static_cast<unsigned long long>(g_window.max_colors_with_depth));
         }
     }
     // Cuts: each one logged, a run of the same one counted.

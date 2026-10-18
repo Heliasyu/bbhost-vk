@@ -12449,6 +12449,11 @@ static bool draw_impl(const GpuDraw& d) {
 
     int reused_way[2] = {-1, -1};
     std::uint32_t stage_named[2] = {0, 0};  // user-data dwords each stage built from GX
+    if (temporal_watching()) {
+        int colors = 0;
+        for (const RtImage* c : s.color) colors += c != nullptr;
+        temporal_draw_targets_locked(colors, s.depth != nullptr);
+    }
     for (int st = 0; st < 2; ++st) {
         const gcn::TranslateResult& meta = st == 0 ? pl.vs.meta() : pl.ps.meta();
         const std::size_t stage_writes = writes.size();

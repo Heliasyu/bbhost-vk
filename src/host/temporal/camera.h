@@ -147,6 +147,41 @@ inline bool parse_scene_constants(const float* f, std::size_t count, SceneCamera
     return true;
 }
 
+// test3: bbport's signature for the block (vk_camera_motion.cpp): the far
+// plane and its reciprocal at [0], [1] and a size of at least 64 at [4], [5]
+// - not which size (test2 required the render or output size and found
+// nothing). Cheap: what every candidate buffer is tested with before the
+// full parse. NaN fails every comparison.
+inline bool scene_constants_signature(const float* f, std::size_t count) {
+    if (!f || count < 192) return false;
+    const float far = f[0];
+    if (!(far >= 100.0f && far <= 100000.0f) || !(std::fabs(f[1] * far - 1.0f) <= 1e-3f)) return false;
+    return f[4] >= 64.0f && f[4] <= 16384.0f && f[5] >= 64.0f && f[5] <= 16384.0f;
+}
+
+// The first offset (in floats, a multiple of 4: 16-byte aligned) in `count`
+// floats where the block's signature starts with a whole block after it;
+// kNotFound when none. For a buffer that holds the block among others.
+constexpr std::size_t kNotFound = ~static_cast<std::size_t>(0);
+inline std::size_t find_scene_constants(const float* f, std::size_t count) {
+    if (!f || count < 192) return kNotFound;
+    for (std::size_t o = 0; o + 192 <= count; o += 4)
+        if (scene_constants_signature(f + o, count - o)) return o;
+    return kNotFound;
+}
+
+// Which camera blocks the frame takes (test3): the render or output size
+// always; another size only from a G-buffer draw (bbport takes the first
+// constants of each G-buffer pass: five or more colour targets and a depth;
+// here four or more), so a reflection's or an item preview's camera with
+// its own size is not taken from a draw that is not the scene's.
+inline bool camera_size_accepted(std::uint32_t w, std::uint32_t h, std::uint32_t render_w, std::uint32_t render_h, std::uint32_t output_w,
+                                 std::uint32_t output_h, bool gbuffer_draw) {
+    if (w == render_w && h == render_h) return true;
+    if (w == output_w && h == output_h) return true;
+    return gbuffer_draw;
+}
+
 // Why the history was reset this frame - the upscaler's "reset" input, and a
 // line in the test session's log.
 enum class Cut : int {

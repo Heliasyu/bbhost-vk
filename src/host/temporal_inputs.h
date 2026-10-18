@@ -13,6 +13,7 @@
 //   BBHOST_MOTION_VECTORS=0  no motion pass (no jitter either)
 //   BBHOST_OBJECT_MOTION=0   camera motion only (the game's velocity unused)
 //   BBHOST_OPAQUE_SNAPSHOT=0 no opaque-colour snapshot
+//   BBHOST_MOTION_PROBE=1    log the buffers the G-buffer draws bind (=<n>: n lines)
 //
 // Renderer calls are made under the renderer's lock (gpu_internal.h).
 
@@ -30,6 +31,11 @@ void temporal_frame_locked(std::uint64_t flip);
 // Whether this frame watches the draws at all (scene constants, depth,
 // velocity). False: nothing else here does anything.
 bool temporal_watching();
+
+// Before a draw's buffers are resolved: how many colour targets it has and
+// whether a depth (four or more with a depth: a G-buffer draw, where the
+// scene constants are looked for hardest - bbport's gate).
+void temporal_draw_targets_locked(int color_targets, bool depth);
 
 // A constant buffer a draw binds (VS stage 0, PS stage 1), its V#'s base
 // and size: the scene constants, bone palettes (survey), the velocity
