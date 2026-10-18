@@ -1,9 +1,11 @@
 // bbhost-vk test7: FSR 4.1.1's sharpening pass (host/shaders/fsr4_sharpen.comp,
 // as compiled into host/shaders/fsr4_sharpen.spv.h) on whatever Vulkan device
 // there is (lavapipe is enough), against RCAS (AMD's FsrRcasF with noise
-// removal) in double on the same HDR image mapped to 0..1. The image is not a
-// multiple of the shader's 16x16 blocks, so the blocks' borders and the
-// image's edges are covered. Exits 77 (ctest: skipped) without a device.
+// removal) in double on the postpass's log-encoded output, decoded as the
+// replay's rcas.spv decodes it (test7b: test7 skipped the decoding, a white
+// haze). The image is not a multiple of the shader's 16x16 blocks, so the
+// blocks' borders and the image's edges are covered. Exits 77 (ctest:
+// skipped) without a device.
 #include "host/shaders/fsr4_sharpen.spv.h"
 
 #include <vulkan/vulkan.h>
@@ -54,14 +56,9 @@ std::uint32_t memory_type(VkPhysicalDevice pd, std::uint32_t bits, VkMemoryPrope
 struct Rgb {
     double r, g, b;
 };
-Rgb to_unit(Rgb c) {
-    const double k = 1.0 + std::max({c.r, c.g, c.b});
-    return {c.r / k, c.g / k, c.b / k};
-}
-Rgb from_unit(Rgb t) {
-    const double k = std::max(1.0 - std::max({t.r, t.g, t.b}), 1.0 / 65504.0);
-    return {t.r / k, t.g / k, t.b / k};
-}
+// The postpass's encoding (rcas.spv's constants): v = log2(1 + 150 c) / 12.2887.
+double encode(double c) { return std::log2(1.0 + 150.0 * c) / 12.2887039; }
+constexpr float kExposure = 2.0f, kPreExposure = 0.5f;  // decoded colour * pre / exposure
 
 // FsrRcasF (fsr1/ffx_fsr1.h) with FSR_RCAS_DENOISE, exact reciprocals.
 Rgb rcas(Rgb b, Rgb d, Rgb e, Rgb f, Rgb h, double con) {
@@ -149,7 +146,8 @@ int main() {
             p[0] = base + noise(rng);
             p[1] = 0.5f * base + 0.02f * x;
             p[2] = 0.3f + 0.03f * y + noise(rng);
-            if ((x == 20 && y == 17) || (x == 47 && y == 15) || (x == 16 && y == 32)) p[0] = p[1] = p[2] = 60.0f;
+            if ((x == 20 && y == 17) || (x == 47 && y == 15) || (x == 16 && y == 32)) p[0] = p[1] = p[2] = 30.0f;  // a lamp
+            for (int c = 0; c < 3; ++c) p[c] = static_cast<float>(encode(p[c]));  // as the postpass leaves it
             p[3] = 0.25f + (x % 3) * 0.25f;
             for (int c = 0; c < 4; ++c) {
                 in[(y * W + x) * 4 + c] = float_to_half(p[c]);
@@ -157,11 +155,12 @@ int main() {
             }
         }
 
-    auto make_image = [&](VkImage* img, VkDeviceMemory* mem, VkImageUsageFlags usage) {
+    auto make_image = [&](VkImage* img, VkDeviceMemory* mem, VkImageUsageFlags usage, VkFormat fmt = VK_FORMAT_R16G16B16A16_SFLOAT,
+                          std::uint32_t w = W, std::uint32_t h = H) {
         VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ci.imageType = VK_IMAGE_TYPE_2D;
-        ci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-        ci.extent = {W, H, 1};
+        ci.format = fmt;
+        ci.extent = {w, h, 1};
         ci.mipLevels = ci.arrayLayers = 1;
         ci.samples = VK_SAMPLE_COUNT_1_BIT;
         ci.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -174,10 +173,11 @@ int main() {
         ai.memoryTypeIndex = memory_type(pd, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         return vkAllocateMemory(dev, &ai, nullptr, mem) == VK_SUCCESS && vkBindImageMemory(dev, *img, *mem, 0) == VK_SUCCESS;
     };
-    VkImage simg, dimg;
-    VkDeviceMemory smem, dmem;
+    VkImage simg, dimg, eimg;
+    VkDeviceMemory smem, dmem, emem;
     if (!make_image(&simg, &smem, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
-        !make_image(&dimg, &dmem, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        !make_image(&dimg, &dmem, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
+        !make_image(&eimg, &emem, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_FORMAT_R32_SFLOAT, 2, 1)) {
         std::fprintf(stderr, "image creation failed\n");
         return 1;
     }
@@ -199,31 +199,33 @@ int main() {
     VK(vkMapMemory(dev, bmem, 0, bytes, 0, &map));
     std::memcpy(map, in.data(), bytes);
 
-    auto view_of = [&](VkImage img) {
+    auto view_of = [&](VkImage img, VkFormat fmt = VK_FORMAT_R16G16B16A16_SFLOAT) {
         VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         vci.image = img;
         vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        vci.format = fmt;
         vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         VkImageView v = VK_NULL_HANDLE;
         vkCreateImageView(dev, &vci, nullptr, &v);
         return v;
     };
-    const VkImageView sview = view_of(simg), dview = view_of(dimg);
+    const VkImageView sview = view_of(simg), dview = view_of(dimg), eview = view_of(eimg, VK_FORMAT_R32_SFLOAT);
 
     // The pipeline, as host/fsr4_pass.cpp makes it.
-    const VkDescriptorSetLayoutBinding binds[2] = {
+    const VkDescriptorSetLayoutBinding binds[3] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo sli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sli.bindingCount = 2;
+    sli.bindingCount = 3;
     sli.pBindings = binds;
     VkDescriptorSetLayout dsl;
     VK(vkCreateDescriptorSetLayout(dev, &sli, nullptr, &dsl));
     struct Push {
         std::uint32_t con0[4];
         std::uint32_t size[2];
+        float pre_exposure;
     };
     VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -246,7 +248,7 @@ int main() {
     cpi.layout = layout;
     VkPipeline pipe;
     VK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipe));
-    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
+    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1;
     dpci.poolSizeCount = 1;
@@ -259,9 +261,11 @@ int main() {
     dsai.pSetLayouts = &dsl;
     VkDescriptorSet set;
     VK(vkAllocateDescriptorSets(dev, &dsai, &set));
-    const VkDescriptorImageInfo infos[2] = {{VK_NULL_HANDLE, sview, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, dview, VK_IMAGE_LAYOUT_GENERAL}};
-    VkWriteDescriptorSet wr[2] = {};
-    for (int k = 0; k < 2; ++k) {
+    const VkDescriptorImageInfo infos[3] = {{VK_NULL_HANDLE, sview, VK_IMAGE_LAYOUT_GENERAL},
+                                            {VK_NULL_HANDLE, dview, VK_IMAGE_LAYOUT_GENERAL},
+                                            {VK_NULL_HANDLE, eview, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[3] = {};
+    for (int k = 0; k < 3; ++k) {
         wr[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wr[k].dstSet = set;
         wr[k].dstBinding = static_cast<std::uint32_t>(k);
@@ -269,7 +273,7 @@ int main() {
         wr[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         wr[k].pImageInfo = &infos[k];
     }
-    vkUpdateDescriptorSets(dev, 2, wr, 0, nullptr);
+    vkUpdateDescriptorSets(dev, 3, wr, 0, nullptr);
 
     VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     cpci.queueFamilyIndex = family;
@@ -306,12 +310,19 @@ int main() {
         vkCmdCopyBufferToImage(cmd, buf, simg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &up);
         to_layout(simg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
         to_layout(dimg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        to_layout(eimg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        VkClearColorValue ev{};
+        ev.float32[0] = kExposure;
+        const VkImageSubresourceRange er{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, eimg, VK_IMAGE_LAYOUT_GENERAL, &ev, 1, &er);
+        to_layout(eimg, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         // As fsr4_pass.cpp: stops = 2 - 2 * sharpness, con = 2^-stops.
         const float con = std::exp2(-(2.0f - 2.0f * sharpness));
         Push push{};
         std::memcpy(&push.con0[0], &con, 4);
         push.size[0] = W;
         push.size[1] = H;
+        push.pre_exposure = kPreExposure;
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, nullptr);
         vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
@@ -334,20 +345,23 @@ int main() {
             x = std::clamp(x, 0, static_cast<int>(W) - 1);
             y = std::clamp(y, 0, static_cast<int>(H) - 1);
             const float* p = &src[(y * W + x) * 4];
-            return to_unit({p[0], p[1], p[2]});
+            return Rgb{p[0], p[1], p[2]};
         };
+        // The output back in the encoded domain, to compare there (where RCAS ran).
+        const double inv = static_cast<double>(kPreExposure) / kExposure;
+        auto reencode = [&](float c) { return encode(c / inv); };
         double worst = 0, moved = 0;
         int bad = 0;
         for (int y = 0; y < static_cast<int>(H); ++y)
             for (int x = 0; x < static_cast<int>(W); ++x) {
                 const Rgb want = rcas(at(x, y - 1), at(x - 1, y), at(x, y), at(x + 1, y), at(x, y + 1), con);
                 const std::uint16_t* o = &out[(y * W + x) * 4];
-                const Rgb got = to_unit({half_to_float(o[0]), half_to_float(o[1]), half_to_float(o[2])});
+                const Rgb got{reencode(half_to_float(o[0])), reencode(half_to_float(o[1])), reencode(half_to_float(o[2]))};
                 const Rgb e = at(x, y);
                 const double err = std::max({std::fabs(got.r - want.r), std::fabs(got.g - want.g), std::fabs(got.b - want.b)});
                 worst = std::max(worst, err);
                 moved = std::max(moved, std::max({std::fabs(got.r - e.r), std::fabs(got.g - e.g), std::fabs(got.b - e.b)}));
-                const bool alpha_ok = half_to_float(o[3]) == src[(y * W + x) * 4 + 3];
+                const bool alpha_ok = o[3] == o[0];  // alpha is red, as the replay's RCAS writes it
                 // Half floats and the shader's approximate reciprocals.
                 if ((err > 0.01 || !alpha_ok) && bad++ < 5)
                     std::fprintf(stderr, "sharpness %.1f pixel %d,%d: GPU (%g %g %g), CPU (%g %g %g)%s\n", sharpness, x, y, got.r, got.g,
@@ -371,9 +385,9 @@ int main() {
     vkDestroyShaderModule(dev, module, nullptr);
     vkDestroyPipelineLayout(dev, layout, nullptr);
     vkDestroyDescriptorSetLayout(dev, dsl, nullptr);
-    for (VkImageView v : {sview, dview}) vkDestroyImageView(dev, v, nullptr);
-    for (VkImage i : {simg, dimg}) vkDestroyImage(dev, i, nullptr);
-    for (VkDeviceMemory m : {smem, dmem}) vkFreeMemory(dev, m, nullptr);
+    for (VkImageView v : {sview, dview, eview}) vkDestroyImageView(dev, v, nullptr);
+    for (VkImage i : {simg, dimg, eimg}) vkDestroyImage(dev, i, nullptr);
+    for (VkDeviceMemory m : {smem, dmem, emem}) vkFreeMemory(dev, m, nullptr);
     vkUnmapMemory(dev, bmem);
     vkDestroyBuffer(dev, buf, nullptr);
     vkFreeMemory(dev, bmem, nullptr);

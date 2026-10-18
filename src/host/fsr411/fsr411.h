@@ -73,6 +73,8 @@ public:
     [[nodiscard]] std::string Describe() const;
     /// bbhost-vk test7: the postpass's RGBA16F result when the frame had sharpen_external.
     [[nodiscard]] Image SharpenSource() const;
+    /// bbhost-vk test7b: the 1x1 R32F exposure the last frame used (RCAS divides by it).
+    [[nodiscard]] Image SharpenExposure() const;
 
 private:
     struct Impl;

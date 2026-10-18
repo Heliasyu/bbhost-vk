@@ -1,6 +1,14 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test7b (fix: white haze with FSR 4.1.1 sharpening):**
+  - test7's sharpening pass treated the replay's postpass output as colour. That output is
+    log-encoded and exposed for RCAS: v = log2(1 + 150 c * exposure / pre-exposure) /
+    12.2887, as the replay's own rcas pass decodes it. The encoded values went out as
+    colour: a heavy white haze everywhere (t8, 12:44).
+  - The pass now runs RCAS in that domain and decodes as the replay's pass does: the
+    exposure texture, pre-exposure, and alpha equal to red. `fsr4_sharpen_test` now checks
+    the decoded output, so the test7 shader fails it.
 - **test7 (FSR 4.1.1 Performance at 120: sharpening, idle gaps, AA, frame pacing numbers):**
   - FSR 4.1.1's sharpening is one pass of our own (`shaders/fsr4_sharpen.comp`) instead of the
     replay's RCAS pass (0.315-0.35 ms at 4K at any strength). It uses AMD's RCAS math

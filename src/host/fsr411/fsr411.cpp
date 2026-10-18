@@ -270,6 +270,7 @@ struct Upscaler::Impl {
         VkDeviceMemory memory = VK_NULL_HANDLE;
     };
     Img recurrent, history, reprojected, mlsr_output, exposure, exposure_identity, spd_atomic, spd_mip5;
+    const Img* last_exposure = nullptr;  // bbhost-vk: the exposure the last Record bound
     struct Buf {
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -731,6 +732,7 @@ struct Upscaler::Impl {
         previous_pre_exposure = pre_exposure;
 
         const Img& exposure_image = f.auto_exposure ? exposure : exposure_identity;
+        last_exposure = &exposure_image;  // bbhost-vk: for SharpenExposure()
         const Image* const final_output = &f.output;
 
         VkMemoryBarrier between{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -853,6 +855,11 @@ const std::string& Upscaler::Error() const noexcept {
 
 Image Upscaler::SharpenSource() const {
     return {impl->mlsr_output.image, impl->mlsr_output.view, impl->out_w, impl->out_h};
+}
+
+Image Upscaler::SharpenExposure() const {
+    const Impl::Img* e = impl->last_exposure ? impl->last_exposure : &impl->exposure;
+    return {e->image, e->view, 2, 1};
 }
 
 std::string Upscaler::Describe() const {

@@ -70,6 +70,7 @@ struct SharpenPass {
 struct SharpenConstants {
     std::uint32_t con0[4];
     std::uint32_t size[2];
+    float pre_exposure;
 };
 
 bool sharpen_amd() {
@@ -80,12 +81,13 @@ bool sharpen_amd() {
 bool make_sharpen() {
     if (g_sharpen.tried) return g_sharpen.pipeline != VK_NULL_HANDLE;
     g_sharpen.tried = true;
-    VkDescriptorSetLayoutBinding binds[2] = {
+    VkDescriptorSetLayoutBinding binds[3] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo sli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sli.bindingCount = 2;
+    sli.bindingCount = 3;
     sli.pBindings = binds;
     if (vkCreateDescriptorSetLayout(g.device, &sli, nullptr, &g_sharpen.set_layout) != VK_SUCCESS) return false;
     VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SharpenConstants)};
@@ -113,15 +115,18 @@ bool make_sharpen() {
     return g_sharpen.pipeline != VK_NULL_HANDLE;
 }
 
-// The postpass's result (`src`) sharpened into `dst`, both RGBA16F in General;
-// the replay's last barrier orders src's writes before.
-bool record_sharpen(VkCommandBuffer cmd, const Fsr411::Image& src, const Fsr411::Image& dst, float sharpness) {
+// The postpass's result (`src`, log-encoded and exposed: shaders/fsr4_sharpen.comp)
+// sharpened and decoded into `dst`, both RGBA16F in General, with the
+// replay's exposure; the replay's last barrier orders their writes before.
+bool record_sharpen(VkCommandBuffer cmd, const Fsr411::Image& src, const Fsr411::Image& dst, const Fsr411::Image& exposure, float sharpness,
+                    float pre_exposure) {
     const VkDescriptorSet set = alloc_set_locked(g_sharpen.set_layout);
-    if (!set || !src.view || !dst.view) return false;
-    VkDescriptorImageInfo infos[2] = {{VK_NULL_HANDLE, src.view, VK_IMAGE_LAYOUT_GENERAL},
-                                      {VK_NULL_HANDLE, dst.view, VK_IMAGE_LAYOUT_GENERAL}};
-    VkWriteDescriptorSet w[2] = {};
-    for (int k = 0; k < 2; ++k) {
+    if (!set || !src.view || !dst.view || !exposure.view) return false;
+    VkDescriptorImageInfo infos[3] = {{VK_NULL_HANDLE, src.view, VK_IMAGE_LAYOUT_GENERAL},
+                                      {VK_NULL_HANDLE, dst.view, VK_IMAGE_LAYOUT_GENERAL},
+                                      {VK_NULL_HANDLE, exposure.view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet w[3] = {};
+    for (int k = 0; k < 3; ++k) {
         w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[k].dstSet = set;
         w[k].dstBinding = static_cast<std::uint32_t>(k);
@@ -129,7 +134,7 @@ bool record_sharpen(VkCommandBuffer cmd, const Fsr411::Image& src, const Fsr411:
         w[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[k].pImageInfo = &infos[k];
     }
-    vkUpdateDescriptorSets(g.device, 2, w, 0, nullptr);
+    vkUpdateDescriptorSets(g.device, 3, w, 0, nullptr);
     // As the replay's cbRCAS: stops = 2 - 2 * sharpness, con = 2^-stops.
     const float amount = std::clamp(sharpness, 0.0f, 1.0f);
     const float linear = std::exp2(-(2.0f - 2.0f * amount));
@@ -137,6 +142,7 @@ bool record_sharpen(VkCommandBuffer cmd, const Fsr411::Image& src, const Fsr411:
     std::memcpy(&pc.con0[0], &linear, 4);
     pc.size[0] = dst.width;
     pc.size[1] = dst.height;
+    pc.pre_exposure = pre_exposure > 0.0f ? pre_exposure : 1.0f;  // as the replay's cbRCAS
     const std::int32_t slot = pass_timer_begin_locked(cmd, TimedPass::Sharpen, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_sharpen.pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_sharpen.layout, 0, 1, &set, 0, nullptr);
@@ -363,7 +369,7 @@ bool fsr4_record_locked(VkCommandBuffer cmd, const UpscalerInputs& in, std::uint
         f.reset = p.reset;
         f.auto_exposure = true;
         ok = g_fsr4->Record(f);
-        if (ok && f.sharpen_external && !record_sharpen(cmd, g_fsr4->SharpenSource(), f.output, f.sharpness)) {
+        if (ok && f.sharpen_external && !record_sharpen(cmd, g_fsr4->SharpenSource(), f.output, g_fsr4->SharpenExposure(), f.sharpness, f.pre_exposure)) {
             *why = "FSR 4.1.1: could not record the sharpening";
             ok = false;
         }
