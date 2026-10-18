@@ -16,7 +16,9 @@ References: Supermedo's Windows bbport launcher (visual style only), bbport (dea
 5. Phase L: Launcher overhaul (5-8 days)
 6. Phase 4: FSR 4.1.1 (5-8 days)
 7. Phase 5: Optimization (4-7 days)
-8. Phase 6: Polish and release (3-5 days)
+8. Phase 6: Polish and release (3-5 days), the first working release
+9. Phase 7: More upscalers for non-RDNA4 GPUs (after the first working release)
+10. Phase 8: Windows release (only once Phase 7 is working)
 
 Phases 1-3 have to go in this order because each one needs the one before it. The launcher could start any time, but it goes after FSR 3.1 so its Upscaling tab controls a working upscaler.
 
@@ -124,6 +126,22 @@ Redesign bbhost's setup window so it's streamlined and easy to use. The look fol
 - **Your test (one normal play session):** play the way you usually do for an hour or so with `bbtest start p6` running quietly in the background: online, summons, a Chalice Dungeon, alt-tab, a resolution change. Use `bbtest mark` for anything odd.
 - **What I watch:** the full session log, any crash dumps, and screenshots at your marks. Pass if a normal session has no crashes or visual bugs, and upscaler-off matches stock bbhost.
 
+## Phase 7: More upscalers for non-RDNA4 GPUs (after the first working release)
+Goal: anyone without an RDNA4 card gets a good temporal upscaler too. All of these reuse the Phase 1-2 inputs (scene/UI split, motion vectors, jitter, depth, reactive mask), so each one is mostly an adapter behind the existing upscaler interface.
+- **FSR 4 INT8 (Steam Deck / RDNA2-3 compatible):** the INT8 path of FSR 4, built from the user's own DLL like Phase 4, for GPUs without FP8 (Steam Deck, RX 6000/7000). Needs its own performance presets, since INT8 costs more per frame on older cards.
+- **DLSS (NVIDIA RTX):** through NVIDIA's Vulkan DLSS SDK. The SDK's license terms decide whether the runtime can ship with the project or has to be supplied by the user; checked before any code is written.
+- **XeSS (Intel Arc, plus a fallback path for other GPUs):** through Intel's XeSS SDK, which has a Vulkan backend.
+- The Upscaling tab and F10 list only what the current GPU supports, with FSR 3.1 always available as the fallback.
+- **Milestone:** each upscaler matches FSR 3.1's image stability with no new ghosting, and switching between them in F10 works without a restart or crash.
+- **Testing:** the user's RX 9070 XT covers FSR 4 INT8 and XeSS. DLSS and the Steam Deck need testers with that hardware (community testers, or a Steam Deck if one is available).
+
+## Phase 8: Windows release (only once Phase 7 is working)
+- bbhost is Linux-only today, so this means porting the host's platform layer (windowing and input are already SDL3, but memory mapping, threading, file paths and the PS4 runtime pieces are Linux-specific) to Windows.
+- Native Windows builds of the same Vulkan renderer and upscalers; FSR 4 there can use the user's DLL directly instead of the captured-shader path.
+- A Windows CI build and a Windows test pass.
+- **Milestone:** the Windows build matches the Linux build in features, image quality and performance.
+- **Testing:** the user, or community testers, on a Windows install.
+
 ---
 
 ## Totals
@@ -142,3 +160,5 @@ Redesign bbhost's setup window so it's streamlined and easy to use. The look fol
 - **Upstream updates:** each new bbhost release needs the patch set reapplied.
 - **Legal:** FSR 4.1.1 assets have to be built from your own DLL and can't be shared.
 - **Online play:** unaffected, since all of this is display-only.
+- **DLSS licensing:** NVIDIA's SDK terms may limit what can ship in a GPLv3 project; checked first in Phase 7.
+- **Windows port:** bbhost's host layer is Linux-specific, so Phase 8 is a real porting job, not just a recompile; its size gets estimated once Phase 7 is done.
