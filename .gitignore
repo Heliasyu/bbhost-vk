@@ -39,3 +39,4 @@ logs/
 *.recovery
 user/
 build-ci/
+dist/
