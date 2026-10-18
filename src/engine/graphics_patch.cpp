@@ -1311,6 +1311,8 @@ bool engine_prologue_hook_exec(ElfImage* image, std::uint64_t at, const std::uin
     return install_prologue_hook(image, at, prologue, n, host, id, exec, m);
 }
 
+void* engine_alloc_exec_near(std::uint64_t at) { return alloc_exec_near(at); }
+
 bool engine_call_site_hook(ElfImage* image, std::uint64_t at, std::uint64_t target, void* host) {
     return install_jump_hook(image, at, target, host);
 }

@@ -86,6 +86,7 @@ add_executable(bbhost
   src/engine/yebis_bind.cpp
   src/engine/graphics_patch.cpp
   src/engine/live_resolution.cpp
+  src/engine/scene_split.cpp
   src/engine/loading.cpp
   src/engine/camera.cpp
   src/engine/mouse_camera.cpp
