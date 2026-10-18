@@ -280,3 +280,174 @@ ran against the game yet.
   `96bfcf84d6ef42f2fa77f9c6e7335aa49ee6e77309c97ac86a507b8275f60f2c`
   (on the build box at /workspace/bbhost-vk-builds/phase1/; not released).
 - Player's PC test: pending (TESTING.md, "Pending combined test session").
+
+---
+
+## 2026-10-18 (Sun), Phase 2: Inputs for temporal upscaling (branch `phase-2-mv-jitter`)
+
+Base: `phase-1-scene-ui-split` (PR #2, unmerged); this branch's PR is
+stacked on it. Work done on the build box, with no game dump: the math and
+the shader are tested here (the shader on lavapipe), everything that
+depends on the game's own data is logged for the first test.
+No upscaler files were needed: no OptiScaler release was downloaded and no
+FSR DLLs were used (FSR 3.1 comes from the FSR-Vulkan submodule, as in
+Phase 0).
+
+### Findings
+- **Pipeline names are hashes the other projects use.** bbhost names a
+  pipeline `VSHASH+PSHASH` from the OrbShdr footer, which is shadPS4's
+  `pgm_hash`, so IFreemz's shader hashes apply unchanged.
+- **The scene constants** are an 864-byte (216-float) constant buffer
+  (bbport): [0] far (3000), [1] 1/far, [4..5] the render size, [6..7] its
+  reciprocals, the view as 3x4 rows at [8..19], the projection at
+  [52, 57, 62, 63], the inverse view at [180..191]. The previous frame's
+  matrices are not in it, so bbhost keeps its own history.
+- **Two cameras a frame**: two map sections can bind different scene
+  constants in one frame (IFreemz); the camera used by most draws is the
+  scene's.
+- **The game draws its own object velocity** (IFreemz): pixel shaders
+  `34bc187c` (opaque, packing scale in constant buffer 0), `749e4f9e` and
+  `b25e4fae` (alpha-tested, scale in buffer 1), into a coarse 160x90 RGBA8
+  target; decoded delta = (rg - 0.5) * (-w/sx, h/sy) where alpha > 0.5.
+- **Jitter eligibility** (IFreemz, bbport): draws whose depth is the scene
+  depth and that are indirect, or have more than 6 indices, or more than one
+  instance; the scene depth is the one bound while drawing into the scene
+  colour. Fullscreen passes (6 indices or fewer) and UI vertex shaders
+  (`34e8a281`, `81d336ce`, `09957251`, `24042a9b`, `a400228b`) never jitter.
+- **Phase count**: FidelityFX's `int(8 * (display / render)^2)`: 18
+  (Quality), 23 (Balanced), 32 (Performance), 72 (Ultra Performance), 8 at
+  native.
+
+### Done
+- `src/host/temporal/` (pure, header-only, unit-tested in
+  `tests/temporal_test.cpp`):
+  - `halton.h`: Halton(2,3), phase count, offset = halton(i % n + 1) - 0.5
+    in render pixels (+x right, +y down).
+  - `camera.h`: scene-constant parsing with signature checks (far, size,
+    reciprocals, unit rotation rows) and a double-precision inverse;
+    `CameraHistory` (majority camera of up to 8 a frame, previous frame
+    kept); camera-cut detection - first frame, no camera, a gap of more than
+    2 frames, a teleport (> 20 units, IFreemz's section switch), a rotation
+    (> 45 degrees), a projection change (> 10% FOV), a resize;
+    `make_reprojection` (previous view x inverse current view, in double);
+    `camera_motion` (the shader's math in double, for the tests).
+  - `motion_classify.h`: the hashes above, buffer classes (864 = scene,
+    640..16384 = skeleton, 96..639 in steps of 48 = small skeleton; bbport),
+    `jitter_eligible`, the blend bit, and bbport's moving gate (a palette
+    whose hash matches the previous frame is static).
+- `src/host/upscaler_inputs.h`: the backend-agnostic `UpscalerInputs` -
+  colour, depth, motion, the opaque-colour snapshot, (reactive, exposure:
+  empty, the backend generates them), the jitter and its phase count,
+  reset/cut, near/far, vertical FOV, frame time. Phase 3's FSR 3.1 and
+  Phase 4's FSR 4.1.1 take this; Phase 7's FSR 4 INT8, DLSS and XeSS take
+  the same struct.
+- `src/host/temporal_inputs.cpp` (the runtime) and the hooks in
+  host/render.cpp:
+  - constant buffers are observed while their V#s are resolved (only while
+    watching); the scene block is parsed once per address and content, the
+    camera accepted only if it carries the render size;
+  - the jitter is added to the viewport of jitter-eligible draws;
+  - at the scale pass (`ccbf44a6`): the camera history ends the frame, cuts
+    are logged, `shaders/motion.comp` fills an RGBA16F motion image at the
+    render size (rg = current-to-previous motion in render pixels, b = object
+    motion, a = camera valid), and the next jitter phase is chosen;
+  - before the first blended draw into the scene colour, the colour is
+    copied (the opaque snapshot, for the backends' reactive masks).
+- Show Motion Vectors (Phase 0's toggle) draws the motion image over the
+  picture in the presenter (`shaders/motion_view.frag`): red/green =
+  horizontal/vertical motion (|d| / 8 px, square root), blue = object
+  motion, a dark wash where there is no valid camera. With the toggle on the
+  motion vectors are computed even without a temporal upscaler (still only
+  while the scene is split).
+- Logs: `jitter:` (on/off and why, phase count), `camera-cut:` (each cut
+  and its kind, repeats compressed), `motion:` (scene constants found, the
+  scene depth, the first motion pass, a summary every 3000 frames:
+  cameras, cuts, velocity draws, opaque snapshots, palettes moving/static).
+- Switches for A/B on the test PC: `BBHOST_JITTER=0`,
+  `BBHOST_MOTION_VECTORS=0`, `BBHOST_OBJECT_MOTION=0`,
+  `BBHOST_OPAQUE_SNAPSHOT=0`.
+- `tests/motion_shader_test.cpp`: runs the compiled `motion.comp` on any
+  Vulkan device (lavapipe here) over a synthetic floor/wall/sky scene 1800
+  units from the origin with a turning, moving camera and a jitter, and
+  checks every pixel against `camera_motion` in double.
+
+### Decisions and why
+1. **Jitter only with the split active and FSR 3.1 or FSR 4.1.1 selected**
+   (as the plan asks). Nothing resolves the jitter before Phase 3, so a
+   Phase 2 build with FSR 3.1 selected shows a sub-pixel shimmer of the 3D
+   scene. That is expected; `BBHOST_JITTER=0` removes it for comparison.
+2. **Off, FSR 1 and Native AA are untouched by construction**: the runtime
+   decides once per flip whether it watches (split, and a temporal upscaler
+   or Show Motion Vectors); when not, every hook is a single branch and no
+   draw, viewport, buffer or pass changes.
+3. **Jitter is removed from the motion vectors** in the shader (the pixel's
+   position is unjittered before reprojection), so they describe motion
+   only; the upscaler still gets the jitter separately.
+4. **Matrices in double on the CPU**: Bloodborne's world coordinates reach
+   the thousands; the reprojection matrix is built as prev x inverse(cur)
+   in double and only the product goes to the GPU, so float precision is
+   spent on view-space distances (the GPU test: worst 0.016 px at 1800 units).
+5. **Object motion: the game's own velocity first.** It is exact where the
+   game draws it and costs nothing. bbport's previous-frame positions for
+   skinned meshes, cloth and weapons are only **surveyed** in this phase
+   (moving vs static palettes counted, static map pieces skipped by the
+   moving gate); re-running those draws with last frame's palettes is
+   deferred until the first test shows where the game's velocity is
+   missing. This is the main piece of Phase 2 not done.
+6. **Reactive mask and exposure**: the opaque snapshot is the input FSR's
+   own reactive-mask generation wants; no dedicated R8 mask yet. Exposure
+   is left to the backends' auto-exposure (FSR 3.1 and 4 have one), so no
+   guess at the game's tonemapping is needed.
+7. **The overlay is drawn only in the presenter's one-pass path** (the
+   split's normal path); the FSR 1 magnified path does not draw it.
+8. **Online play, HDR, motion blur** are untouched; the motion-blur shader
+   (`e0305cef`) is not hooked. The presenter's swapchain is unchanged, so
+   goverlay/MangoHud see the same as before.
+
+### What the other projects taught
+- **IFreemz** (shadPS4-Bloodborne-DLSS-FSR, GPL-2.0-or-later): the velocity
+  shaders and their decoding, the jitter rule, the majority camera, the
+  section-switch threshold, the view-space reprojection with the sky as a
+  direction. `motion.comp` adapts that math (credited in the shader and in
+  THIRD_PARTY_NOTICES.md; GPL-2.0-or-later is GPL-3.0-compatible).
+  IFreemz replays the velocity draws at render size into an RGBA16F mirror;
+  bbhost samples the game's 160x90 target for now (see the risks).
+- **bbport** (deadinside28/bloodborne_pc, GPL-2.0): the layout of the
+  864-byte scene block, the buffer classes, the viewport-offset jitter,
+  the moving gate and previous-frame positions for object motion. Facts and
+  ideas; no code copied.
+- **Supermedo** (the Windows build of bbport): same approach; nothing new
+  for Phase 2 beyond confirming bbport's layout.
+- **Awakenchan** (BloodBorneButPc): no new guest allocations in Phase 2 -
+  the motion image and the opaque snapshot are host images at the render
+  size, so the guest heaps are as in Phase 1.
+
+### Open risks (only the hardware test can answer)
+- **Whether the scene constants are found at all** (`motion: scene
+  constants found ...`) and whether they carry the render size or the
+  output size while split (logged once if the output's).
+- **The velocity target**: its alpha semantics, its coarse 160x90 edges
+  (object motion bleeds a few pixels around moving enemies in the overlay),
+  and whether it is drawn before the scale pass (`velocity draws ... after
+  the scale pass` in the summary). If it is late, the frame uses last
+  frame's velocity.
+- **Jitter coverage**: shadow maps, the sky, decals and particles that use
+  the scene depth may or may not shift; a shadow that shimmers more than
+  the geometry is the sign.
+- **Camera-cut thresholds** (20 units, 45 degrees) against fast rolls,
+  ladders, lamp warps, cutscenes and the boss arenas' camera.
+- **The opaque snapshot**: the first blended draw may come before all the
+  opaque geometry (then the snapshot misses some); its copy costs one
+  render-size colour copy a frame.
+- **Cost**: one 8x8 compute dispatch at the render size and one colour copy
+  a frame, plus a hash of each 864-byte block; measured with Show Upscaler
+  GPU Time on the PC.
+
+### Test results (build box)
+- `ctest`: 46 tests, 0 failures (16 skip without game files).
+  `temporal_test` (Halton, phase counts, scene-constant parsing, history
+  and every cut kind, motion against direct projection to 0.02 px);
+  `motion_shader_test`: "llvmpipe: 320x180 pixels match the CPU math
+  (worst 0.0156 px, mean |motion| 8.83 px, 20404 sky)".
+- Player's PC test: pending (TESTING.md, "Pending combined test session",
+  part C).
