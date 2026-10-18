@@ -14,6 +14,8 @@
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
 #include "host/upscaler.h"
+#include "host/temporal_inputs.h"
+#include "host/temporal/motion_classify.h"
 
 #include "host/draw_capture.h"
 #include "gcn/container.h"
@@ -254,6 +256,9 @@ struct GfxPipeline {
     // bbhost-vk: 1 when the pixel shader is the game's scene-to-output scale
     // pass (ccbf44a6, host/upscaler.h ScenePass), 0 not, -1 until a draw asks.
     std::int8_t scale_pass = -1;
+    // bbhost-vk Phase 2 (host/temporal_inputs.h): the stages' OrbShdr hashes
+    // as numbers, parsed from the name once.
+    std::uint32_t orb_vs = 0, orb_ps = 0;
     // The optimized relink, queued at the pipeline's first draw
     // (queue_library_relink): its libraries, and the vertex library's
     // specialization - the elements' formats, the state it was made with.
@@ -8053,6 +8058,11 @@ bool draw_window_locked(std::uint64_t base, std::uint64_t bytes, Located& out) {
 // indexes it from cb_bias_dw. A V# outside imported memory, not on a dword
 // boundary, or too long for one binding stays on the page-table path
 // (cb_valid bit clear) and gets the dummy buffer.
+// bbhost-vk Phase 2: the stage (0 VS, 1 PS) and shaders whose buffers
+// resolve_stage_buffers is resolving for a draw, while the temporal inputs
+// watch the draws (host/temporal_inputs.h); -1 otherwise.
+thread_local int t_temporal_stage = -1;
+thread_local std::uint32_t t_temporal_vs = 0, t_temporal_ps = 0;
 void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t* user, gcn::StageParams& params,
                            std::vector<VkDescriptorBufferInfo>& infos, const GxStageRecords* gx = nullptr) {
     // Why V#s end up on the page-table path, logged every 200,000 resolves.
@@ -8094,6 +8104,14 @@ void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t
         // A V# keeps memory-type bits above its 40-bit address; a pointer pair is the address.
         const std::uint64_t hi = b.pointer ? words[1] : (words[1] & 0xff);
         const std::uint64_t base = resolved ? static_cast<std::uint64_t>(words[0]) | (hi << 32) : 0;
+        // bbhost-vk Phase 2: the scene constants, bone palettes and velocity
+        // scales by the V#'s own size (records x stride; records are bytes
+        // when the stride is 0).
+        if (t_temporal_stage >= 0 && base && !b.pointer) {
+            const std::uint32_t vstride = (words[1] >> 16) & 0x3fff;
+            const std::uint64_t vbytes = static_cast<std::uint64_t>(words[2]) * (vstride ? vstride : 1);
+            temporal_observe_buffer_locked(t_temporal_stage, t_temporal_vs, t_temporal_ps, static_cast<int>(i), base, vbytes);
+        }
         int outcome = !base ? kNoBase : (base & 3) || !shape ? kUnaligned : kUnmapped;
         // Past the longest binding the range takes the page table: no one buffer need hold it.
         Located loc;
@@ -11714,11 +11732,22 @@ static bool draw_impl(const GpuDraw& d) {
         if (pl.scale_pass < 0) {
             const std::size_t plus = pl.name.find('+');
             pl.scale_pass = plus != std::string::npos && pl.name.compare(plus + 1, 8, "ccbf44a6") == 0 ? 1 : 0;
+            pl.orb_vs = pl.name.size() >= 8 ? temporal::parse_hash(pl.name.c_str()) : 0;
+            pl.orb_ps = plus != std::string::npos && pl.name.size() >= plus + 9 ? temporal::parse_hash(pl.name.c_str() + plus + 1) : 0;
         }
+        temporal_frame_locked(hle_video_flip_count());
         t_bilinear_samplers = pl.scale_pass == 1 && upscaler_scene_pass() == ScenePass::Bilinear;
         if (t_bilinear_samplers) note_scale_pass(pl.name);
         prefetch_stage_images(pl.ps.meta(), s.ps_user, stage_images[1], gx_stage[1], pl.paths_match[1] ? &key_stages[1] : nullptr);
         t_bilinear_samplers = false;
+        // bbhost-vk Phase 2: the scene is complete - motion vectors, camera
+        // history, the next jitter phase (host/temporal_inputs.h).
+        if (pl.scale_pass == 1 && temporal_watching()) {
+            RtImage* scene = nullptr;
+            if (!stage_images[1].images.empty() && stage_images[1].images[0].resolved)
+                scene = find_render_target(tsharp_base(stage_images[1].images[0].w));
+            temporal_scale_pass_locked(scene, s.color[0] ? s.color[0]->width : 0, s.color[0] ? s.color[0]->height : 0);
+        }
         t_resolve_site = kSiteBuffers;
     }
     draw_stamp.to(kRenderCostPrefetch);
@@ -12529,7 +12558,13 @@ static bool draw_impl(const GpuDraw& d) {
             std::memcpy(params.vertex_formats, t_tess->hs_user, sizeof(params.vertex_formats));
             if (gx_stage[0]) put_tess_constants(*gx_stage[0], t_tess->tess_vsharp, params.user_sgpr);
         }
+        if (temporal_watching()) {
+            t_temporal_stage = st;
+            t_temporal_vs = pl.orb_vs;
+            t_temporal_ps = pl.orb_ps;
+        }
         resolve_stage_buffers(meta, params.user_sgpr, params, buffer_infos, gx_stage[st]);
+        t_temporal_stage = -1;
         if (!meta.buffers.empty()) {
             any_buffers = true;
             all_bound = all_bound && params.cb_valid == (1u << meta.buffers.size()) - 1;
@@ -13042,6 +13077,11 @@ static bool draw_impl(const GpuDraw& d) {
             }
         }
     }
+    // bbhost-vk Phase 2: the scene colour as it is before its first blended
+    // draw - the opaque snapshot the upscalers' reactive masks start from.
+    if (temporal_watching() && s.color[0] && s.depth &&
+        (s.gx_blend ? s.gx_blend->rt[0].enable != 0 : temporal::blend_enabled(s.blend[0])))
+        temporal_before_blend_locked(s.color[0], s.depth);
     g_pass_profile_name = &bind_pl->profile_name;
     begin_pass(s, pass_key(s), sample_hazard);
     draw_stamp.to(kRenderCostPass);
@@ -13188,6 +13228,17 @@ static bool draw_impl(const GpuDraw& d) {
         vp.height = static_cast<float>(g_pass.extent.height);
         vp.minDepth = 0.0f;
         vp.maxDepth = 1.0f;
+    }
+    // bbhost-vk Phase 2: the scene's geometry draws shifted by the frame's
+    // Halton jitter (temporal upscalers only; host/temporal_inputs.h).
+    if (temporal_watching()) {
+        float jx = 0.0f, jy = 0.0f;
+        const bool blended = s.gx_blend ? s.gx_blend->rt[0].enable != 0 : temporal::blend_enabled(s.blend[0]);
+        if (temporal_draw_locked(s.depth, s.color[0], pl.orb_vs, pl.orb_ps, d.index_count, d.instance_count, d.indirect_va != 0, blended, &jx,
+                                 &jy)) {
+            vp.x += jx;
+            vp.y += jy;
+        }
     }
     // A reversed range (zscale < 0) stays reversed: Vulkan only requires
     // both ends inside [0, 1].
