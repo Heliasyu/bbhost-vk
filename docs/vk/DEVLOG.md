@@ -961,3 +961,67 @@ luminance with separate means left and right of x = 3/4. It runs when `fsr-dump.
 `capture.request` (`bbtest mark`) appears, on Shift+F12 with `BBHOST_VK_CAPTURE=1`, and once
 at the 600th upscaled frame. The pixel code is `temporal/dump_pixels.h`, tested in
 `test_dump_pixels`.
+
+## test3 hardware result and the test4 changes (2026-10-18)
+
+test3 (v0.2.18-vk.0-73-g1700b9a): the 3840x2160 FSR 3.1 Quality picture is correct (the user,
+and the stage dump: the output fills the target evenly). Next: performance at 4K output, and a
+camera that holds.
+
+### Where the frame time goes (world, same spot; the busy meter's `gpu busy:` lines)
+| run | output (scene) | fps | GPU busy | GPU ms/frame | gpu-wait /window |
+|---|---|---|---|---|---|
+| t1 FSR 1 Native AA | 2560x1440 (2560x1440) | 120 (capped, limiter sleeps 300/300) | 76% | 6.3 | 5 ms |
+| t3 FSR 3.1 Quality | 3840x2160 (2560x1440) | ~104-113 | 90-91.5% | 8.4 | 1.1-1.55 s |
+| t3 Upscaler Off | 3840x2160 (3840x2160) | ~88-92 | 91-93% | 10.1 | 1.7-2.1 s |
+| t2 FSR 1 Quality | 5120x2160 (3408x1440) | ~99 | 92-93.5% | 9.4 | 1.45-1.65 s |
+
+- MangoHud per 250-frame segment in t3: gameplay at 98-100% GPU load, ~300 W, 3.0 GHz. The
+  57% and 72.7% session averages include the title and menus (~20% at 120 fps).
+- `gpu-wait` is the command processor inside `retire_slot_locked`'s vkWaitForFences for the
+  slot it reuses (16 in flight). It runs ahead of the GPU and waits for it. The present
+  thread agrees: `display wait` is 2.5-3.2 s of each 2.7-3.4 s (the acquire waits on the GPU),
+  against 27 ms in t1.
+- The same scene size (2560x1440) costs 6.3 ms in t1 and 8.4 ms in t3. Of the 2.1 ms more,
+  1.78 ms is ours (`pass-timer:`: MV 0.06, reactive 0.21, opaque 0.04, FSR 3.1 1.23, copy
+  0.23). About 0.3 ms is the post-processing and UI at 3840x2160 instead of 2560x1440. The
+  rest of the 120 fps budget (8.33 ms) is lost to the ~9% of time between command buffers
+  (~0.8 ms a frame over ~11 submissions).
+- The CPU side (translation, recording) is not the limit: cpu-ms 6.1-7.4 s per 2.6-2.8 s
+  window (2.4-2.8 cores), and the CP spends 1.1-1.55 s of each window waiting for the GPU.
+  The recorder replays 0.35-0.43 s and sleeps ~1700 times a window. vkEndCommandBuffer +
+  vkBeginCommandBuffer cost 2.9-3.5 us x ~3150 = ~10 ms a window. Scaleform's aligned
+  scratch copies: 940k in the session, 62 MiB, about 70 small copies a frame, which is
+  negligible. What the GPU runs for the translation layer is inside the busy time: per
+  recorder window ~27k barriers, ~57-66k copies and ~100-114k fills (about 90, 200 and 350
+  a frame). BBHOST_GPU_PROFILE=2 (test4 run E) charges that to recording sites.
+### Camera (intermittent in test3)
+- `motion: scene constants found at 0x14364e8c0+0 (PS 8a6c7657, binding 1, V# of 864 bytes)`
+  first at flip ~2499. Then gaps of 2-433 frames, 1582 resets in the first 3000 dispatches
+  and 92-600 later. The flip 8864 dump was inside a found stretch, so the dump and the
+  `jitter: paused` lines were both right, at different times.
+- The probe: the G-buffer draws' V#s mostly print `V# of 0 bytes` (no record count). The
+  hook computed records x stride = 0, so a scene block there was never looked at (the
+  probe's zeros were this too: nothing was read). One shared V# (0x1434e0040: VS binding 3 /
+  PS binding 1 in every G-buffer pipeline) is the likely block.
+- Fix: a V# with 0 records is taken at the shader's extent. A block head ([0] far, [1]
+  1/far, [4], [5] a size: `scene_constants_head`) is read on to 864 bytes when
+  `hle_kernel_va_mapped` says that memory is there. The jitter and the history both follow
+  the same per-frame "camera found" state, as in test3.
+
+### FSR 3.1 writes the target directly
+The scale pass's target (RGBA16F, the display buffers' size) is made with STORAGE when the
+scene is split and FSR 3.1/4.1.1 is chosen (`fsr3_target_storage_wanted`, policy
+`direct_target_wanted`). FSR 3.1 imports it as its output (`Fsr3Frame::output`), and the
+copy is skipped (`direct_output_ok`: from 0,0, the FSR output's size, and no stage dump that
+frame). A second scale pass in a frame copies from that target. RGBA16F's view list is
+itself alone, so no view in another format gets STORAGE. FSR 4.1.1 and FSR 1 still copy.
+`BBHOST_FSR_DIRECT_TARGET=0` restores the copy.
+
+### What can still be cut (needs test4's A/B runs)
+- Submissions: `BBHOST_SUBMIT_EVERY_JOB=0` merges a job's submit with the next one when more
+  are queued (upstream's switch). This could recover part of the ~0.8 ms of gaps.
+- Reactive mask 0.21 ms and sharpening (RCAS, inside FSR's 1.23 ms): settings, run D.
+- Barriers, copies and fills between the game's draws: measure with BBHOST_GPU_PROFILE=2
+  first. Any change there is correctness-sensitive (upstream renderer).
+- FSR 3.1's own 1.23 ms at 2560x1440 -> 3840x2160 is AMD's cost on this GPU.

@@ -1,6 +1,20 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test4 (performance at 4K output, camera):**
+  - The scene camera is now found every frame. test3's probe showed that most of the
+    G-buffer draws' V#s carry no record count, so their size read as 0 and their scene
+    constants were never looked at; the camera only came from one pipeline whose V# said
+    864 bytes (test3: 1582 history resets in 3000 dispatches, jitter pausing and resuming).
+    Such a V# is now read as far as the shader reads it, and a block whose head matches is
+    read on to its 864 bytes when that memory is mapped.
+  - FSR 3.1 writes the scale pass's 3840x2160 target directly instead of its own image plus
+    a copy (test3: copy 0.23 ms a frame). Only the output-sized RGBA16F targets take STORAGE
+    usage, only with the split and FSR 3.1/4.1.1 chosen. `BBHOST_FSR_DIRECT_TARGET=0` keeps
+    the copy. The `fsr3:` summary counts `written directly`.
+  - Measured (TESTING.md "test4"): at 4K output the GPU is the limit (busy 91-93% from the
+    busy meter, ~300 W). `gpu-wait` is the command processor waiting for one of its 16
+    submission slots, i.e. it runs ahead of the GPU. It is not a host-side stall.
 - **test3 fixes:**
   - The dark, stretched picture with a grey band at 3840x2160 (test2) is fixed. Any upscaler
     preset below Native AA now makes the display buffers the output's size at the start.

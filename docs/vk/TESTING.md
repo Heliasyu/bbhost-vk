@@ -93,6 +93,67 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test4 checks (~40 min)
+
+Same as test3: set the upscaler and the Resolution **before** launching. Stand at the same
+busy, repeatable spot for every run (test3's spot), wait ~20 s, then `bbtest mark`. Keep
+**Show Upscaler GPU Time** on. For each run, note MangoHud's FPS and the log's last
+`gpu busy:`, `pass-timer:` and `fsr3:` lines.
+
+A. **FSR 3.1 Quality, 3840x2160** (test4 defaults):
+   `BBHOST_MOTION_PROBE=1 bbtest start t4-fsr3 --capture`
+   - `fsr3: FSR 3.1 writes the scale pass's 3840x2160 target directly`, and in the
+     summaries `N written directly, 0 copied`. The `pass-timer:` line has no `copy` any more.
+   - The picture is as correct as in test3 (no band, normal brightness).
+   - Camera: `motion: scene constants found at ...` early in the world, then the `fsr3:`
+     summaries show `resets` near 0 outside warps and loads (test3: 1582 of 3000). Few or no
+     `jitter: paused` / `camera-cut: no scene camera` lines while you play.
+B. **The same with the copy** (the direct write's A/B):
+   `BBHOST_FSR_DIRECT_TARGET=0 bbtest start t4-copy`. Expected: about 0.2 ms more GPU
+   time a frame, and the `copy` figure is back.
+C. **Merged submissions** (the gaps between command buffers, ~9% of the GPU's time):
+   `BBHOST_SUBMIT_EVERY_JOB=0 bbtest start t4-merge`. Compare FPS and `gpu busy:` with A.
+   Upstream bbhost's default. Only make it the default if it is faster and nothing breaks.
+D. **The cheaper FSR inputs:** in A's setup, turn the reactive mask off, then sharpening
+   to 0 (Upscaler settings). Note the FPS and the `FSR 3.1` / `reactive` figures for each.
+E. **Where the GPU time goes** (the game's passes at 4K; FPS here is not representative):
+   `BBHOST_GPU_PROFILE=3 bbtest start t4-profile` at A's settings, ~30 s at the spot.
+   The log's `graphics=... compute=... <pass>=<ms>(<count>)` lines name the heaviest
+   passes (YEBIS post-processing and UI at 3840x2160, the scene at 2560x1440).
+   Then `BBHOST_GPU_PROFILE=2 bbtest start t4-gaps` for the time between draws, charged to
+   what was recorded there (barriers, copies, fills).
+F. **FSR 4.1.1** (see "FSR 4.1.1 assets" below), then FSR 4.1.1 Quality at 3840x2160:
+   `bbtest start t4-fsr4 --capture`. Look for `fsr4: FSR 4.1.1 assets in ...`, then
+   `fsr4: FSR 4.1.1 replay, fp8 ...` on the RX 9070 XT. The `fsr3:` summary counts
+   `N FSR 4.1.1`, and `pass-timer:` shows `FSR 4.1.1 x.xx ms`.
+
+### FSR 4.1.1 assets (once, ~10-20 min, on the PC)
+Nothing of AMD's ships with bbhost-vk. The assets are built on your PC from your own DLL.
+1. Get OptiScaler **v0.9.4** (github.com/optiscaler/OptiScaler/releases/tag/v0.9.4) and
+   unpack it. Use its `amd_fidelityfx_upscaler_dx12.dll`: version 4.1.1.2740, about
+   27 MB. A >30 MB file with the same version number has been reported not to work. Keep
+   `amd_fidelityfx_loader_dx12.dll` (2.3.0.2740) next to it. This DLL exports the API itself,
+   so the loader is only a fallback.
+2. On the PC you need: python3, `spirv-tools` (`sudo pacman -S spirv-tools python` on
+   CachyOS), and a Proton that starts FSR 4.1: GE-Proton 10-34 or newer, Proton-CachyOS 11,
+   or Proton - Experimental, installed in Steam (`compatibilitytools.d` or `steamapps/common`).
+   The tarball's `tools/fsr4cap/bin` holds the prebuilt dxil-spirv and fsr4cap.exe, so
+   MinGW, cmake and network are not needed. Unprivileged user namespaces must be allowed
+   (CachyOS default). Bazzite's `bwrap: No permissions to create a new namespace` is
+   this check failing.
+3. From the unpacked test4 tarball:
+   `./build-fsr4.sh ~/Downloads/OptiScaler_0.9.4/amd_fidelityfx_upscaler_dx12.dll`
+   (`PROTONPATH=<a Proton folder> ./build-fsr4.sh ...` picks one Proton).
+   It records 40 sizes on RDNA4 (FP8 and INT8). Work files go to `~/.cache/bbhost/fsr4cap`
+   (`BB_FSR4CAP_CLEAN=1` removes them after a successful build).
+4. The assets land in `~/.local/share/bbhost/fsr4_411/` (bbhost reads them there, or
+   wherever `BBHOST_FSR411_DIR` points). Check that `t1080_m0/initializer.bin` or
+   `fp8/t1080_m0/initializer.bin` exists in that folder.
+   Exit codes: 2 the DLL is not 4.1.x, 3 no Proton, 4 tools missing, 5 FSR 4.1 did not start
+   under any Proton, 7 a loader is needed. Keep the last 30 lines if it fails.
+5. test3's log said `fsr4: no FSR 4.1.1 assets in /home/helias/.local/share/bbhost/fsr4_411`.
+   After the build, that line must be gone.
+
 ## test3 checks (~20 min)
 
 Start with the upscaler and the Resolution you want to test **already set**. The display
