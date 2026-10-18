@@ -27,7 +27,7 @@ Online play must work exactly as in upstream bbhost. bbhost uses thehuntersdream
 8. Phase 6: Polish and release (3-5 days), the first working release
 9. Phase 7: More upscalers for non-RDNA4 GPUs (after the first working release)
 10. Phase 8: Windows release (only once Phase 7 is working)
-11. Phase H (MAYBE, not committed; decide after the first working release): DualSense HD haptics and adaptive triggers, DualSense lightbar, Discord Rich Presence, trophies
+11. Phase H (MAYBE, not committed; decide after the first working release): DualSense HD haptics and adaptive triggers, DualSense lightbar, Discord Rich Presence, trophies, ReShade
 
 Phases 1-3 have to go in this order because each one needs the one before it. The launcher could start any time, but it goes after FSR 3.1 so its Upscaling tab controls a working upscaler.
 
@@ -167,6 +167,7 @@ The PS4 game only has DualShock 4 rumble, so haptic data has to be made, not con
 - **DualSense lightbar:** the lightbar follows the hunter's HP, from pale blue (#a9bfe3) at full to blood red (#8e1b2a) when low, with short flashes on Insight gained and visceral/parry hits. Uses SDL3's controller LED support; off by default and ignored for other controllers. Works over USB and Bluetooth.
 - **Discord Rich Presence:** shows "Playing Bloodborne (bbhost-vk)" with the current area or boss, playtime, and online/offline, via the Discord local IPC socket (no account data, nothing sent to any server bbhost talks to). Off by default; a toggle in the launcher and F10. Does nothing if Discord isn't running.
 - **Trophies:** upstream bbhost already records unlocks (sceNpTrophyUnlockTrophy -> `/data/trophies.txt`) with no UI. Add an in-game unlock popup (name, icon, grade), a Trophies page in the launcher (all trophies, earned/missing, dates, platinum progress), and platinum awarding (not done upstream). Names/icons come from the game's encrypted trophy file, decrypted with a user-provided key (like shadPS4; never shipped); without it, fall back to names and descriptions only. Steam achievements are not possible for a non-Steam shortcut.
+- **ReShade compatibility:** (a) works today as a Vulkan layer (vkBasalt, or the native Linux ReShade port), but effects also hit the HUD/menus, depth is unreliable, and MangoHud ordering needs one layer implicit and one explicit; a short docs page can cover this. (b) Recommended if pursued: a built-in ReShade .fx pass (ReShade's BSD-3 effect compiler, vkBasalt's zlib runtime ideas) after FSR and YEBIS, before the Scaleform HUD, with real scene depth and a launcher page (shader folder, picker/order, sliders, toggle key). About 8-15 dev-days. Shader packs user-provided (mixed licences). Off by default (GPU cost at 4K/120). Client-side only; online untouched.
 
 ---
 
