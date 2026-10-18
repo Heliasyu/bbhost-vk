@@ -1509,3 +1509,60 @@ shader size queries (`BBHOST_POST_CHAIN_LOG` extended to their C# and the transl
   fog spikes, not the average.
 - That is not the 7.5 ms target yet. The next candidates are #42-#53 at 4K: the tonemap
   composite and the 0b0acf50 blur chain.
+
+## test11: even present pacing; t12 read (2026-10-18)
+
+**t12 (test10, `BBHOST_AB_SECONDS=30` flipping post at render), from bbhost.log:**
+
+| | post on | post off |
+|---|---|---|
+| fps | 120.0 (126.5 in the first half, which included the load) | 117.8-120.0 |
+| GPU busy | 84-88% (~7.0-7.3 ms a frame) | 92-93% |
+| GPU idle "late" (waiting on the CPU) | 80-120 ms/s | 0 |
+| game's gpu-wait | ~5 ms per 2.5 s | 1.15 s per 2.5 s: GPU-bound, the game waits |
+| flip to present | 0.9 ms (max 1.2-2) | 3-4.7 ms (max 7) |
+
+- Post at render took the game off the GPU's back. Still, 39% of the on halves' frames
+  were over 8.42 ms. With ~1 ms of GPU to spare, that spread is the present call's timing,
+  not the GPU's work:
+  - The limiter keeps the game's flips even (its sleeps are <60 µs late at p99).
+  - Each present follows by the command processor's work on that frame plus the hand-over.
+- "Over 8.33 ms" is about half of any run averaging exactly 120: the cap's interval is
+  8.333. bbtest now also counts frames over 8.5 and 9 ms. Those are the ones that show.
+- **The 13:50:42 "dip leaving and returning to the lamp room":** it is the 4th off half
+  (flips 26.7k-30.3k): 115.7-118.5 fps, GPU 92% busy, the game waiting 1.2 s per 2.5 s.
+  That is test9's cost, in a heavier view.
+  - The chain's end point moved at flips 19006/19007 (e9986d45+88414cd6, then
+    84b3a182+3c2b7974) and back at 23187 (bb92a5b6+483f5dc1). That followed the view: the
+    draws per 2.5 s fell 161k -> 91k, a lighter area whose next program differs.
+  - No stand-in was made then (only three, at flip 2058). Those halves' max was 12.9 and
+    13.7 ms, with 1-2 frames over 12 ms. No stall from the chain change.
+- **Motion blur skip:** "not eligible" in every on half. Its inputs were compared with the
+  stand-in's 1080p size, which the 1080p velocity buffer also has, so it found two inputs.
+  Fixed: inputs are judged against the real targets' size.
+
+**Present pacing (host/temporal/present_pacer.h, tests/present_pacer_test.cpp):**
+- An even grid at the game's pace, on the presenter thread after the blit's submit, with no
+  lock held:
+  - An early frame sleeps, then spins to its slot.
+  - A late one goes at once and restarts the grid (one long interval, no short one after).
+  - The grid creeps earlier, at most 20 µs a frame, until the earliest arrival is ~150 µs
+    ahead.
+- The unit test, with arrivals spread over 0.6 ms: 0 of 2700 intervals more than 25 µs off,
+  301 µs average wait.
+- GPU-bound frames all arrive late and pass straight through, so it can't make a frame
+  later than the last present plus a period.
+
+**Not done (c):**
+- **Tonemap #42 and the 0b0acf50 chain at render size:**
+  - FSR would have to take the tonemapped LDR picture, with a context made for HDR.
+  - The grain/dither (16x16 noise) would be upscaled and temporally smeared.
+  - The 0b0acf50 chain is also the HUD and menu blur.
+- **The bloom pyramid's input from the 1080p stand-in:** it is pre-FSR and jittered. The
+  bloom would shimmer with the jitter, which is the flicker this work is trying to remove.
+
+**Expected (test11 vs test10, post at render on):**
+- fps stays at 120. The GPU gets ~0.15 ms more headroom from the skip.
+- Frames over 8.5 ms: about 20-30% -> under 2%, if the spread is the present timing as read.
+- **1% low:** ~102 -> 112-118 in the paced halves. The rest are the game's own hitches
+  (loads, streaming) and GPU spikes past 8.33 ms in heavy views (~84-93% busy).

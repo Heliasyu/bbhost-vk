@@ -93,6 +93,23 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test11 checks (one run, ~5 min)
+
+Keep test10's `bbhost.bin` as `bbhost.bin.test10`. Use the same settings as test10: FSR
+4.1.1 Performance, 4K, 120, chromatic aberration as you have it, motion blur off.
+
+1. At the Cathedral lamp: `BBHOST_AB_SECONDS=30 ./bbtest start --capture t13-pace-ab`.
+2. Stay 3 minutes. Camera still for the first 2, then walk out of the lamp room and back.
+3. Watch the lights and fog in the on and off halves. Run `./bbtest mark "flicker"` if they
+   flicker. The log's `ab: present pace on/off` lines say which half a mark fell in.
+4. `./bbtest stop`. Send session.txt and bbhost.log. The things to read:
+   - the `a/b` line: the 1% low and the frames over 8.5 and 9 ms per side;
+   - the `motion blur skip on` line, and `pairs skipped` rising;
+   - `present: pacing on`.
+
+Fallbacks: `BBHOST_PRESENT_PACE=0` turns the pacing off. `BBHOST_POST_AT_RENDER=0` brings
+back test9.
+
 ## test10 checks (one run, ~6 min)
 
 Keep test9's `bbhost.bin` as `bbhost.bin.test9`. Use FSR 4.1.1 Performance, 4K, 120,

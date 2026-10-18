@@ -1,6 +1,24 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test11 (even present pacing; the motion blur skip with post at render):**
+  - **Present pacing (`BBHOST_PRESENT_PACE`, on; `=0` off).** At the game's fixed pace
+    (30/60/90/120), every present goes out on an even grid of that period.
+    - A frame that is ready early waits for its slot. This is a sleep then a spin on the
+      presenter thread, with no lock held.
+    - A late frame goes out at once and the grid restarts from it.
+    - When the GPU can't keep the pace, nothing waits.
+    - The grid moves earlier on its own until the earliest frames are ~0.15 ms ahead. The
+      added latency is a few hundred µs.
+  - **Motion blur skip:** now also fires with post at render on. Its inputs are judged
+    against the real targets' size. Before, the 1080p velocity buffer matched the
+    stand-in's size, so t12 skipped 0 pairs in the on halves.
+  - **A/B:** `BBHOST_AB_SECONDS` now flips the present pacing. `BBHOST_AB_TOGGLE=post` flips
+    post at render, as test10 did. Each `ab: present pace` half logs:
+    - its 1% and 0.1% lows;
+    - the frames over 8.33, 8.42, 8.5, 9 and 12 ms;
+    - how many presents waited, were late or restarted the grid.
+  - bbtest counts frames over 8.5 and 9 ms and reads the new A/B lines.
 - **test10 (post-processing before the tonemap at render size; FSR moved to the chain's end):**
   - With FSR 4.1.1 or 3.1 upscaling, the game's passes between the scale pass and its bloom
     and tonemap now run at the render size. These are:
