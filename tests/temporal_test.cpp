@@ -3,6 +3,7 @@
 // history and cuts, and the camera motion vectors (host/temporal/camera.h),
 // and the draw classification (host/temporal/motion_classify.h).
 #include "host/temporal/camera.h"
+#include "host/temporal/fsr3_policy.h"
 #include "host/temporal/halton.h"
 #include "host/temporal/motion_classify.h"
 
@@ -275,6 +276,47 @@ void test_classify() {
     CHECK(g.size() == 0);
 }
 
+// bbhost-vk Phase 3: FSR 3.1's policy (host/temporal/fsr3_policy.h).
+void test_fsr3_policy() {
+    // Sizes: render <= output <= 3x render (+8 for rounding).
+    CHECK(fsr3_sizes_ok({2560, 1440, 3840, 2160}));   // Quality at 4K
+    CHECK(fsr3_sizes_ok({1920, 1080, 3840, 2160}));   // Performance
+    CHECK(fsr3_sizes_ok({1280, 720, 3840, 2160}));    // Ultra Performance, 3x
+    CHECK(fsr3_sizes_ok({3840, 2160, 3840, 2160}));   // Native AA
+    CHECK(!fsr3_sizes_ok({1000, 720, 3840, 2160}));   // past 3x
+    CHECK(!fsr3_sizes_ok({3840, 2160, 2560, 1440}));  // down-scaling
+    CHECK(!fsr3_sizes_ok({0, 1440, 3840, 2160}));
+    CHECK(fsr3_context_fits({2560, 1440, 3840, 2160}, {2560, 1440, 3840, 2160}));
+    CHECK(!fsr3_context_fits({2560, 1440, 3840, 2160}, {1920, 1080, 3840, 2160}));  // a preset change: a new context
+    // Resets: a new context, then cuts, gaps and requests; a plain next frame keeps the history.
+    Fsr3History h;
+    CHECK(fsr3_reset(h, 10, false, false) == Fsr3Reset::NewContext);
+    CHECK(fsr3_reset(h, 11, false, false) == Fsr3Reset::None);
+    CHECK(fsr3_reset(h, 12, true, false) == Fsr3Reset::Cut);
+    CHECK(fsr3_reset(h, 13, false, false) == Fsr3Reset::None);
+    CHECK(fsr3_reset(h, 15, false, false) == Fsr3Reset::None);  // a dropped flip or two
+    CHECK(fsr3_reset(h, 30, false, false) == Fsr3Reset::Gap);   // frames without the upscaler
+    CHECK(fsr3_reset(h, 31, false, true) == Fsr3Reset::Requested);
+    CHECK(fsr3_reset(h, 5, false, false) == Fsr3Reset::Gap);    // the counter went back
+    CHECK(fsr3_reset(h, 6, true, true) == Fsr3Reset::Cut);      // a cut names itself first
+    h = Fsr3History{};
+    CHECK(fsr3_reset(h, 7, true, false) == Fsr3Reset::NewContext);
+    // Sharpening: the setting, clamped; 0 is off.
+    CHECK(!fsr3_sharpen(0.0f).enable);
+    CHECK(fsr3_sharpen(0.8f).enable && near(fsr3_sharpen(0.8f).sharpness, 0.8, 1e-6));
+    CHECK(fsr3_sharpen(3.0f).sharpness == 1.0f && !fsr3_sharpen(-1.0f).enable);
+    // Conventions: bbhost's jitter is FSR's jitterOffset; pixel motion vectors at scale 1.
+    const Fsr3Conventions c = fsr3_conventions(0.25f, -0.125f);
+    CHECK(c.jitter_x == 0.25f && c.jitter_y == -0.125f && c.mv_scale_x == 1.0f && c.mv_scale_y == 1.0f);
+    const Fsr3Conventions f = fsr3_conventions(0.25f, -0.125f, -1, 1);
+    CHECK(f.jitter_x == -0.25f && f.jitter_y == -0.125f);
+    // The camera: the game's values, defaults for nonsense.
+    const Fsr3Camera cam = fsr3_camera(0.05f, 3000.0f, 0.8f);
+    CHECK(cam.near_plane == 0.05f && cam.far_plane == 3000.0f && cam.fov_y == 0.8f);
+    const Fsr3Camera bad = fsr3_camera(0.0f, NAN, 0.0f);
+    CHECK(bad.near_plane > 0.0f && bad.far_plane > bad.near_plane && bad.fov_y > 0.0f);
+}
+
 }  // namespace
 
 int main() {
@@ -283,10 +325,11 @@ int main() {
     test_history();
     test_motion();
     test_classify();
+    test_fsr3_policy();
     if (g_fail) {
         std::fprintf(stderr, "temporal_test: %d failures\n", g_fail);
         return 1;
     }
-    std::printf("temporal_test: Halton jitter, scene constants, camera cuts, camera motion and draw classes ok\n");
+    std::printf("temporal_test: Halton jitter, scene constants, camera cuts, camera motion, draw classes and FSR 3.1 policy ok\n");
     return 0;
 }
