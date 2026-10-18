@@ -810,3 +810,9 @@ errors + warnings + perf) was run over everything that runs without the game, on
   views run only inside the game's frame (smoke.sh needs the eboot). On the user's hardware
   the same layer can be turned on with `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`
   (or bbhost's own validation option) for one session.
+
+**Rebuilt test tarball** (the selftest is in the binary). The first one, -56-ge8a71d4, is kept beside it:
+`/workspace/bbhost-vk-builds/test1/bbhost-vk-linux-v0.2.18-vk.0-60-g3f98fb0.tar.gz`, sha256
+`8b523a95a41ade1b9e868bba77c78e39ea491e79e1470d556d47569274fd0b0d`. It has no proprietary files and
+no missing libraries, and it reports `bbhost v0.2.18-vk.0-60-g3f98fb0`. Only this DEVLOG note
+comes after it.
