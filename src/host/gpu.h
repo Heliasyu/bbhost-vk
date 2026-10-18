@@ -469,6 +469,8 @@ void host_gpu_busy_present_end(void* cmd);
 void host_gpu_busy_present_done();
 // The 300-flip report's line: busy over the window since the last call.
 std::string host_gpu_busy_report();
+// test7: "gpu idle: ..." - the idle time between command buffers by cause, after the busy line.
+std::string host_gpu_idle_report();
 // The presenter's, before its blit: submits the renderer's recording only when
 // the flip's own work is still in it - `need` is host_gpu_work_needs() taken
 // when the flip arrived; ~0ull (not known) always submits. True when it did.

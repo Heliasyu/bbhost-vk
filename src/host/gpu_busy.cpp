@@ -56,6 +56,7 @@
 // line in the 300-flip report. BBHOST_GPU_BUSY=0 turns all of it off.
 #include "host/gpu.h"
 #include "host/gpu_internal.h"
+#include "core/portable.h"
 #include "log.h"
 
 #include <algorithm>
@@ -64,6 +65,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -80,7 +83,19 @@ constexpr std::size_t kMaxPending = 1024;
 struct Span {
     std::uint64_t t0 = 0, t1 = 0;  // unwrapped ticks
     int source = kGame;
+    bool starved = false;   // test7: the GPU had run dry when it was submitted (game)
+    void* site = nullptr;   // what ended its recording (game; submit_record)
 };
+
+// test7: the gaps between spans (the GPU idle with nothing of ours on it), by
+// what came after them - a game command buffer submitted once the GPU had run
+// dry ("late"), one that was already queued ("queued": the driver's and the
+// kernel's time between two command buffers, or a semaphore), the presenter's
+// blit - and by size; the late ones also by what ended the command buffer
+// before (submit_locked's caller, or flush_locked's: the CPU waited for the
+// GPU, which then had nothing until the command processor caught up).
+constexpr int kGapKinds = 3, kGapLate = 0, kGapQueued = 1, kGapPresent = 2, kGapSizes = 3;
+const char* const kGapKindName[kGapKinds] = {"late", "queued", "before present"};
 
 struct Meter {
     std::mutex mu;
@@ -101,6 +116,10 @@ struct Meter {
     std::uint64_t src_end[kSources] = {}, src_busy[kSources] = {}, spans[kSources] = {};
     std::uint64_t unreadable = 0, early = 0;
     std::chrono::steady_clock::time_point started{};  // when it was turned on
+    // test7: the gaps (ticks, count) by kind and size (<25 us, 25-250 us, more).
+    std::uint64_t gap_ticks[kGapKinds][kGapSizes] = {}, gap_n[kGapKinds][kGapSizes] = {};
+    void* end_site = nullptr;                                           // the site of the span that reached union_end
+    std::map<void*, std::pair<std::uint64_t, std::uint64_t>> late_by_site;  // ticks, count
 };
 Meter g_meter;
 
@@ -130,7 +149,21 @@ std::uint64_t unwrap_locked(Meter& m, std::uint64_t raw) {
 }
 
 void count_locked(Meter& m, const Span& s) {
+    if (m.union_end && s.t0 > m.union_end) {
+        const std::uint64_t gap = s.t0 - m.union_end;
+        const int kind = s.source == kPresenter ? kGapPresent : s.starved ? kGapLate : kGapQueued;
+        const double us = static_cast<double>(gap) * m.tick_ns / 1000.0;
+        const int size = us < 25.0 ? 0 : us < 250.0 ? 1 : 2;
+        m.gap_ticks[kind][size] += gap;
+        ++m.gap_n[kind][size];
+        if (kind == kGapLate) {
+            auto& e = m.late_by_site[m.end_site];
+            e.first += gap;
+            ++e.second;
+        }
+    }
     if (s.t1 > m.union_end) {
+        m.end_site = s.source == kGame ? s.site : nullptr;
         m.busy += s.t1 - std::max(s.t0, m.union_end);
         m.union_end = s.t1;
     }
@@ -158,13 +191,15 @@ void drain_locked(Meter& m) {
 
 // A command buffer of `source` is done: its two raw timestamps, or `ok`
 // false when they could not be read (a lost device).
-void deliver(int source, std::uint64_t raw0, std::uint64_t raw1, bool ok) {
+void deliver(int source, std::uint64_t raw0, std::uint64_t raw1, bool ok, bool starved = false, void* site = nullptr) {
     Meter& m = g_meter;
     std::lock_guard<std::mutex> lk(m.mu);
     if (m.out[source] > 0) --m.out[source];
     if (ok) {
         Span s;
         s.source = source;
+        s.starved = starved;
+        s.site = site;
         s.t0 = unwrap_locked(m, raw0);
         s.t1 = s.t0 + ((raw1 - raw0) & m.mask);
         // Ten seconds in one command buffer would have been a device loss:
@@ -305,7 +340,9 @@ void busy_retired_locked(Gpu::Slot& sl, bool ok) {
     sl.busy_written = false;
     std::uint64_t ts[2] = {0, 0};
     const bool have = ok && read_pair(sl.busy_pool, ts);
-    deliver(kGame, ts[0], ts[1], have);
+    void* site = nullptr;
+    const bool starved = submit_record(sl.serial, &site);
+    deliver(kGame, ts[0], ts[1], have, starved, site);
 }
 
 }  // namespace gpu
@@ -379,5 +416,87 @@ std::string host_gpu_busy_report() {
     }
     last = now;
     last_t = t;
+    return r;
+}
+
+// test7: the second line under `gpu busy:` - where the idle time went since
+// the last report (see Meter's gaps), the submissions' hand-over latency, the
+// command processor's waits for the GPU, and BBHOST_SUBMIT_SPLIT's splits.
+std::string host_gpu_idle_report() {
+    static bool started = false;
+    static std::chrono::steady_clock::time_point last_t;
+    static SubmitLatencyTotals last;
+    const auto t = std::chrono::steady_clock::now();
+    const double secs = started ? std::chrono::duration<double>(t - last_t).count() : 0.0;
+    started = true;
+    last_t = t;
+    const SubmitLatencyTotals lat = submit_latency_totals();
+    std::uint64_t ticks[kGapKinds][kGapSizes], n[kGapKinds][kGapSizes];
+    std::vector<std::pair<void*, std::pair<std::uint64_t, std::uint64_t>>> sites;
+    double tick_ns = 1.0;
+    {
+        std::lock_guard<std::mutex> lk(g_meter.mu);
+        if (!g_meter.on) return {};
+        tick_ns = g_meter.tick_ns;
+        std::memcpy(ticks, g_meter.gap_ticks, sizeof(ticks));
+        std::memcpy(n, g_meter.gap_n, sizeof(n));
+        std::memset(g_meter.gap_ticks, 0, sizeof(g_meter.gap_ticks));
+        std::memset(g_meter.gap_n, 0, sizeof(g_meter.gap_n));
+        sites.assign(g_meter.late_by_site.begin(), g_meter.late_by_site.end());
+        g_meter.late_by_site.clear();
+    }
+    const SubmitLatencyTotals prev = last;
+    last = lat;
+    if (secs < 0.5) return {};
+    const double per_s = 1.0 / secs;
+    auto ms_s = [&](std::uint64_t tk) { return static_cast<double>(tk) * tick_ns / 1e6 * per_s; };
+    std::uint64_t all = 0, all_n = 0;
+    for (int k = 0; k < kGapKinds; ++k)
+        for (int z = 0; z < kGapSizes; ++z) {
+            all += ticks[k][z];
+            all_n += n[k][z];
+        }
+    std::string r;
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "gpu idle: %.1f ms/s in %.0f gaps/s;", ms_s(all), static_cast<double>(all_n) * per_s);
+    r += buf;
+    for (int k = 0; k < kGapKinds; ++k) {
+        std::uint64_t kt = 0, kn = 0;
+        for (int z = 0; z < kGapSizes; ++z) {
+            kt += ticks[k][z];
+            kn += n[k][z];
+        }
+        std::snprintf(buf, sizeof(buf), " %s %.2f ms/s (%.0f/s: <25us %.2f, 25-250us %.2f, >250us %.2f ms/s);", kGapKindName[k], ms_s(kt),
+                      static_cast<double>(kn) * per_s, ms_s(ticks[k][0]), ms_s(ticks[k][1]), ms_s(ticks[k][2]));
+        r += buf;
+    }
+    const std::uint64_t subs = lat.n - prev.n;
+    const double sn = subs ? static_cast<double>(subs) : 1.0;
+    std::snprintf(buf, sizeof(buf),
+                  " submits %.0f/s, %.0f%% found the GPU idle; hand-over to recorded %.0f us (max %.0f), to vkQueueSubmit %.0f us (max %.0f), "
+                  "vkQueueSubmit %.0f us (max %.0f);",
+                  static_cast<double>(subs) * per_s, 100.0 * static_cast<double>(lat.starved - prev.starved) / sn,
+                  static_cast<double>(lat.record_ns - prev.record_ns) / 1e3 / sn, static_cast<double>(lat.record_max) / 1e3,
+                  static_cast<double>(lat.queue_ns - prev.queue_ns) / 1e3 / sn, static_cast<double>(lat.queue_max) / 1e3,
+                  static_cast<double>(lat.submit_ns - prev.submit_ns) / 1e3 / sn, static_cast<double>(lat.submit_max) / 1e3);
+    r += buf;
+    std::snprintf(buf, sizeof(buf), " cpu waits for the GPU (flush_locked) %.0f/s, %.2f ms/s; splits %.0f/s",
+                  static_cast<double>(lat.flushes - prev.flushes) * per_s, static_cast<double>(lat.flush_ns - prev.flush_ns) / 1e6 * per_s,
+                  static_cast<double>(lat.splits - prev.splits) * per_s);
+    r += buf;
+    // The late gaps by what ended the command buffer before them, the top
+    // eight, as offsets in bbhost's image (tools/gpu_gaps.py --idle names them).
+    std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+    if (!sites.empty()) r += "\n[bbhost]   gpu idle late after:";
+    for (std::size_t i = 0; i < sites.size() && i < 8; ++i) {
+        if (sites[i].first)
+            std::snprintf(buf, sizeof(buf), " %llx=%.2fms/s(%.0f/s)",
+                          static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sites[i].first) - host_image_base()),
+                          ms_s(sites[i].second.first), static_cast<double>(sites[i].second.second) * per_s);
+        else
+            std::snprintf(buf, sizeof(buf), " present=%.2fms/s(%.0f/s)", ms_s(sites[i].second.first),
+                          static_cast<double>(sites[i].second.second) * per_s);
+        r += buf;
+    }
     return r;
 }

@@ -901,6 +901,18 @@ void busy_end_locked(Gpu::Slot& sl);               // its last, before vkEndComm
 void busy_submitted_locked(Gpu::Slot& sl);         // it is on its way to the queue
 void busy_retired_locked(Gpu::Slot& sl, bool ok);  // its fence signalled (ok), or it never will
 std::string busy_exit_report();                    // the whole run's line, for host_gpu_report
+// test7: the idle-gap instrumentation (gpu.cpp): whether game submission
+// `serial` found the GPU idle at vkQueueSubmit, and what ended its recording.
+bool submit_record(std::uint64_t serial, void** site);
+struct SubmitLatencyTotals {
+    std::uint64_t n = 0, starved = 0;
+    std::uint64_t record_ns = 0, queue_ns = 0, submit_ns = 0;  // hand-over -> recorded -> vkQueueSubmit -> returned
+    std::uint64_t record_max = 0, queue_max = 0, submit_max = 0;  // since the last call
+    std::uint64_t flushes = 0, flush_ns = 0;  // flush_locked: the command processor waiting for the GPU
+    std::uint64_t splits = 0;                 // BBHOST_SUBMIT_SPLIT submissions
+};
+SubmitLatencyTotals submit_latency_totals();
+void submit_split_point();  // a draw's start, outside g.mu (BBHOST_SUBMIT_SPLIT)
 struct DrawCall;
 bool glitch_on();
 VkQueryControlFlags glitch_query_flags();                     // precise when the device has it

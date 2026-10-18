@@ -11085,6 +11085,9 @@ static bool draw_impl(const GpuDraw& d) {
             }
         }
     }
+    // test7, BBHOST_SUBMIT_SPLIT=<n> (off by default): hand the GPU what is
+    // recorded so far when it has run dry (gpu.cpp).
+    submit_split_point();
     // Everything below runs under the one GPU mutex, so book the time spent
     // waiting for it separately: it is the other command-processor threads
     // and the fence waits, not this draw.

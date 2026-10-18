@@ -137,6 +137,31 @@ std::atomic<std::uint64_t> g_stream_submitted{0};
 std::atomic<std::uint64_t> g_foreign_submitted{0};
 constexpr std::uint64_t kForeignTicket = 1ull << 63;  // host_gpu_submit_presenter's tickets for a kForeignSubmit
 
+std::atomic<std::uint64_t> g_cp_flushes{0}, g_cp_flush_ns{0}, g_submit_splits{0};
+// ---- test7: where the GPU's idle time between command buffers comes from ----
+// Per game submission (by serial, kSubRing deep - slots are reused after 16):
+// when the command processor handed it over (submit_locked), when the
+// recorder had replayed it (stream_submit_job), whether the previous game
+// submission had already finished when this one reached vkQueueSubmit (the
+// GPU ran dry: the gap before it was ours to fill - "CPU late"), and what
+// ended its recording (submit_locked's caller, or flush_locked's: a CPU wait
+// for the GPU). gpu_busy.cpp's "gpu idle:" line sorts the gaps by these.
+constexpr std::uint64_t kSubRing = 64;
+std::atomic<std::uint64_t> g_sub_handover_ns[kSubRing];
+std::atomic<std::uint64_t> g_sub_recorded_ns[kSubRing];
+std::atomic<std::uint8_t> g_sub_starved[kSubRing];
+std::atomic<void*> g_sub_site[kSubRing];
+VkFence g_last_game_fence = VK_NULL_HANDLE;  // the previous game submission's (submit_job_now's callers run one at a time)
+struct SubLatency {
+    std::atomic<std::uint64_t> n{0}, starved{0}, record_ns{0}, record_max{0}, queue_ns{0}, queue_max{0}, submit_ns{0}, submit_max{0};
+} g_sub_lat;
+void bump_max(std::atomic<std::uint64_t>& m, std::uint64_t v) {
+    std::uint64_t cur = m.load(std::memory_order_relaxed);
+    while (v > cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+    }
+}
+thread_local void* t_flush_site = nullptr;  // flush_locked's caller, for submit_locked to record
+
 // One job to the queue, under its lock; a failure is kept for the command
 // processor (take_submit_failure_locked).
 void submit_job_now(const SubmitJob& job) {
@@ -153,9 +178,33 @@ void submit_job_now(const SubmitJob& job) {
         si.pSignalSemaphores = &job.signal;
     }
     VkResult r;
+    const bool game = job.serial != ~0ull && g.busy;
+    std::uint64_t t_queue = 0;
+    if (game) {
+        t_queue = host_clock_monotonic_ns();
+        const std::uint64_t k = job.serial % kSubRing;
+        const bool starved = g_last_game_fence && vkGetFenceStatus(g.device, g_last_game_fence) == VK_SUCCESS;
+        g_sub_starved[k].store(starved ? 1 : 0, std::memory_order_relaxed);
+        const std::uint64_t h = g_sub_handover_ns[k].load(std::memory_order_relaxed);
+        const std::uint64_t rec_t = g_sub_recorded_ns[k].load(std::memory_order_relaxed);
+        if (h && rec_t >= h && t_queue >= rec_t) {
+            g_sub_lat.record_ns.fetch_add(rec_t - h, std::memory_order_relaxed);
+            bump_max(g_sub_lat.record_max, rec_t - h);
+            g_sub_lat.queue_ns.fetch_add(t_queue - rec_t, std::memory_order_relaxed);
+            bump_max(g_sub_lat.queue_max, t_queue - rec_t);
+        }
+        g_sub_lat.n.fetch_add(1, std::memory_order_relaxed);
+        if (starved) g_sub_lat.starved.fetch_add(1, std::memory_order_relaxed);
+    }
     {
         std::lock_guard<std::mutex> q(g.queue_mu);
         r = vkQueueSubmit(g.queue, 1, &si, job.fence);
+    }
+    if (game) {
+        const std::uint64_t d = host_clock_monotonic_ns() - t_queue;
+        g_sub_lat.submit_ns.fetch_add(d, std::memory_order_relaxed);
+        bump_max(g_sub_lat.submit_max, d);
+        g_last_game_fence = job.fence;
     }
     if (r != VK_SUCCESS) {
         int none = 0;
@@ -528,6 +577,7 @@ void queue_drain() {
 
 void stream_submit_job(const VkCommandBuffer* cmds, std::uint32_t ncmds, VkSemaphore wait, VkPipelineStageFlags wait_stage, VkSemaphore signal,
                        VkFence fence, std::uint32_t items, std::uint64_t serial, std::uint64_t foreign_id) {
+    if (serial != ~0ull) g_sub_recorded_ns[serial % kSubRing].store(host_clock_monotonic_ns(), std::memory_order_relaxed);
     SubmitJob job;
     job.ncmds = ncmds;
     for (std::uint32_t k = 0; k < ncmds && k < 2; ++k) job.cmds[k] = cmds[k];
@@ -4653,7 +4703,7 @@ void collect_profile_locked(Gpu::Slot& sl) {
 
 // Submits the recorded work and moves on to the next command buffer,
 // waiting only if that one is still executing.
-void submit_locked() {
+__attribute__((noinline)) void submit_locked() {
     if (!g.recording) {
         return;
     }
@@ -4702,6 +4752,14 @@ void submit_locked() {
     }
     Gpu::Slot& cur = g.slots[g.slot];
     cur.serial = g.flushes;
+    {
+        const std::uint64_t k = cur.serial % kSubRing;
+        g_sub_site[k].store(t_flush_site ? t_flush_site : __builtin_return_address(0), std::memory_order_relaxed);
+        g_sub_handover_ns[k].store(host_clock_monotonic_ns(), std::memory_order_relaxed);
+        g_sub_recorded_ns[k].store(0, std::memory_order_relaxed);
+        g_sub_starved[k].store(0, std::memory_order_relaxed);  // submit_job_now sets it
+        t_flush_site = nullptr;
+    }
     textures_before_submit();  // the staging spans its copies read are filled
     // BBHOST_TEST_DEVICE_LOST=<flip>: from that flip on, act as if the device
     // were lost (it is not; the GPU only gets no more work) - the reports, the
@@ -4767,9 +4825,67 @@ void submit_locked() {
 
 // Submits and waits for everything in flight (frame dumps, resource
 // re-purposing, BBHOST_SYNC_GNM).
-void flush_locked() {
+__attribute__((noinline)) void flush_locked() {
+    t_flush_site = __builtin_return_address(0);  // test7: the gap after it is this wait's (gpu idle:)
     submit_locked();
+    const std::uint64_t t0 = host_clock_monotonic_ns();
     retire_through_locked(g.flushes - 1);
+    g_cp_flush_ns.fetch_add(host_clock_monotonic_ns() - t0, std::memory_order_relaxed);
+    g_cp_flushes.fetch_add(1, std::memory_order_relaxed);
+}
+
+// test7: a game submission's record for the idle report (gpu_busy.cpp).
+bool submit_record(std::uint64_t serial, void** site) {
+    const std::uint64_t k = serial % kSubRing;
+    *site = g_sub_site[k].load(std::memory_order_relaxed);
+    return g_sub_starved[k].load(std::memory_order_relaxed) != 0;
+}
+
+SubmitLatencyTotals submit_latency_totals() {
+    SubmitLatencyTotals t;
+    t.n = g_sub_lat.n.load(std::memory_order_relaxed);
+    t.starved = g_sub_lat.starved.load(std::memory_order_relaxed);
+    t.record_ns = g_sub_lat.record_ns.load(std::memory_order_relaxed);
+    t.queue_ns = g_sub_lat.queue_ns.load(std::memory_order_relaxed);
+    t.submit_ns = g_sub_lat.submit_ns.load(std::memory_order_relaxed);
+    // The maxima are per report: taken and cleared.
+    t.record_max = g_sub_lat.record_max.exchange(0, std::memory_order_relaxed);
+    t.queue_max = g_sub_lat.queue_max.exchange(0, std::memory_order_relaxed);
+    t.submit_max = g_sub_lat.submit_max.exchange(0, std::memory_order_relaxed);
+    t.flushes = g_cp_flushes.load(std::memory_order_relaxed);
+    t.flush_ns = g_cp_flush_ns.load(std::memory_order_relaxed);
+    t.splits = g_submit_splits.load(std::memory_order_relaxed);
+    return t;
+}
+
+// test7, BBHOST_SUBMIT_SPLIT=<n> (off by default): every n-th draw, when the
+// GPU has run out of work (the last game submission's fence has signalled)
+// and the recording holds at least 16 items, submit what is recorded so far
+// instead of keeping the GPU idle until the job ends. A submission at a draw
+// boundary mid-job is what BBHOST_PASS_BREAK_SUBMIT and the renderer's own
+// flush_locked callers already do; the labels recorded so far land at its
+// end, after their work, as they would at the job's end.
+void submit_split_point() {
+    static const std::uint64_t every = [] {
+        const char* e = std::getenv("BBHOST_SUBMIT_SPLIT");
+        const std::uint64_t n = e ? std::strtoull(e, nullptr, 10) : 0ull;
+        if (n) host_log("gpu: BBHOST_SUBMIT_SPLIT=%llu: a recording is submitted mid-job when the GPU has run dry (checked every %llu draws)",
+                        static_cast<unsigned long long>(n), static_cast<unsigned long long>(n));
+        return n;
+    }();
+    if (!every) return;
+    static thread_local std::uint64_t seen = 0;
+    if (++seen % every != 0) return;
+    std::lock_guard<GpuMutex> lock(g.mu);
+    if (!g.ok || !g.recording || g.queued < 16 || g.flushes == 0) return;
+    const std::uint64_t prev = g.flushes - 1;
+    const Gpu::Slot& sl = g.slots[prev % static_cast<std::uint64_t>(g.slot_count)];
+    if (sl.in_flight && sl.serial == prev) {
+        if (stream_submitted_serial() <= prev) return;  // not even on the queue yet: the recorder is behind, not the GPU
+        if (vkGetFenceStatus(g.device, sl.fence) != VK_SUCCESS) return;  // the GPU still has work
+    }
+    submit_locked();
+    g_submit_splits.fetch_add(1, std::memory_order_relaxed);
 }
 
 void wait_submission_locked(std::uint64_t serial) {
