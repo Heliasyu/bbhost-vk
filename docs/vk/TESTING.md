@@ -93,6 +93,31 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test6 checks (~20 min)
+
+From the test6 folder (`cd` into it); FSR 4.1.1 Performance, Resolution 3840x2160, the
+same spot as t6 (spawn), the camera untouched looking forward for 30 s, then at the ground
+for 30 s. Mark each (`./bbtest mark "forward"`, `./bbtest mark "ground"`). No `--record`
+(the recorder takes GPU time).
+
+A. **The FPS lines:** `./bbtest start t7-fsr4p`.
+   - `present: 300 frames in N ms (X fps shown; ...)` agrees with MangoHud's on-screen FPS.
+   - `pass-timer: GPU per pass over the last 10.0 s (N upscaled frames, X a second - not
+     the FPS shown)`.
+   - The line has no `reactive` or `opaque`: FSR 4.1.1 no longer gets them (expected:
+     about 0.1 ms less than test5's).
+   - An `fsr3: 3000 dispatches (3000 FSR 4.1.1, 3000 written directly, ...)` line every
+     3000 frames.
+   - After `./bbtest stop`: session.txt `in-game fps shown:` and the MangoHud CSV covering
+     the whole session.
+B. **Sharpening's cost (0.315 ms in t6):** the same with sharpness 0:
+   `./bbtest start t7-fsr4p-sharp0`. Note the FPS looking forward.
+C. **Game anti-aliasing (t6's "noaa" run still had it on: options-before and -after say
+   `anti_alias = "On"`):** in the game's settings set Anti-aliasing Off, check
+   `~/.config/bbhost/bbhost-options.toml` says `anti_alias = "Off"`, then
+   `BBHOST_GPU_PROFILE=3 ./bbtest start t7-fsr4p-noaa-p3`. The profile shows which 4K
+   pass goes (dc609f83+da1faca9 is the candidate) and what it cost. Set it back On after.
+
 ## test5 checks (~40 min)
 
 As before: set the upscaler, quality and Resolution (3840x2160) **before** launching. Use

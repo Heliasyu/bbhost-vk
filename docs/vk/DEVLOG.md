@@ -1072,3 +1072,69 @@ itself alone, so no view in another format gets STORAGE. FSR 4.1.1 and FSR 1 sti
   uses t2160_m0 with a 1920x1080 scene (m1 only for Ultra Performance).
 - With sharpening on, RCAS adds a pass and a 3840x2160 intermediate. At sharpness 0 it is
   skipped.
+
+## test5 and t6 hardware results: where FSR 4.1.1 Performance's frame goes (2026-10-18)
+
+FPS here is frames shown (the presenter's 300-frame lines after the first in-game frame,
+which MangoHud's on-screen counter agrees with), not the pass-timer's count of upscaled
+frames. test4's "119" was that count: the game made ~119 frames a second and 112 were shown.
+test5's MangoHud CSVs stopped after 30 s (the user's MangoHud.conf `log_duration=30`).
+
+- **test5 FSR 3.1 Quality:** 110.2 fps over 101 s in game, 107-108 settled (the user's
+  mark: 108). gpu busy 91%. The velocity scale is 8.88889 -5 in every window (test4: 1 1
+  in two of three), 2 resets (the context, the first in-game frame), FSR 3.1 1.20-1.25 ms,
+  2999 of 3000 frames written directly.
+- **test5 FSR 4.1.1 Performance:** 115.7 fps over 132 s: 120 (the cap) looking up, 108-111
+  looking down. GPU work 7.33 ms a frame at 460 draws, 8.2 at 766 draws; our passes the same
+  in both (~2.3 ms). Direct write on, FSR 4.1.1 2.05-2.12 ms. No shimmer on clothes.
+- **t6 native 1920x1080 (GPU_PROFILE=3):** 120.0 fps, the frame-rate mode's cap (not more,
+  so "well above 120" is the GPU's headroom: busy 69.4%, 5.8 ms of GPU work a frame with
+  the profiler).
+- **t6 FSR 4.1.1 Performance (GPU_PROFILE=3, FSR4_PROFILE=1):** 111.5 fps looking forward,
+  120 at the ground (the other way round from test5: it is the view, not the direction).
+  Busy 93.4%. Without the profiler (the "noaa" run, which still had anti-aliasing on: its
+  options say `anti_alias = "On"` before and after): 112.7-113.3, busy 93.3%, so 8.85 ms
+  a frame of which 8.26 GPU work and 0.59 idle.
+
+The frame looking forward (ms, GPU_PROFILE=3 passes per frame; native from its run):
+
+| | native 1080p | FSR 4.1.1 Perf 4K |
+|---|---|---|
+| YEBIS DoF composite d3ca03f3+111fce32 | < 0.11 (1080p) | 0.436 (4K, 2 fragments a pixel) |
+| motion-blur pass 7d668276+e0305cef x2 (blur off: patched, still drawn) | < 0.11 | 0.325 |
+| YEBIS 7d668276+fbe7c4b6 | < 0.11 | 0.306 |
+| dc609f83+da1faca9 (one full-screen pass) | 0.151 | 0.341 |
+| 0b0acf50+f7229091 x6 (the chain after it) | 0.160 | 0.240 |
+| post-processing at the output, total | ~0.6 | 1.65 |
+| FSR 4.1.1: prepass / network / postpass / RCAS | - | 0.485 / 0.79 / 0.50 / 0.315 = 2.08 |
+| motion vectors, reactive, opaque | - | 0.03 / 0.07 / 0.02 |
+| present | 0.06 | 0.07 |
+| sum of the profiled game passes | 4.34 | 5.39 |
+| idle between submits | (the cap) | 0.59 |
+
+Scaleform's UI is not in the top passes in either run. The game's own passes cost 1.05 ms
+more at FSR 4.1.1 Performance than at native 1080p, and the 4K post chain accounts for all
+of it (1.65 at 4K against ~0.6 at 1080p). For 120 looking forward 0.52 ms is needed (8.85 to
+8.33).
+
+Ranked by measured ms (looking forward):
+1. **The YEBIS post chain at the render size, FSR after it:** ~1.0 ms (0.7 without the
+   motion-blur pass, which stays as it is). This is not a single commit. Today the scale
+   pass (ccbf44a6) is where the scene meets the output size, and YEBIS's whole chain is
+   built on the output entry's DefRenderTarget (scene_split_sites.h, 0x26c3af3 and the
+   viewport site 0x25d818d). Moving the boundary needs three things. YEBIS's chain at the
+   render size (both sites at the render size). A host upscale at YEBIS's last pass, before
+   Scaleform's first draw (the boundary the presenter's Scaleform work already finds). And
+   FSR 4.1.1 then gets the post-processed, tone-mapped picture: AMD's guidance is to upscale
+   before post, so the DoF and bloom it then sees need a visual check on hardware. Next
+   step: a diagnostic run with the viewport site alone at the render size, to see whether
+   YEBIS's passes follow the viewport or their targets' size.
+2. **Sharpening 0 for FSR 4.1.1:** 0.315 ms (RCAS plus the 4K image it reads). A setting:
+   test6 run B. A cheaper RCAS cannot go much below ~0.2 ms (it reads and writes a 4K
+   RGBA16F image), so this is the setting's cost rather than an inefficiency.
+3. **Idle gaps:** 0.59 ms; needs `BBHOST_GPU_PROFILE=2` for where.
+   `BBHOST_SUBMIT_EVERY_JOB=0` stays rejected.
+4. **No reactive mask or opaque snapshot for FSR 4.1.1:** 0.09-0.11 ms. In test6.
+5. **The game's anti-aliasing:** not measured yet (t6's run had it on); test6 run C.
+
+2 + 4 make 0.42 of the 0.52 ms; 1 alone covers it.

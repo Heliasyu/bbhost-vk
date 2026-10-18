@@ -1,6 +1,20 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test6 (FPS that matches what is shown, FSR 4.1.1 cost):**
+  - `present: 300 frames in N ms` now says `N fps shown`: the frames presented, which is
+    MangoHud's number. The `pass-timer:` line now gives its real window and calls its count
+    "upscaled frames ... not the FPS shown". It includes loading screens and frames the
+    presenter drops for a newer one: test4 counted ~119 a second while 112 were shown.
+  - bbtest: MangoHud logs the whole session (`log_duration=0`; a MangoHud.conf with
+    `log_duration=30` cut test5's CSVs to the first 30 s). session.txt has an
+    `in-game fps shown:` line, from the frames after the first in-game frame. Its error
+    count leaves out the lines that only contain the words (the occlusion report's
+    "0 lost", "keyboard focus lost", the DL_PANIC patch, MangoHud's power and battery notes).
+  - FSR 4.1.1 takes no reactive mask, so neither the mask nor the opaque snapshot it is made
+    from are made for it (test5/test6: 0.09-0.11 ms a frame at 4K). They come back when
+    FSR 3.1 stands in and with `BBHOST_FSR4_REACTIVE=1`.
+  - The 3000-frame `fsr3:` summary is logged for FSR 4.1.1 too (resets, direct writes).
 - **test5 (character shimmer with FSR 3.1, FSR 4.1.1 copy):**
   - The game's object-velocity scale is now checked before use. test4 read (1, 1) for two
     of its three windows. That decodes a still character's velocity texel to a 5-pixel
