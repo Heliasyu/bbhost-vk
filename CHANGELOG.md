@@ -1,5 +1,34 @@
 # Changelog (bbhost-vk)
 
+## Unreleased (Phase 2: inputs for temporal upscaling, branch `phase-2-mv-jitter`)
+With Upscaler Off or FSR 1, or Upscaling quality at Native AA, nothing
+changes: no draw, viewport or pass is touched. Online play, HDR and motion
+blur are untouched.
+- The scene's motion vectors: a compute pass at the scale pass turns the
+  scene depth and this and last frame's camera (from the game's 864-byte
+  scene constants, matrices handled in double) into an RGBA16F motion
+  image; where the game draws its own object velocity, the object's motion
+  is used. Camera cuts (teleport, a fast turn, FOV change, resize, a gap)
+  reset the history and are logged (`camera-cut:`).
+- Halton(2,3) jitter on the main scene's geometry draws, only with the
+  split active and FSR 3.1 or FSR 4.1.1 selected; the phase count follows
+  FidelityFX (18 at Quality). Nothing resolves it until Phase 3, so the 3D
+  scene shimmers slightly in this build with those upscalers
+  (`BBHOST_JITTER=0` turns it off). Logged (`jitter:`).
+- An opaque-colour snapshot before the first transparent draw, for the
+  upscalers' reactive masks; exposure is left to their auto-exposure.
+- A backend-agnostic `UpscalerInputs` (src/host/upscaler_inputs.h) for FSR
+  3.1, FSR 4.1.1 and later backends.
+- **Show Motion Vectors** now draws the motion vectors over the picture
+  (red/green = motion, blue = object motion).
+- Test switches: `BBHOST_JITTER=0`, `BBHOST_MOTION_VECTORS=0`,
+  `BBHOST_OBJECT_MOTION=0`, `BBHOST_OPAQUE_SNAPSHOT=0`.
+- Tests: `temporal_test` (Halton, camera history and cuts, motion math) and
+  `motion_shader_test` (the shader against the CPU math on any Vulkan
+  device).
+- Not yet: object motion from last frame's bone palettes (bbport) is only
+  surveyed and logged.
+
 ## Unreleased (Phase 1: scene/UI resolution split, branch `phase-1-scene-ui-split`)
 With Upscaler Off, or Upscaling quality at Native AA (the default), nothing
 changes: the game's code and draws are stock. Display-only; online play,
