@@ -334,6 +334,12 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
                 host_log("fsr4: FSR 4.1.1 replay, %s (scene %ux%u -> %ux%u)", d.c_str(), in.render_w, in.render_h, out.w, out.h);
             }
             g_last_fallback = Fallback::None;
+            // test6: the 3000-frame summary for FSR 4.1.1 too (test5 had none,
+            // so its resets and direct writes went uncounted in the log).
+            if (g_window.dispatches >= 3000) {
+                host_log("%s", fsr3_report_locked().c_str());
+                g_window = Stats{};
+            }
             return true;
         }
         if (dump4) fsr_dump_finish_locked(in.frame);  // the inputs at least
@@ -510,6 +516,8 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
     return true;
 }
 
+bool fsr4_replay_unavailable() { return g_fsr4_off; }
+
 bool fsr3_target_storage_wanted(int format, std::uint32_t w, std::uint32_t h, std::uint32_t layers) {
     static const bool off = [] {
         const char* e = std::getenv("BBHOST_FSR_DIRECT_TARGET");
@@ -560,6 +568,7 @@ std::string host_gpu_upscale_timing() { return host_gpu_pass_timing(); }
 namespace gpu {
 bool fsr3_scale_pass_locked(RtImage*, const temporal::OutputRect&) { return false; }
 bool fsr3_target_storage_wanted(int, std::uint32_t, std::uint32_t, std::uint32_t) { return false; }
+bool fsr4_replay_unavailable() { return true; }
 temporal::OutputRect fsr3_output_rect_locked(const RtImage*, const float*) { return {}; }
 std::string fsr3_report_locked() { return "fsr3: not built (BBHOST_FSR_VULKAN=OFF)"; }
 }  // namespace gpu

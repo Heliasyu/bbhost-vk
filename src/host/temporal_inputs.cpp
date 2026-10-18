@@ -21,6 +21,7 @@
 //     target), the camera history moves on (cuts logged), the jitter phase
 //     advances.
 #include "host/temporal_inputs.h"
+#include "host/fsr3_pass.h"
 #include "host/pass_timer.h"
 
 #include "engine/scene_split.h"
@@ -341,7 +342,16 @@ void temporal_frame_locked(std::uint64_t flip) {
     g_cfg.watching = g_cfg.split && (g_cfg.temporal || g_cfg.debug_view) && !no_motion;
     g_cfg.jitter = g_cfg.watching && g_cfg.temporal && !no_jitter && hs.upscale_jitter;
     g_cfg.object_motion = !no_objects;
-    g_cfg.opaque = !no_opaque && g_cfg.temporal;
+    // test6: FSR 4.1.1 takes no reactive mask, so neither it nor the opaque
+    // snapshot it is made from are made for it (test5: 0.03-0.09 ms + the
+    // copy, more looking down). They come back when FSR 3.1 stands in for it
+    // and with BBHOST_FSR4_REACTIVE=1.
+    static const bool fsr4_reactive = [] {
+        const char* e = std::getenv("BBHOST_FSR4_REACTIVE");
+        return e && e[0] == '1';
+    }();
+    const bool fsr4_only = hs.upscaler == upscaler::kFsr411 && !fsr4_reactive && !fsr4_replay_unavailable();
+    g_cfg.opaque = !no_opaque && g_cfg.temporal && !fsr4_only;
     g_cfg.reactive = g_cfg.opaque && hs.upscale_reactive && !no_reactive;
     scene_split_render_size(&g_cfg.render_w, &g_cfg.render_h);
     g_cfg.output_w = static_cast<std::uint32_t>(hs.res_width);

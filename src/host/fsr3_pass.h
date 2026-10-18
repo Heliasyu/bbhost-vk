@@ -30,6 +30,8 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out);
 // at 3840x2160 in test3): RGBA16F, one layer, exactly the display buffers'
 // size with the scene split and FSR 3.1 chosen. BBHOST_FSR_DIRECT_TARGET=0: never.
 bool fsr3_target_storage_wanted(int vk_format, std::uint32_t w, std::uint32_t h, std::uint32_t layers);
+// test6: FSR 4.1.1 could not run this session (no assets or device support) and FSR 3.1 stands in.
+bool fsr4_replay_unavailable();
 
 // The scale pass's output rect in its target, from the draw's viewport
 // (`vport`: PA_CL_VPORT_XSCALE, XOFFSET, YSCALE, YOFFSET; null without one),
