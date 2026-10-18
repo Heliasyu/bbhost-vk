@@ -7670,10 +7670,13 @@ void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t
 void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre, const char* pipeline_name,
                        std::vector<VkImageView>& out) {
     out.assign(meta.images.size(), VK_NULL_HANDLE);
-    static std::atomic<int> tlog{0};
-    const bool yebis = pipeline_name && tlog.load(std::memory_order_relaxed) < 24 &&
+    static std::atomic<int> tlog{0}, mblog{0};
+    // test7c: the motion blur's (e0305cef's) own few, which the 24 above never
+    // reached - what its two draws a frame read, for skipping them when off.
+    const bool mblur = pipeline_name && std::strstr(pipeline_name, "+e0305cef") && mblog.fetch_add(1, std::memory_order_relaxed) < 8;
+    const bool yebis = pipeline_name && (mblur || (tlog.load(std::memory_order_relaxed) < 24 &&
                        (std::strncmp(pipeline_name, "7d668276", 8) == 0 || std::strncmp(pipeline_name, "d3ca03f3", 8) == 0 ||
-                        std::strncmp(pipeline_name, "1ea5a07e", 8) == 0);
+                        std::strncmp(pipeline_name, "1ea5a07e", 8) == 0)));
     for (std::size_t k = 0; k < meta.images.size(); ++k) {
         const gcn::ImageBinding& b = meta.images[k];
         const StageImages::Image& im = pre.images[k];
@@ -12036,6 +12039,17 @@ static bool draw_impl(const GpuDraw& d) {
             return at ? std::strtoull(at + 1, nullptr, 0) : 0ull;
         }();
         if (s.color[0] && (!otarget || s.color[0]->base == otarget) && pl.name.find(oname) != 0) return true;
+    }
+    // test7c: where the motion blur's two draws a frame write (see the
+    // texture lines for what they read), to tell whether skipping them while
+    // it is off leaves the same picture.
+    if (s.color[0] && pl.name.find("+e0305cef") != std::string::npos) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+            const RtImage& t = *s.color[0];
+            host_log("render: motion blur %s draws into 0x%llx %ux%u format %d", pl.name.c_str(), static_cast<unsigned long long>(t.base),
+                     t.width, t.height, static_cast<int>(t.format));
+        }
     }
     // BBHOST_SKIP_PASS=<prefix>[,<prefix>...]: drop those draws. Readbacks
     // cost a broken render pass and this driver will not take many of those,
