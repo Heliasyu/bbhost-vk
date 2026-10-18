@@ -12388,7 +12388,11 @@ static bool draw_impl(const GpuDraw& d) {
         static double sum_ms = 0, max_ms = 0;
         static std::uint64_t last_flip = ~0ull;
         const std::uint64_t flip = hle_video_flip_count();
-        if (ab_s > 0 && g_post_mode && flip != last_flip) {
+        static const bool ab_post = [] {  // test11: the A/B flips the present pacing unless BBHOST_AB_TOGGLE=post
+            const char* w = std::getenv("BBHOST_AB_TOGGLE");
+            return w && std::strcmp(w, "post") == 0;
+        }();
+        if (ab_s > 0 && ab_post && g_post_mode && flip != last_flip) {
             last_flip = flip;
             const std::uint64_t now = host_clock_monotonic_ns();
             if (!phase_start_ns) phase_start_ns = now;
@@ -12529,14 +12533,18 @@ static bool draw_impl(const GpuDraw& d) {
         }
         RtImage& t = *s.color[0];
         if (t.base == g_mb_skip.watched()) g_mb_b_bound = false;  // draw 1 bound B: the pattern itself
+        // test11: inputs judged against the real target's size. Under post at
+        // render t is a 1080p stand-in, and the 1080p velocity buffer then
+        // matched it too: two inputs, "not eligible", no pairs skipped (t12).
+        const RtImage* treal = post_resolve_locked(t.base) == &t ? find_render_target(t.base) : &t;
+        if (!treal) treal = &t;
         std::uint64_t src = 0;
         int inputs = 0;
         for (const StageImages::Image& im : stage_images[1].images) {
             if (!im.resolved) continue;
             const std::uint64_t base = tsharp_base(im.w);
             const RtImage* r = base && base != t.base ? find_render_target(base) : nullptr;
-            if (const RtImage* sh = post_resolve_locked(base)) r = sh;  // test10: compared at render size
-            if (r && !r->depth && r->width == t.width && r->height == t.height && r->format == t.format && r->layers == 1 && base != src) {
+            if (r && !r->depth && r->width == treal->width && r->height == treal->height && r->format == treal->format && r->layers == 1 && base != src) {
                 src = base;
                 ++inputs;
             }
