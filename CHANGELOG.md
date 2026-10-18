@@ -1,6 +1,14 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test2 fixes:**
+  - FSR 3.1 and 4.1.1 now upscale to the active output (the Resolution setting) instead of
+    the larger display buffers that live resolution keeps. test1 showed the scene in only
+    about a quarter of a 4K screen.
+  - The scene camera is also found by the contents of its constants, so FSR's history
+    should no longer reset every frame (needs a hardware check).
+  - Clearer reset lines in the log.
+  - The setup window's token row says the token is optional.
 - **Per-pass GPU timing:** **Show Upscaler GPU Time** now breaks the renderer's work down: the
   motion vectors, reactive mask, opaque snapshot, FSR 3.1 or 4.1.1 dispatch, and output copy.
   It is on the overlay and in the log (`pass-timer:` every 10 s).

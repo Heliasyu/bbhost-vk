@@ -834,3 +834,50 @@ An empty match now stops with a message instead of copying to `/`.
 (-60-g3f98fb0): the Deck kit builds, the bare `bbhost` and the plugins extract, and the
 bundle check passes on 2 bundles (live server over https, no playtest kit). The Windows half
 runs in CI only.
+
+## test1 hardware result and the test2 fixes (2026-10-18)
+
+The user's PC: RX 9070 class on RADV, a 4K monitor, `v0.2.18-vk.0-60-g3f98fb0`. Launch, menus,
+online, 120 fps and FSR 1 were fine. FSR 3.1 Quality at 3840x2160 showed the scene only in about
+the right quarter of the screen, with the rest dark. The HUD and menus were right.
+
+**1. FSR output size (fixed).**
+- Live resolution keeps the display buffers at the largest Resolution entry (5120x2160). The
+  FSR pass took its output size from the scale pass target's extent, so the context and
+  dispatch were 2560x1440 -> 5120x2160 (2.00x by 1.50x) instead of -> 3840x2160. The copy back
+  was 5120 wide as well.
+- Now `temporal::fsr3_output_rect` (fsr3_policy.h) decides the output: the Resolution
+  setting's size, placed at the scale pass's viewport when that viewport is the same size.
+  Never the target's extent.
+- FSR 3.1's context, FSR 4.1.1's output and both copies back use that rect, and so does the
+  jitter phase count (it was computed for a 5120 output).
+- `fsr3: output WxH at X,Y in the scale pass's ... target` is logged when the rect changes,
+  with a warning if it isn't the Resolution size or the viewport disagrees. The first frame
+  also logs the input images and the regions read from them.
+- A size change makes a new context, as before.
+- `test_fsr3_output_rect` in temporal_test covers a 5120x2160 buffer with a 3840x2160 output.
+- The scene inputs were already right: colour, depth copy, motion and reactive are read at
+  the render size from (0,0).
+
+**2. History reset every dispatch (fixed in part, needs hardware).**
+- `3000 dispatches, 3000 resets` and `3000 cuts, 0.0 scene blocks a frame`: no 864-byte scene
+  constant buffer was ever seen. So there was no scene camera and every frame was a cut
+  (NoCamera). FSR therefore never accumulated, and the camera motion vectors were zero.
+- The "camera cut" lines every 601 flips were only the log throttle (one line per 600 flips)
+  over a reset every frame. They now say how many resets came in between.
+- The scene constants are now also accepted from any vertex-stage buffer of 768 bytes or more,
+  V# or pointer, that carries their signature: far plane and its reciprocal, plus the scene
+  or output size. The full parse still decides.
+- The log says where they were found. If 600 frames still pass with no camera, it says that
+  FSR then runs without temporal accumulation.
+
+**3. Fence waits.**
+- None of our passes waits on the host. The timers read only retired queries, FSR 3.1
+  retires by serial, and FSR 4.1.1 is the only one with a wait (only with 8 of its frames in
+  flight; not used here).
+- The FSR 1 baseline ran at 2560x1440 while the FSR 3.1 session ran post-processing and UI at
+  3840x2160, so the two aren't comparable. The higher guest GPU waits (about 2.1 s per 300
+  flips) fit a heavier 4K post-processing frame plus the oversized 5120 FSR output and copy.
+- Check again after the size fix, against FSR 1 at 3840x2160.
+
+**Also.** The setup window's token row no longer says "only while the releases are private".
