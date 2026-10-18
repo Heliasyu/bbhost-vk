@@ -34,3 +34,5 @@ void shader_patch_apply(const std::string& name, std::vector<std::uint32_t>& wor
 std::uint32_t shader_patch_mask();
 // Whether a program with this name is one a patch applies to.
 bool shader_patch_touches(const std::string& name);
+// test8: whether the motion blur is patched out now (its setting is off).
+bool shader_patch_motion_blur_off();

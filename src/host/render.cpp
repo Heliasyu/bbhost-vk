@@ -10,12 +10,14 @@
 #include "engine/scene_split_sites.h"
 #include "engine/gx_state.h"
 #include "host/gpu_internal.h"
+#include "core/host_clock.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
 #include "host/upscaler.h"
 #include "host/fsr3_pass.h"
 #include "host/temporal_inputs.h"
+#include "host/temporal/mblur_skip.h"
 #include "host/temporal/motion_classify.h"
 
 #include "host/draw_capture.h"
@@ -1186,8 +1188,35 @@ std::uint64_t steady_ms() {
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+// test8, BBHOST_MOTION_BLUR_SKIP=1 (host/temporal/mblur_skip.h): the policy,
+// whether it is on, and whether the work being recorded is one of the motion
+// blur's own draws (exempt from the "something else used B" watch). Under g.mu.
+// On unless BBHOST_MOTION_BLUR_SKIP=0; BBHOST_AB_SECONDS=<s> turns it off
+// and on every s seconds in one run (ab_frame_locked).
+const bool g_mb_skip_mode = [] {
+    const char* e = std::getenv("BBHOST_MOTION_BLUR_SKIP");
+    return !(e && e[0] == '0');
+}();
+bool g_mb_skip_on = g_mb_skip_mode;
+temporal::MotionBlurSkip g_mb_skip;
+thread_local bool t_mb_exempt = false;
+void mb_skip_touched(std::uint64_t base) {
+    if (!g_mb_skip_mode || t_mb_exempt || !base || base != g_mb_skip.watched()) return;
+    const bool was = g_mb_skip.armed();
+    g_mb_skip.b_touched(base);
+    if (was && !g_mb_skip.armed())
+        host_log("render: motion blur skip off again: something else used its scratch target 0x%llx (flip %llu); learning again",
+                 static_cast<unsigned long long>(base), static_cast<unsigned long long>(hle_video_flip_count()));
+}
+void mb_skip_materialize_locked();  // below copy_layers_locked
+// Other work is about to be recorded: a held-back draw 1 is done first.
+void mb_skip_other_work_locked() {
+    if (g_mb_skip_mode && !t_mb_exempt && g_mb_skip.pending() && g_mb_skip.other_work()) mb_skip_materialize_locked();
+}
+
 // A draw, a fill or a copy wrote the target (the reuse retire's age and order).
 void rt_written(RtImage& r) {
+    mb_skip_touched(r.base);
     r.written_flip = hle_video_flip_count();
     r.written_ms = steady_ms();
 }
@@ -1242,6 +1271,23 @@ std::uint32_t unpadded_width(std::uint64_t base, std::uint32_t padded, std::uint
 }
 
 void copy_layers_locked(const RtImage& from, RtImage& to);
+
+// What the motion blur's draw 1 writes with blur off: its input A, unchanged, into B.
+void mb_skip_materialize_locked() {
+    RtImage* a = find_render_target(g_mb_skip.a());
+    RtImage* b = find_render_target(g_mb_skip.b());
+    static std::atomic<int> logs{0};
+    if (logs.fetch_add(1) < 16)
+        host_log("render: motion blur skip: its first draw done after all (A 0x%llx -> B 0x%llx, flip %llu); learning again",
+                 static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
+                 static_cast<unsigned long long>(hle_video_flip_count()));
+    if (!a || !b || a == b) return;
+    const bool ex = t_mb_exempt;
+    t_mb_exempt = true;  // our own copy into B is not "something else"
+    copy_layers_locked(*a, *b);
+    rt_written(*b);
+    t_mb_exempt = ex;
+}
 
 RtImage* rt_image(std::uint64_t base, VkFormat format, std::uint32_t width, std::uint32_t height, bool depth,
                   std::uint32_t layers = 1, std::uint64_t slice_bytes = 0) {
@@ -6616,6 +6662,7 @@ std::size_t rt_bytes_per_pixel(const RtImage& r) { return format_bytes_per_pixel
 // is the tiled allocation, often a few rows larger (or a 1024² slice) than
 // width*height*bpp of the unpadded image, so there is no size check here.
 void clear_image_locked(RtImage& r, const float rgba[4], std::uint32_t first_layer = 0, std::uint32_t layer_count = ~0u) {
+    mb_skip_other_work_locked();  // test8
     if (r.base == g_order_target && hle_video_flip_count() >= 2000 && g_order_logs.load() < 120) {
         g_order_logs.fetch_add(1);
         host_log("order: CLEAR 0x%llx rgba=%.3f %.3f %.3f %.3f", static_cast<unsigned long long>(r.base), rgba[0], rgba[1], rgba[2],
@@ -7289,6 +7336,9 @@ RtImage* find_render_target(std::uint64_t base) {
 }
 
 bool render_copy_target_locked(std::uint64_t src_base, std::uint64_t dst_base, std::size_t bytes) {
+    mb_skip_other_work_locked();  // test8
+    mb_skip_touched(src_base);
+    mb_skip_touched(dst_base);
     // BBHOST_WATCH_COPY_DST=0x<base>: every whole-target copy into that
     // address, with the flip. A frame can go wrong without any draw being
     // different - the engine also moves whole surfaces around, and a copy from
@@ -7598,6 +7648,15 @@ void note_scale_pass(const std::string& pipeline) {
 
 void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t* stage_user, StageImages& out,
                            const GxStageRecords* gx, const KeyStage* resolved) {
+    mb_skip_other_work_locked();  // test8: a draw or dispatch while the motion blur's draw 1 is held
+    struct MbReads {  // ... and whether it reads the scratch target the skip watches
+        StageImages& out;
+        ~MbReads() {
+            if (!g_mb_skip_mode || t_mb_exempt || !g_mb_skip.watched()) return;
+            for (const StageImages::Image& im : out.images)
+                if (im.resolved) mb_skip_touched(tsharp_base(im.w));
+        }
+    } mb_reads{out};
     out.images.resize(meta.images.size());
     const GxStagePlan* plan = gx && g_binding_plans && g_view_by_id ? &stage_plan(meta, *gx) : nullptr;
     for (std::size_t k = 0; k < meta.images.size(); ++k) {
@@ -7692,7 +7751,7 @@ void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre,
                 shape_ok = false;
             }
             if (yebis && view && w[0] != 0xffffffffu) {
-                if (tlog.fetch_add(1) < 24) {
+                if (mblur || tlog.fetch_add(1) < 24) {  // test8: test7c's motion blur lines lost to the shared 24
                     const std::uint64_t tbase = tsharp_base(w);
                     host_log("texture: %s b%u T# base 0x%llx dfmt %u nfmt %u %ux%u type %u tiling %u array %u..%u depth %u da %d r128 %d",
                              pipeline_name, b.binding, static_cast<unsigned long long>(tbase), (w[1] >> 20) & 0x3f,
@@ -11718,6 +11777,15 @@ static bool draw_impl(const GpuDraw& d) {
     // the bind below writes the same views (it used to resolve and look up
     // every texture again, and hash hot ones twice).
     static thread_local StageImages stage_images[2];
+    // test8: the motion blur's own draws are exempt from the skip's watch
+    // (they are the pattern it checks); others first finish a held draw 1.
+    const std::size_t mb_plus = g_mb_skip_mode ? pl.name.find('+') : std::string::npos;
+    const bool mb_draw = mb_plus != std::string::npos && pl.name.compare(mb_plus + 1, 8, "e0305cef") == 0;
+    struct MbExempt {
+        bool was;
+        explicit MbExempt(bool on) : was(t_mb_exempt) { t_mb_exempt = on; }
+        ~MbExempt() { t_mb_exempt = was; }
+    } mb_exempt(mb_draw);
     bool fsr3_replaced = false;  // bbhost-vk Phase 3: FSR 3.1 wrote this scale pass's target
     {
         GpuPhaseTimer t(kPhasePrefetch, phase_weight);
@@ -12049,6 +12117,140 @@ static bool draw_impl(const GpuDraw& d) {
             const RtImage& t = *s.color[0];
             host_log("render: motion blur %s draws into 0x%llx %ux%u format %d", pl.name.c_str(), static_cast<unsigned long long>(t.base),
                      t.width, t.height, static_cast<int>(t.format));
+        }
+    }
+    // test8, BBHOST_AB_SECONDS=<s>: every s seconds the motion blur skip goes
+    // off or on again, and each half's frame times (scale pass to scale pass)
+    // are logged as `ab:` lines - both numbers from one run, same spot.
+    if (pl.scale_pass == 1) {
+        static const long ab_s = [] {
+            const char* e = std::getenv("BBHOST_AB_SECONDS");
+            return e ? std::strtol(e, nullptr, 10) : 0L;
+        }();
+        static std::uint64_t last_ns = 0, phase_start_ns = 0, frames = 0, over8 = 0, over12 = 0;
+        static double sum_ms = 0, max_ms = 0;
+        static std::uint64_t last_flip = ~0ull;
+        const std::uint64_t flip = hle_video_flip_count();
+        if (ab_s > 0 && g_mb_skip_mode && flip != last_flip) {
+            last_flip = flip;
+            const std::uint64_t now = host_clock_monotonic_ns();
+            if (!phase_start_ns) phase_start_ns = now;
+            if (last_ns && now - last_ns < 1000000000ull) {
+                const double ms = static_cast<double>(now - last_ns) / 1e6;
+                ++frames;
+                sum_ms += ms;
+                max_ms = std::max(max_ms, ms);
+                over8 += ms > 8.42;
+                over12 += ms > 12.0;
+            }
+            last_ns = now;
+            if (now - phase_start_ns >= static_cast<std::uint64_t>(ab_s) * 1000000000ull) {
+                if (frames)
+                    host_log("ab: motion blur skip %s for %.0f s: %llu frames, %.1f fps, %.2f ms average, max %.1f ms, %llu over 8.42 ms, %llu over 12 ms; %llu pairs skipped so far",
+                             g_mb_skip_on ? "on" : "off", static_cast<double>(now - phase_start_ns) / 1e9, static_cast<unsigned long long>(frames),
+                             1000.0 * static_cast<double>(frames) / sum_ms, sum_ms / static_cast<double>(frames), max_ms,
+                             static_cast<unsigned long long>(over8), static_cast<unsigned long long>(over12),
+                             static_cast<unsigned long long>(g_mb_skip.pairs_skipped()));
+                mb_skip_other_work_locked();  // a held draw 1 is done before the skip goes off
+                g_mb_skip_on = !g_mb_skip_on;
+                phase_start_ns = now;
+                frames = over8 = over12 = 0;
+                sum_ms = max_ms = 0;
+            }
+        }
+    }
+    // test8, BBHOST_POST_CHAIN_LOG=<flips> (default 3600; 0 off): every that many
+    // flips, one frame's draws from the scale pass to the first UI draw - the
+    // post chain the render-size work moves - with each draw's target, its
+    // viewport, blending, and every image it samples (size and format).
+    {
+        static const long chain_every = [] {
+            const char* e = std::getenv("BBHOST_POST_CHAIN_LOG");
+            return e ? std::strtol(e, nullptr, 10) : 3600L;  // one frame a minute at 60, half a minute at 120
+        }();
+        static std::uint64_t chain_flip = ~0ull, chain_next = 600;
+        static int chain_n = 0;
+        if (chain_every > 0) {
+            const std::uint64_t flip = hle_video_flip_count();
+            if (pl.scale_pass == 1 && flip >= chain_next) {
+                chain_flip = flip;
+                chain_next = flip + static_cast<std::uint64_t>(chain_every);
+                chain_n = 0;
+                host_log("post-chain: flip %llu, from the scale pass %s (FSR %s)", static_cast<unsigned long long>(flip), pl.name.c_str(),
+                         fsr3_replaced ? "wrote it" : "did not");
+            }
+            if (flip == chain_flip) {
+                if (temporal::is_ui_vs(pl.orb_vs) || chain_n >= 200) {
+                    host_log("post-chain: flip %llu ends at %s (%s), %d draws", static_cast<unsigned long long>(flip), pl.name.c_str(),
+                             chain_n >= 200 ? "200 draws" : "the first UI draw", chain_n);
+                    chain_flip = ~0ull;
+                } else {
+                    char line[1024];
+                    int n = 0;
+                    const RtImage* t = s.color[0];
+                    n += std::snprintf(line + n, sizeof(line) - n, "post-chain: #%d %s rt 0x%llx %ux%u fmt %d vp %.0fx%.0f+%.0f+%.0f%s tex",
+                                       chain_n, pl.name.c_str(), static_cast<unsigned long long>(t ? t->base : 0), t ? t->width : 0,
+                                       t ? t->height : 0, t ? static_cast<int>(t->format) : 0, s.vport[2], s.vport[3], s.vport[0], s.vport[1],
+                                       ((s.blend[0] >> 30) & 1u) ? " blend" : "");
+                    for (const StageImages::Image& im : stage_images[1].images) {
+                        if (!im.resolved || n >= static_cast<int>(sizeof(line)) - 80) continue;
+                        const std::uint64_t base = tsharp_base(im.w);
+                        const RtImage* r = find_render_target(base);
+                        if (r)
+                            n += std::snprintf(line + n, sizeof(line) - n, " 0x%llx(rt %ux%u fmt %d)", static_cast<unsigned long long>(base),
+                                               r->width, r->height, static_cast<int>(r->format));
+                        else
+                            n += std::snprintf(line + n, sizeof(line) - n, " 0x%llx(%ux%u dfmt %u)", static_cast<unsigned long long>(base),
+                                               (im.w[2] & 0x3fff) + 1, ((im.w[2] >> 14) & 0x3fff) + 1, (im.w[1] >> 20) & 0x3f);
+                    }
+                    host_log("%s", line);
+                    ++chain_n;
+                }
+            }
+        }
+    }
+    // test8, BBHOST_MOTION_BLUR_SKIP=1: with motion blur off, its two draws
+    // copy A to B and back (host/temporal/mblur_skip.h); once that is proven
+    // for 120 frames in a row, both are left out.
+    if (mb_draw && s.color[0]) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            host_log("render: motion blur skip on (BBHOST_MOTION_BLUR_SKIP=0 turns it off): with motion blur off, its two draws are left out once proven to copy and copy back");
+        }
+        RtImage& t = *s.color[0];
+        std::uint64_t src = 0;
+        int inputs = 0;
+        for (const StageImages::Image& im : stage_images[1].images) {
+            if (!im.resolved) continue;
+            const std::uint64_t base = tsharp_base(im.w);
+            const RtImage* r = base && base != t.base ? find_render_target(base) : nullptr;
+            if (r && !r->depth && r->width == t.width && r->height == t.height && r->format == t.format && r->layers == 1 && base != src) {
+                src = base;
+                ++inputs;
+            }
+        }
+        bool mrt = false;
+        for (int c = 1; c < 8; ++c) mrt |= s.color[c] != nullptr;
+        const bool eligible = g_mb_skip_on && shader_patch_motion_blur_off() && inputs == 1 && !mrt && t.layers == 1 &&
+                              !g_pending_clears.count(t.base) && !g_pending_clears.count(src);
+        const bool blends = (s.blend[0] >> 30) & 1u;  // CB_BLEND0_CONTROL.ENABLE
+        const bool was_armed = g_mb_skip.armed();
+        const auto act = g_mb_skip.draw(hle_video_flip_count(), src, t.base, blends, eligible);
+        if (!was_armed && g_mb_skip.armed())
+            host_log("render: motion blur skip on: its two draws copy 0x%llx -> 0x%llx -> back with blur off, %d frames in a row (flip %llu)",
+                     static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
+                     temporal::MotionBlurSkip::kLearnFrames, static_cast<unsigned long long>(hle_video_flip_count()));
+        if (act == temporal::MotionBlurSkip::Action::MaterializeThenDraw) mb_skip_materialize_locked();
+        if (act == temporal::MotionBlurSkip::Action::Skip) {
+            rt_written(t);
+            t.fill_last = false;
+            const std::uint64_t pairs = g_mb_skip.pairs_skipped();
+            if (pairs && pairs % 36000 == 0 && t.base == g_mb_skip.a())
+                host_log("render: motion blur skip: %llu frames without its two draws, %llu stops, %llu first draws done after all",
+                         static_cast<unsigned long long>(pairs), static_cast<unsigned long long>(g_mb_skip.trips()),
+                         static_cast<unsigned long long>(g_mb_skip.materialized()));
+            return true;
         }
     }
     // BBHOST_SKIP_PASS=<prefix>[,<prefix>...]: drop those draws. Readbacks
