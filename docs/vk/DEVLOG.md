@@ -758,3 +758,55 @@ table built from it.
     testers need only Proton, python3 and spirv-tools.
 - The plugins in the package are unsigned (there is no release key here). Testers keep their
   own signed `plugins/`.
+
+## Test build hardening: Vulkan validation on lavapipe (2026-10-18)
+
+The Khronos validation layer (vulkan-validationlayers 1.4.309, synchronization validation on,
+errors + warnings + perf) was run over everything that runs without the game, on lavapipe
+(llvmpipe, LLVM 19.1.7). `tools/vvl_check.sh` repeats it.
+
+| Run | What it covers | Result |
+|---|---|---|
+| fsr3_upscaler_test, recycle patch ON | FSR 3.1 contexts at every preset (720p, 4K), frames, a reset | 4 SYNC-HAZARD-WRITE-AFTER-WRITE, FSR-Vulkan's (below) |
+| fsr3_upscaler_test, `-DBBHOST_FSR_VULKAN_PATCHES=OFF` | the same, unpatched | the same 4: not the patch's |
+| motion_shader_test | the MV shader | was 20 VUID-vkDestroyDevice-device-05137 (the test leaked); fixed, clean |
+| fsr411_fallback_test (new) | FSR 4.1.1 init failures: no assets, not SPIR-V, no initializer.bin, an unknown resource, a bad size; each retried, then destroyed | clean |
+| gcn_sampling_test | sampling | clean |
+| `bbhost --stream-selftest` | device creation with our feature chain, the recorder, deferred destroys, and now the kept pass views on 16/32 px images | 10 SYNC-HAZARD-WRITE-AFTER-WRITE on the selftest's own back-to-back fills (upstream test code); pass |
+| `BBHOST_FSR4_FEATURES=1 bbhost --stream-selftest=2` | the FSR 4.1.1 feature check on a device without them | clean; "the GPU lacks VK_VALVE_shader_mixed_float_dot_product: FSR 4.1.1 is FSR 3.1" |
+| `bbhost --setup` under Xvfb, closed with WM_DELETE_WINDOW, SDL's default renderer and `SDL_RENDER_DRIVER=vulkan` | the setup window open/close | clean ("setup: closed") |
+| all 48 ctest tests with the layer on | | pass |
+
+**Fixed (ours):**
+- motion_shader_test destroyed the device with its images, memory, buffer, command buffer,
+  views, pipeline and pools still alive. It now tears down in order.
+
+**Added (tests only, no feature):**
+- `tests/fsr411_fallback_test.cpp`: each failure Record() can take before bbhost falls back
+  to FSR 3.1, on a plain device, each one twice (as a resize asks again), then destroyed.
+  Its stand-in pass is a 4-line compute shader; no FSR 4.1.1 assets are used or shipped.
+- The stream selftest's temporary images now take a kept view (`pass_view_locked`): the same
+  view while the image lives, forgotten by `defer_destroy_image`, at two sizes, as
+  resolution changes would. A missing or different view fails the run. That covers the
+  create/destroy/resize cycle, and the layer saw no view outliving its image.
+
+**Reviewed, no change needed:**
+- Every image `pass_view_locked` sees (render targets, temporal_inputs' images, the depth
+  copy) is destroyed through `defer_destroy_image`. The direct `vkDestroyImage` calls in
+  render.cpp and temporal_inputs.cpp are only on failed creation, before any view exists.
+  So a recycled handle can't pick up a stale view.
+
+**Left alone (third party, not caused by our patch):**
+- FSR-Vulkan bridge, `FFX_GPU_JOB_CLEAR_FLOAT` (bridge.cpp ~1289) clears FSR's internal
+  resources back to back with no barrier between them. One hazard is on a 1-mip image and
+  three are on a 7-mip one (the luminance/SPD chain). The test's own images were checked by
+  handle and aren't involved. The hazards are identical with the patch off. Clears to the
+  same value are harmless in practice; it's reported, not patched.
+- The stream selftest (upstream) fills the same buffer twice with no barrier, on purpose:
+  it checks the recorder's ordering, not the GPU's.
+
+**Not runnable here:**
+- The scene split, opaque snapshot, reactive mask pass and the in-renderer use of the kept
+  views run only inside the game's frame (smoke.sh needs the eboot). On the user's hardware
+  the same layer can be turned on with `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`
+  (or bbhost's own validation option) for one session.

@@ -16,6 +16,11 @@
 - **Packaging:** `tools/package_linux.sh` names the tarball for `git describe` and adds
   `build-fsr4.sh` with the FSR 4.1.1 builder. It refuses to package any DLL, game file or FSR
   4.1.1 asset, and writes a `.sha256`.
+- **Vulkan validation pass:** every Vulkan test and the stream selftest run clean of our
+  own errors under the Khronos validation layer with sync validation (`tools/vvl_check.sh`).
+  New `fsr411_fallback_test` covers FSR 4.1.1's failure paths. The selftest now checks the
+  kept pass views. motion_shader_test no longer leaks. FSR-Vulkan's own back-to-back clears
+  are reported in DEVLOG, not patched.
 - **Docs:**
   - README: a "Testing bbhost-vk" section.
   - TESTING.md: the test-build session.
