@@ -27,6 +27,18 @@ bool parse_version(const std::string& v, int out[3]) {
     return true;
 }
 
+// bbhost-vk: the fork's own number after the upstream version, "v0.2.18-vk.3"
+// (and "v0.2.18-vk.3-12-gabc1234" for a build past that tag): 3; -1 without.
+static int vk_number(const std::string& v) {
+    const std::size_t at = v.find("-vk.");
+    if (at == std::string::npos) return -1;
+    std::size_t i = at + 4;
+    if (i >= v.size() || v[i] < '0' || v[i] > '9') return -1;
+    int n = 0;
+    while (i < v.size() && v[i] >= '0' && v[i] <= '9') n = n * 10 + (v[i++] - '0');
+    return n;
+}
+
 bool is_newer(const std::string& tag, const std::string& current) {
     int t[3], c[3];
     if (!parse_version(tag, t)) return false;
@@ -34,7 +46,8 @@ bool is_newer(const std::string& tag, const std::string& current) {
     for (int k = 0; k < 3; ++k) {
         if (t[k] != c[k]) return t[k] > c[k];
     }
-    return false;
+    // bbhost-vk: the same upstream version - the fork's number decides.
+    return vk_number(tag) > vk_number(current);
 }
 
 bool signature_ok(const std::string& manifest, const std::string& signature, const std::uint8_t public_key[32]) {
@@ -52,8 +65,9 @@ bool parse_release(const std::string& body, std::string& tag, std::string& page)
     tag = t->string;
     const json::Value* h = v.find("html_url");
     page = h && h->type == json::Value::Type::String ? h->string : "";
-    if (!release_page_ok(page)) page = "https://github.com/droogie/bbhost/releases/tag/" + tag;
-    if (!release_page_ok(page)) page = "https://github.com/droogie/bbhost/releases/latest";
+    // bbhost-vk: the fork's releases (host/updater.cpp checks Heliasyu/bbhost-vk).
+    if (!release_page_ok(page)) page = "https://github.com/Heliasyu/bbhost-vk/releases/tag/" + tag;
+    if (!release_page_ok(page)) page = "https://github.com/Heliasyu/bbhost-vk/releases/latest";
     return true;
 }
 

@@ -42,7 +42,10 @@ constexpr std::uint8_t kReleaseKey[32] = {
 const std::uint8_t* release_key() { return kReleaseKey; }
 
 namespace {
-constexpr const char* kDefaultSource = "https://api.github.com/repos/droogie/bbhost/releases/latest";
+// bbhost-vk: the fork's own releases (a private repository needs update.token_file).
+constexpr const char* kDefaultSource = "https://api.github.com/repos/Heliasyu/bbhost-vk/releases/latest";
+// The official plugins stay upstream's: signed with upstream's release key (kReleaseKey).
+constexpr const char* kPluginSource = "https://api.github.com/repos/droogie/bbhost/releases/latest";
 constexpr std::size_t kMaxDownload = 256u << 20;
 
 std::mutex g_mu;
@@ -223,7 +226,7 @@ constexpr const char* kPluginExt = ".so";
 // Windows), which plugins_load puts in place at the next start.
 void fetch_plugins_thread(std::string dir) {
     set_plugins_status("looking for the latest official plugins...");
-    const std::string source = config().update_source.empty() ? kDefaultSource : config().update_source;
+    const std::string source = config().update_source.empty() ? kPluginSource : config().update_source;
     const Fetch f = fetch(source, false, 20000);
     json::Value v;
     std::string err;

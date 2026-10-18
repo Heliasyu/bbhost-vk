@@ -61,6 +61,13 @@ int main() {
     check(!is_newer("v0.1.0", "v0.2.0"), "older is not newer");
     check(is_newer("v0.1.0", "v0.0.0-1cf3e08"), "an untagged build takes any release");
     check(!is_newer("nightly", "v0.1.0"), "a tag that is no version is never newer");
+    // bbhost-vk: the fork's number after the upstream version.
+    check(is_newer("v0.2.18-vk.1", "v0.2.18-vk.0-45-g70d50a2"), "the next vk release is newer than a build past the last");
+    check(!is_newer("v0.2.18-vk.0", "v0.2.18-vk.0-45-g70d50a2"), "a build past a vk tag keeps it");
+    check(is_newer("v0.2.18-vk.0", "v0.2.18"), "a vk release is newer than its upstream base");
+    check(!is_newer("v0.2.18", "v0.2.18-vk.2"), "upstream's same version is not newer than a vk build");
+    check(is_newer("v0.2.19", "v0.2.18-vk.9"), "a newer upstream base is newer");
+    check(is_newer("v0.2.18-vk.10", "v0.2.18-vk.9"), "vk numbers are numeric");
 
     const std::string manifest = kManifest;
     const std::string sig(reinterpret_cast<const char*>(kTestSig), sizeof(kTestSig));
@@ -79,16 +86,16 @@ int main() {
     check(parse_release(kRelease, tag, page) && tag == "v0.2.16" && page == "https://github.com/droogie/bbhost/releases/tag/v0.2.16",
           "a release's tag and html_url");
     check(parse_release("{\"tag_name\":\"v0.3.0\"}", tag, page) && tag == "v0.3.0" &&
-              page == "https://github.com/droogie/bbhost/releases/tag/v0.3.0",
+              page == "https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.3.0",
           "no html_url: bbhost's page for the tag");
     check(parse_release("{\"tag_name\":\"v0.3.0\",\"html_url\":\"https://example.com/releases/tag/v0.3.0\"}", tag, page) &&
-              page == "https://github.com/droogie/bbhost/releases/tag/v0.3.0",
+              page == "https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.3.0",
           "an html_url off github.com is not used");
     check(parse_release("{\"tag_name\":\"v0.3.0\",\"html_url\":7}", tag, page) &&
-              page == "https://github.com/droogie/bbhost/releases/tag/v0.3.0",
+              page == "https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.3.0",
           "an html_url that is no string is not used");
     check(parse_release("{\"tag_name\":\"v0.3.0 \\\"x\\\"\"}", tag, page) && tag == "v0.3.0 \"x\"" &&
-              page == "https://github.com/droogie/bbhost/releases/latest",
+              page == "https://github.com/Heliasyu/bbhost-vk/releases/latest",
           "a tag no link can carry: the latest release's page");
     check(!parse_release("<html>rate limited</html>", tag, page), "not JSON is no release");
     check(!parse_release("[]", tag, page), "an array is no release");
