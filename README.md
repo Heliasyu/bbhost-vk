@@ -12,9 +12,17 @@ No game files are included or supported here. Online play uses bbhost's servers 
 - Development plan: [docs/vk/PLAN.md](docs/vk/PLAN.md)
 - Changes: [CHANGELOG.md](CHANGELOG.md)
 - Upstream README: [README.upstream.md](README.upstream.md)
+- Development log: [docs/vk/DEVLOG.md](docs/vk/DEVLOG.md)
+- Testing sessions (`bbtest`): [docs/vk/TESTING.md](docs/vk/TESTING.md)
+- Building: `packaging/vk/build.sh` (the CI's portable release build, stripped, with its SHA-256)
 
 ## Branches and versions
 `main` is the playable build. Work happens on `phase-*` branches, and new bbhost releases are merged on `upstream-sync` first. Versions are `<bbhost version>-vk.<n>`.
 
+## Credits
+- [droogie/bbhost](https://github.com/droogie/bbhost): everything this fork builds on.
+- [FireBurn/FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) (MIT): AMD FidelityFX FSR 3.1 on native Vulkan, a submodule at `third_party/FSR-Vulkan`.
+- AMD FidelityFX SDK (MIT), carried inside FSR-Vulkan.
+
 ## License
-GPL-3.0, same as bbhost. See [LICENSE](LICENSE).
+GPL-3.0, same as bbhost. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
