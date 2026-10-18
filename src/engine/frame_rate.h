@@ -2,7 +2,7 @@
 
 #include <string>
 
-// The game's own frame pace: 30, 60, 90 or uncapped.
+// The game's own frame pace: 30, 60, 90, 120 or uncapped.
 //
 // FD4's frame-time manager (0x2434770, called once a frame from the main
 // loop) picks an interval by mode - the int at +8, or +0xc while the one-shot
@@ -13,7 +13,7 @@
 // thread reads ~90% busy at 30 fps while half of that is waiting. Ours
 // replaces it (SprjFlipper::Update, BBHOST_FRAME_SOURCE).
 //
-// The Frame rate option (or BBHOST_GAME_FPS=30/60/90/0) when the game starts:
+// The Frame rate option (or BBHOST_GAME_FPS=30/60/90/120/0) when the game starts:
 //  - 30: the game's own.
 //  - 60: mode 2, with the game's fixed steps converted from Kyo's "60 FPS++"
 //    list (frame_rate.cpp's tables and engine/sixty_fps_sites.inc).
@@ -24,7 +24,10 @@
 //    the values that depend on the frame's length written every frame from
 //    the measured frame time - the game's own step already follows it through
 //    the FPS++ frame-time cave (0x2418e3d), clamped to [target, 1/30].
-// At 90 and uncapped flips complete as soon as they are recorded (the game
+//  - 120: uncapped's package and per-frame values, with a target of 1/120 s
+//    (a hard limit, independent of V-Sync and the refresh rate) and 120's
+//    values for the code immediates and frame counts.
+// At 90, 120 and uncapped flips complete as soon as they are recorded (the game
 // paces itself; hle/video.cpp). The one-shot overrides (+0x2bc, +0x2c0,
 // +0x271, +0x272, +0x2c4) are cleared so nothing drops the game back to 30.
 //
@@ -35,7 +38,7 @@ struct ElfImage;
 
 void frame_rate_install(ElfImage* image);
 
-// The pace the game was started at: 30, 60, 90, or 0 for uncapped.
+// The pace the game was started at: 30, 60, 90, 120, or 0 for uncapped.
 int frame_rate_game_fps();
 
 // Game time against real time (plugins' set_time_scale): 0.5 is half speed,

@@ -196,15 +196,19 @@ applies on the next run): 30 is the game as it shipped; 60 and 90 run its
 logic at that rate with its fixed steps converted (Kyo's 60 and 90 FPS++
 lists, `engine/frame_rate.cpp`); Uncapped steps it by the measured frame time
 (1/240 to 1/30 s), at the display's refresh rate with V-Sync on and up to 240
-fps with it off. At 90 and Uncapped the game paces itself and its frames are
-shown as they come, so 90 on a 60 Hz display shows 60 of them a second.
-`BBHOST_GAME_FPS=30|60|90|0` overrides the setting for a run (0 is uncapped),
+fps with it off; 120 is Uncapped held to a hard limit of 120 fps (whatever
+V-Sync and the display's refresh rate are: for a VRR display above 120 Hz,
+say), with 120's values for
+what cannot follow the frame time. At 90, 120 and Uncapped the game paces
+itself and its frames are shown as they come, so 90 on a 60 Hz display shows
+60 of them a second.
+`BBHOST_GAME_FPS=30|60|90|120|0` overrides the setting for a run (0 is uncapped),
 `BBHOST_UNCAPPED_FPS=N` sets the uncapped limit (30-240) whatever V-Sync says,
 and `BBHOST_UNCAPPED_LOG=1` logs once a second the frame time uncapped steps
 by and the values it wrote. The start of the log says which rate runs and how
 many values and code sites were converted (`frame rate:` lines), and names
 any site whose bytes were not the expected ones (that rate is then refused:
-90 or uncapped falls back to 60).
+90, 120 or uncapped falls back to 60).
 A frame goes to the screen as soon as the game has finished it; only its flip,
 which the game paces itself on, waits for the next tick of that clock. The game
 keeps two flips queued, and showing each frame at the tick that completed it

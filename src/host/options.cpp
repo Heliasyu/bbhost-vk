@@ -111,13 +111,13 @@ Setting g_set[kSettingCount] = {
      "Fullscreen is borderless: the desktop resolution, no mode switch.", false},
     {"vsync", "V-Sync", {"On", "Off"}, 0,
      "Off presents as soon as a frame is ready, and can tear.", false},
-    // The game's own pace (engine/frame_rate.h), the same four the game's Frame
+    // The game's own pace (engine/frame_rate.h), the same five the game's Frame
     // Rate pick list offers (engine/option_menu.cpp). The key is the old Frame
     // cap's, so a file keeps its 30 or 60; an older file's 90, 120, 144 and
     // Off, which ran the game at 60, read as 60 (host_options_load).
-    {"frame_cap", "Frame rate", {"30", "60", "90", "Uncapped"}, 0,
-     "30 is the game's own pace; 60 and 90 run its logic at that rate; Uncapped steps it by the frame time "
-     "(the display's refresh rate with V-Sync on, up to 240 off). Applies on the next run.",
+    {"frame_cap", "Frame rate", {"30", "60", "90", "120", "Uncapped"}, 0,
+     "30 is the game's own pace; 60 and 90 run its logic at that rate; 120 and Uncapped step it by the frame time "
+     "(120: at most 120 fps; Uncapped: the display's refresh rate with V-Sync on, up to 240 off). Applies on the next run.",
      false},
     // What reaches the screen, counted by the presenter (host/window.cpp).
     {"fps_counter", "FPS counter", {"Off", "On"}, 0,
@@ -645,7 +645,7 @@ void apply(int id) {
 // version was written by a build where it defaulted to Off, and every save
 // writes every setting - so its "Off" is that old default far more often
 // than a choice, and reads as On (once: the next save writes version 2).
-// 3: frame_cap is the game's frame rate (30, 60, 90, Uncapped); an older
+// 3: frame_cap is the game's frame rate (30, 60, 90, 120, Uncapped); an older
 // file's 90, 120, 144 and Off were caps on presentation that ran the game at
 // 60, and read as 60.
 constexpr int kOptionsVersion = 3;
@@ -827,11 +827,11 @@ void host_options_load() {
     g_set[kChangeAppearance].index = config().change_appearance ? 0 : 1;
     g_set[kRebirth].index = config().rebirth ? 0 : 1;
     g_set[kFivePlayers].index = config().five_players ? 0 : 1;
-    // video.fps_cap is the frame rate's default: 30, 60, 90 or 0 (uncapped);
-    // another number takes the nearest rate below it.
+    // video.fps_cap is the frame rate's default: 30, 60, 90, 120 or 0
+    // (uncapped); another number takes the nearest rate below it.
     {
         const int cap = config().fps_cap;
-        const int mode = cap <= 0 ? 0 : cap >= 90 ? 90 : cap >= 60 ? 60 : 30;
+        const int mode = cap <= 0 ? 0 : cap >= 120 ? 120 : cap >= 90 ? 90 : cap >= 60 ? 60 : 30;
         if (mode != cap) host_log("options: video.fps_cap = %d is not a frame rate; %d", cap, mode);
         g_set[kFrameCap].index = std::max(0, fps_index(mode));
     }

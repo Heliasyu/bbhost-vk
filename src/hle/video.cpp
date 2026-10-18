@@ -797,7 +797,7 @@ std::atomic<int> g_game_pace{-1};
 
 void hle_video_set_game_pace(int fps) {
     g_game_pace.store(fps);
-    if (fps == 90 || fps == 0) {
+    if (fps == 90 || fps == 120 || fps == 0) {
         // The game paces itself - our SprjFlipper::Update waits out 1/90 s, or
         // the uncapped limit - and steps by the frame time it measured, so a
         // flip completes as soon as the frame is recorded, as under
@@ -806,7 +806,8 @@ void hle_video_set_game_pace(int fps) {
         // a refresh with V-Sync on (host/window.cpp drops the others).
         g_flip_uncapped.store(true);
         g_fps_cap.store(0);
-        host_log("video: flips complete as soon as they are recorded (the game paces itself at %s)", fps ? "90" : "uncapped");
+        host_log("video: flips complete as soon as they are recorded (the game paces itself at %s)",
+                 fps == 120 ? "120" : fps ? "90" : "uncapped");
     } else {
         g_fps_cap.store(fps);
     }

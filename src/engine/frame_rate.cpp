@@ -409,6 +409,19 @@ constexpr std::uint32_t kClothScalars = 0x4d3bd00;  // 4 x stiffness and damping
 constexpr int kUncappedMaxFps = 240;
 constexpr int kUncappedReferenceFps = 90;
 
+// 120: the uncapped mode's machinery - every value that depends on the frame's
+// length follows the measured frame time, the cloth's scalars too - held to a
+// hard limit of 120 (independent of V-Sync and the display's refresh rate),
+// with 120 as the reference rate for the code immediates and frame counts
+// (the rules of kRated reproduce Kyo's 120 values). A fixed 120 package as at
+// 90 would need the 90 FPS++ cloth caves' constants (2/3, 1.5) and the turn's
+// fixed step (0.0125) rewritten for 120; following the frame time needs none
+// of that, and stays right if a frame runs long.
+constexpr int kOneTwentyFps = 120;
+
+// The modes that step by the measured frame time: uncapped (0) and 120.
+constexpr bool follows_frame_time(int mode) { return mode == 0 || mode == kOneTwentyFps; }
+
 std::vector<std::uint8_t> hex_bytes(const char* h) {
     std::vector<std::uint8_t> out;
     for (std::size_t i = 0; h[i] && h[i + 1]; i += 2) {
@@ -471,7 +484,7 @@ void count_was(const Counted& c, std::uint8_t* out) {
     std::memcpy(out, &c.was, c.n);
 }
 
-// The game's pace: 30, 60, 90, or 0 for uncapped.
+// The game's pace: 30, 60, 90, 120, or 0 for uncapped.
 int g_game_fps = 30;
 std::size_t g_sites_applied = 0, g_ninety_applied = 0;
 std::atomic<std::uint64_t> g_frames{0};
@@ -944,11 +957,25 @@ float uncapped_target() {
     return 1.0f / limit;
 }
 
+// The 120 mode's frame limit: a hard 1/120 s, whatever V-Sync and the
+// display's refresh rate say - the frame pacer (sprj_flipper_update's sleep
+// and spin) holds the game to it, so a 165 Hz VRR display gets 120 frames a
+// second with V-Sync on or off. BBHOST_UNCAPPED_FPS does not apply.
+float one_twenty_target() {
+    static bool said = false;
+    if (!said) {
+        said = true;
+        host_log("frame rate: 120, at most 120.00 fps (the mode's limit, independent of V-Sync and the refresh rate)");
+    }
+    return 1.0f / static_cast<float>(kOneTwentyFps);
+}
+
 // The converted pace's target for this frame; 0 at 30.
 float pace_target() {
     switch (g_game_fps) {
         case 60: return kSixtieth;
         case 90: return kNinetieth;
+        case kOneTwentyFps: return one_twenty_target();
         case 0: return uncapped_target();
         default: return 0.0f;
     }
@@ -1023,11 +1050,12 @@ GUEST_ABI std::int64_t frame_manager_hook(std::uint64_t, const std::uint64_t* sa
         g_fast_target = converted && (g_bench_uncapped || loading_fast_now());
         sprj_flipper_update(f, clock, pace_target());
         g_fast_target = false;
-        if (g_game_fps == 0) uncapped_each_frame(f);
+        if (follows_frame_time(g_game_fps)) uncapped_each_frame(f);
         if (g_frames.fetch_add(1, std::memory_order_relaxed) == 0) {
             host_log("frame source: SprjFlipper::Update is ours (0x%llx, %s); the guest's no longer runs",
                      static_cast<unsigned long long>(saved[5]),
-                     g_game_fps == 60 ? "60" : g_game_fps == 90 ? "90" : g_game_fps == 0 ? "uncapped" : "the game's own mode");
+                     g_game_fps == 60 ? "60" : g_game_fps == 90 ? "90" : g_game_fps == kOneTwentyFps ? "120"
+                     : g_game_fps == 0 ? "uncapped" : "the game's own mode");
         }
         return 1;  // done: the stub returns to the caller
     }
@@ -1060,19 +1088,22 @@ GUEST_ABI std::int64_t frame_manager_hook(std::uint64_t, const std::uint64_t* sa
     return 0;
 }
 
-// A frame rate as one of the modes: 30, 60, 90, or 0 (uncapped). Another
+// A frame rate as one of the modes: 30, 60, 90, 120, or 0 (uncapped). Another
 // number takes the nearest mode below it.
 int mode_of(int fps) {
     if (fps <= 0) return 0;
+    if (fps >= kOneTwentyFps) return kOneTwentyFps;
     if (fps >= 90) return 90;
     if (fps >= 60) return 60;
     return 30;
 }
 
-const char* mode_name(int fps) { return fps == 0 ? "uncapped" : fps == 90 ? "90" : fps == 60 ? "60" : "30"; }
+const char* mode_name(int fps) {
+    return fps == 0 ? "uncapped" : fps == kOneTwentyFps ? "120" : fps == 90 ? "90" : fps == 60 ? "60" : "30";
+}
 
 // The Frame rate option as the game started with it. BBHOST_GAME_FPS=30, 60,
-// 90 or 0 (also "uncapped": atoi reads 0) overrides it.
+// 90, 120 or 0 (also "uncapped": atoi reads 0) overrides it.
 int wanted_fps() {
     if (const char* e = std::getenv("BBHOST_GAME_FPS"); e && *e) return mode_of(std::atoi(e));
     return mode_of(host_settings().frame_cap);
@@ -1132,7 +1163,7 @@ int apply_rate(ElfImage* image, int want) {
     int mode = want;
     if (mode != 60) {
         const bool ninety_ok = sixty_ok && sites_hold(image, kNinetySites, "the 90 FPS++ list") &&
-                               (mode != 0 || sites_hold(image, kUncappedSites, "the uncapped mode"));
+                               (!follows_frame_time(mode) || sites_hold(image, kUncappedSites, "the uncapped mode"));
         if (!ninety_ok) {
             host_log("frame rate: %s needs the 60 and 90 FPS++ code rewrites, which were refused; the game runs at 60",
                      mode_name(mode));
@@ -1151,8 +1182,8 @@ int apply_rate(ElfImage* image, int want) {
         if (bn < kCodeEnd) guest_protect_rx(&image->mem, lo, hi - lo);
         else guest_protect_rw(&image->mem, lo, hi - lo);
     };
-    // 90's values for uncapped's code immediates and frame counts; the sound
-    // thread keeps up with the fastest frame.
+    // 90's values for uncapped's code immediates and frame counts (120's at
+    // 120); the sound thread keeps up with the fastest frame.
     const int fps = mode == 0 ? kUncappedReferenceFps : mode;
     std::size_t rated_written = 0;
     for (const Constant& c : kConstants) {
@@ -1180,14 +1211,14 @@ int apply_rate(ElfImage* image, int want) {
     }
     if (mode != 60) {
         for (const Site& site : kNinetySites) {
-            if (mode == 0 && std::find(std::begin(kNinetyNotUncapped), std::end(kNinetyNotUncapped), site.at) != std::end(kNinetyNotUncapped))
+            if (follows_frame_time(mode) && std::find(std::begin(kNinetyNotUncapped), std::end(kNinetyNotUncapped), site.at) != std::end(kNinetyNotUncapped))
                 continue;
             const std::vector<std::uint8_t> now = hex_bytes(site.now);
             write(site.at, now.data(), now.size());
             ++g_ninety_applied;
         }
     }
-    if (mode == 0) {
+    if (follows_frame_time(mode)) {
         for (const Site& site : kUncappedSites) {
             const std::vector<std::uint8_t> now = hex_bytes(site.now);
             write(site.at, now.data(), now.size());
@@ -1203,14 +1234,15 @@ int apply_rate(ElfImage* image, int want) {
             pages.push_back(va(r.at) & ~0xfffull);
         }
         g_cloth_va = va(kClothScalars);
+        g_cloth_dt = 1.0f / static_cast<float>(fps);
         pages.push_back(g_cloth_va & ~0xfffull);
         std::sort(pages.begin(), pages.end());
         pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
         g_each_mem = image->mem;
         for (const std::uint64_t p : pages) guest_protect_rwx(&image->mem, p, 0x1000);
-        host_log("frame rate: uncapped - %zu values and the cloth's 8 scalars follow the frame time every frame "
+        host_log("frame rate: %s - %zu values and the cloth's 8 scalars follow the frame time every frame "
                  "(%zu pages of .rodata kept writable); code immediates and frame counts at %d's values",
-                 g_each.size(), pages.size(), kUncappedReferenceFps);
+                 mode_name(mode), g_each.size(), pages.size(), fps);
     }
     if (mode != 60) {
         host_log("frame rate: %zu of the constants follow the rate (written at %d), the rest at their 60 values", rated_written, fps);
@@ -1262,9 +1294,9 @@ void frame_rate_install(ElfImage* image) {
         g_source = e[0] == '0' ? Source::Guest : e[0] == '2' ? Source::Compare : Source::Ours;
     }
     const int want = wanted_fps();
-    // 90 and uncapped set a target the game's own modes do not have: ours
+    // 90, 120 and uncapped set a target the game's own modes do not have: ours
     // runs them (compare and the guest's run at 30 and 60).
-    if ((want == 90 || want == 0) && g_source != Source::Ours) {
+    if ((want == 90 || want == kOneTwentyFps || want == 0) && g_source != Source::Ours) {
         host_log("frame source: BBHOST_FRAME_SOURCE runs the guest's update at 30 and 60 only; ours runs %s", mode_name(want));
         g_source = Source::Ours;
     }
@@ -1298,7 +1330,7 @@ void frame_rate_install(ElfImage* image) {
         return;  // the hook keeps mode 2 only while g_game_fps says 60
     }
     g_game_fps = got;
-    hle_video_set_game_pace(got);  // 90 and uncapped: flips complete at once (hle/video.cpp)
+    hle_video_set_game_pace(got);  // 90, 120 and uncapped: flips complete at once (hle/video.cpp)
     const std::size_t kCountsN = sizeof(kCounts) / sizeof(kCounts[0]), kBytesN = sizeof(kBytes) / sizeof(kBytes[0]);
     const std::size_t constants = sizeof(kConstants) / sizeof(kConstants[0]);
     if (got == 60) {
@@ -1309,6 +1341,12 @@ void frame_rate_install(ElfImage* image) {
         host_log("frame rate: 90 (mode 2 with a 1/90 s target; %zu constants and %zu other values converted, %zu 60 FPS++ and "
                  "%zu 90 FPS++ code sites)",
                  constants, kCountsN + kBytesN, g_sites_applied, g_ninety_applied);
+    } else if (got == kOneTwentyFps) {
+        host_log("frame rate: 120 (mode 2 with a 1/120 s target, the step following the measured frame time, clamped to "
+                 "1/120..1/30 s; %zu constants and %zu other values converted, %zu 60 FPS++, %zu 90 FPS++ and %zu uncapped "
+                 "code sites)",
+                 constants, kCountsN + kBytesN, g_sites_applied, g_ninety_applied,
+                 sizeof(kUncappedSites) / sizeof(kUncappedSites[0]));
     } else {
         host_log("frame rate: uncapped (mode 2, the step following the measured frame time, clamped to 1/%d..1/30 s; %zu "
                  "constants and %zu other values converted, %zu 60 FPS++, %zu 90 FPS++ and %zu uncapped code sites)",
