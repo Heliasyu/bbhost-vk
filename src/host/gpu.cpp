@@ -152,6 +152,16 @@ std::atomic<std::uint64_t> g_sub_recorded_ns[kSubRing];
 std::atomic<std::uint8_t> g_sub_starved[kSubRing];
 std::atomic<void*> g_sub_site[kSubRing];
 VkFence g_last_game_fence = VK_NULL_HANDLE;  // the previous game submission's (submit_job_now's callers run one at a time)
+// test7c, BBHOST_SUBMIT_BATCH: the serial whose fence covers this one's - its
+// own, or the last of the vkQueueSubmit it was merged into (slot_fence).
+// Reset to its own at hand-over (submit_locked), set by bb-submit before the
+// submission is published (g_stream_submitted), so a reader that waited for
+// that sees it.
+std::atomic<std::uint64_t> g_fence_owner[kSubRing];
+// g.completed_submits for bb-submit, which holds no g.mu: set as a slot's
+// fence is seen signalled, before the command processor resets it.
+std::atomic<std::uint64_t> g_completed_atomic{0};
+std::atomic<std::uint64_t> g_batch_submits{0}, g_batch_jobs{0}, g_batch_holds{0}, g_batch_hold_ns{0};
 struct SubLatency {
     std::atomic<std::uint64_t> n{0}, starved{0}, record_ns{0}, record_max{0}, queue_ns{0}, queue_max{0}, submit_ns{0}, submit_max{0};
 } g_sub_lat;
@@ -215,22 +225,134 @@ void submit_job_now(const SubmitJob& job) {
     if (job.foreign) g_foreign_submitted.store(job.foreign, std::memory_order_release);
 }
 
+// test7c: game jobs merged into one vkQueueSubmit - one VkSubmitInfo with all
+// their command buffers, the first's wait, the last's fence (the others'
+// slots wait on it: g_fence_owner) - so the kernel and the GPU see one
+// submission instead of n. Only jobs with no semaphore to signal, and none
+// but the first with one to wait on.
+void submit_batch_now(const std::vector<SubmitJob>& jobs) {
+    if (jobs.size() == 1) {
+        submit_job_now(jobs[0]);
+        return;
+    }
+    const SubmitJob& last = jobs.back();
+    VkCommandBuffer cmds[32];
+    std::uint32_t n = 0, items = 0;
+    for (const SubmitJob& j : jobs) {
+        for (std::uint32_t k = 0; k < j.ncmds && n < 32; ++k) cmds[n++] = j.cmds[k];
+        items += j.items;
+    }
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = n;
+    si.pCommandBuffers = cmds;
+    if (jobs[0].wait) {
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &jobs[0].wait;
+        si.pWaitDstStageMask = &jobs[0].wait_stage;
+    }
+    const std::uint64_t t_queue = host_clock_monotonic_ns();
+    const bool starved = g_last_game_fence && vkGetFenceStatus(g.device, g_last_game_fence) == VK_SUCCESS;
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        const std::uint64_t k = jobs[i].serial % kSubRing;
+        g_sub_starved[k].store(i == 0 && starved ? 1 : 0, std::memory_order_relaxed);
+        const std::uint64_t h = g_sub_handover_ns[k].load(std::memory_order_relaxed);
+        const std::uint64_t rec_t = g_sub_recorded_ns[k].load(std::memory_order_relaxed);
+        if (h && rec_t >= h && t_queue >= rec_t) {
+            g_sub_lat.record_ns.fetch_add(rec_t - h, std::memory_order_relaxed);
+            bump_max(g_sub_lat.record_max, rec_t - h);
+            g_sub_lat.queue_ns.fetch_add(t_queue - rec_t, std::memory_order_relaxed);
+            bump_max(g_sub_lat.queue_max, t_queue - rec_t);
+        }
+        g_sub_lat.n.fetch_add(1, std::memory_order_relaxed);
+        // Covered by the last one's fence: published before g_stream_submitted below.
+        g_fence_owner[k].store(last.serial, std::memory_order_release);
+    }
+    if (starved) g_sub_lat.starved.fetch_add(1, std::memory_order_relaxed);
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> q(g.queue_mu);
+        r = vkQueueSubmit(g.queue, 1, &si, last.fence);
+    }
+    const std::uint64_t d = host_clock_monotonic_ns() - t_queue;
+    g_sub_lat.submit_ns.fetch_add(d, std::memory_order_relaxed);
+    bump_max(g_sub_lat.submit_max, d);
+    g_last_game_fence = last.fence;
+    g_batch_submits.fetch_add(1, std::memory_order_relaxed);
+    g_batch_jobs.fetch_add(jobs.size(), std::memory_order_relaxed);
+    if (r != VK_SUCCESS) {
+        int none = 0;
+        g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
+        g_sub_failed_items.fetch_add(items);
+    }
+    g_stream_submitted.store(last.serial + 1, std::memory_order_release);
+}
+
+// BBHOST_SUBMIT_BATCH (test7c; off by default until measured on hardware):
+// 1 merges the game's jobs that are waiting together, and holds a new one
+// back while the GPU already has two of our submissions it has not finished
+// - one running and one queued behind it, so it never runs dry - letting the
+// jobs that arrive meanwhile join it. The queued gaps between command buffers
+// were ~0.5 ms a frame at ~11 submissions (t8, test7). Labels are not held
+// back the way BBHOST_SUBMIT_EVERY_JOB=0 held them: every job is still ended
+// and handed over at once, and a held job could not have started before the
+// two ahead of it finished anyway. A hold ends after 2 ms regardless.
+int submit_batch_mode() {
+    static const int mode = [] {
+        const char* e = std::getenv("BBHOST_SUBMIT_BATCH");
+        const int m = e && *e ? std::atoi(e) : 0;
+        host_log("gpu: submit batching %s", m ? "on (BBHOST_SUBMIT_BATCH=1): waiting game jobs go in one vkQueueSubmit while the GPU has two ahead"
+                                              : "off (BBHOST_SUBMIT_BATCH=1 merges waiting game jobs)");
+        return m;
+    }();
+    return mode;
+}
+bool batchable(const SubmitJob& j) { return j.serial != ~0ull && !j.foreign && !j.signal; }
+
 void submit_thread() {
     host_thread_set_name("bb-submit");
     host_thread_set_class(HostThreadClass::GpuFeed, "bb-submit");  // core/host_clock.h
+    const bool batching = submit_batch_mode() != 0;
+    // Our game submissions the GPU may not have finished: their last serial and fence.
+    std::deque<std::pair<std::uint64_t, VkFence>> ahead;
+    const auto finished = [](const std::pair<std::uint64_t, VkFence>& a) {
+        return g_completed_atomic.load(std::memory_order_acquire) > a.first || vkGetFenceStatus(g.device, a.second) == VK_SUCCESS;
+    };
+    std::vector<SubmitJob> batch;
     for (;;) {
-        SubmitJob job;
+        batch.clear();
         {
             std::unique_lock<std::mutex> lk(g_sub_mu);
             g_sub_cv.wait(lk, [] { return !g_sub_jobs.empty(); });
-            job = g_sub_jobs.front();
+            batch.push_back(g_sub_jobs.front());
             g_sub_jobs.pop_front();
             g_sub_busy = true;
         }
-        submit_job_now(job);
+        if (batching && batchable(batch[0])) {
+            while (!ahead.empty() && finished(ahead.front())) ahead.pop_front();
+            if (ahead.size() >= 2) {
+                const std::uint64_t t0 = host_clock_monotonic_ns();
+                g_batch_holds.fetch_add(1, std::memory_order_relaxed);
+                while (ahead.size() >= 2 && host_clock_monotonic_ns() - t0 < 2000000) {
+                    vkWaitForFences(g.device, 1, &ahead.front().second, VK_TRUE, 100000);  // 0.1 ms at a time
+                    while (!ahead.empty() && finished(ahead.front())) ahead.pop_front();
+                }
+                g_batch_hold_ns.fetch_add(host_clock_monotonic_ns() - t0, std::memory_order_relaxed);
+            }
+            std::lock_guard<std::mutex> lk(g_sub_mu);
+            std::uint32_t cmds = batch[0].ncmds;
+            while (!g_sub_jobs.empty() && batch.size() < 12 && batchable(g_sub_jobs.front()) && !g_sub_jobs.front().wait &&
+                   cmds + g_sub_jobs.front().ncmds <= 32) {
+                cmds += g_sub_jobs.front().ncmds;
+                batch.push_back(g_sub_jobs.front());
+                g_sub_jobs.pop_front();
+            }
+        }
+        submit_batch_now(batch);
+        if (batchable(batch.back())) ahead.emplace_back(batch.back().serial, batch.back().fence);
+        while (ahead.size() > 8) ahead.pop_front();
         std::lock_guard<std::mutex> lk(g_sub_mu);
         g_sub_busy = false;
-        g_sub_submitted.store(job.ticket, std::memory_order_release);
+        g_sub_submitted.store(batch.back().ticket, std::memory_order_release);
         g_sub_idle.notify_all();  // a drain, or a wait for this ticket
     }
 }
@@ -3901,8 +4023,10 @@ void retire_slot_locked(int k) {
     const auto t0 = std::chrono::steady_clock::now();
     g.wait_started_ns.store(static_cast<std::uint64_t>(t0.time_since_epoch().count()), std::memory_order_relaxed);
     g.waiting_slot.store(k, std::memory_order_relaxed);
-    const VkResult r = vkWaitForFences(g.device, 1, &sl.fence, VK_TRUE, 10000000000ull);
+    const VkFence cover = slot_fence(sl);  // test7c: its own, or the batch's (BBHOST_SUBMIT_BATCH)
+    const VkResult r = cover ? vkWaitForFences(g.device, 1, &cover, VK_TRUE, 10000000000ull) : VK_SUCCESS;
     g.waiting_slot.store(-1, std::memory_order_relaxed);
+    if (r == VK_SUCCESS) g_completed_atomic.store(std::max(g_completed_atomic.load(std::memory_order_relaxed), sl.serial + 1), std::memory_order_release);
     const auto fence_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
     g.gpu_us.fetch_add(fence_us);
     bump(g_stream_stats.fence_ns, static_cast<std::uint64_t>(fence_us) * 1000);
@@ -4758,6 +4882,7 @@ __attribute__((noinline)) void submit_locked() {
         g_sub_handover_ns[k].store(host_clock_monotonic_ns(), std::memory_order_relaxed);
         g_sub_recorded_ns[k].store(0, std::memory_order_relaxed);
         g_sub_starved[k].store(0, std::memory_order_relaxed);  // submit_job_now sets it
+        g_fence_owner[k].store(cur.serial, std::memory_order_relaxed);  // its own fence, unless bb-submit merges it
         t_flush_site = nullptr;
     }
     textures_before_submit();  // the staging spans its copies read are filled
@@ -4834,6 +4959,22 @@ __attribute__((noinline)) void flush_locked() {
     g_cp_flushes.fetch_add(1, std::memory_order_relaxed);
 }
 
+// test7c: the fence that signals once slot `sl`'s submission has run: its
+// own, or that of the later job whose vkQueueSubmit it went in with
+// (BBHOST_SUBMIT_BATCH); null when that one has retired already (done).
+// Slots retire in order, so the later one is still in its slot while this
+// one is in flight. Under g.mu, after the submission was published.
+VkFence slot_fence(const Gpu::Slot& sl) {
+    const std::uint64_t o = g_fence_owner[sl.serial % kSubRing].load(std::memory_order_acquire);
+    if (o <= sl.serial) return sl.fence;
+    const Gpu::Slot& os = g.slots[o % static_cast<std::uint64_t>(g.slot_count)];
+    return os.in_flight && os.serial == o ? os.fence : VK_NULL_HANDLE;
+}
+bool slot_fence_signaled(const Gpu::Slot& sl) {
+    const VkFence f = slot_fence(sl);
+    return !f || vkGetFenceStatus(g.device, f) == VK_SUCCESS;
+}
+
 // test7: a game submission's record for the idle report (gpu_busy.cpp).
 bool submit_record(std::uint64_t serial, void** site) {
     const std::uint64_t k = serial % kSubRing;
@@ -4855,6 +4996,10 @@ SubmitLatencyTotals submit_latency_totals() {
     t.flushes = g_cp_flushes.load(std::memory_order_relaxed);
     t.flush_ns = g_cp_flush_ns.load(std::memory_order_relaxed);
     t.splits = g_submit_splits.load(std::memory_order_relaxed);
+    t.batch_submits = g_batch_submits.load(std::memory_order_relaxed);
+    t.batch_jobs = g_batch_jobs.load(std::memory_order_relaxed);
+    t.batch_holds = g_batch_holds.load(std::memory_order_relaxed);
+    t.batch_hold_ns = g_batch_hold_ns.load(std::memory_order_relaxed);
     return t;
 }
 
@@ -4882,7 +5027,8 @@ void submit_split_point() {
     const Gpu::Slot& sl = g.slots[prev % static_cast<std::uint64_t>(g.slot_count)];
     if (sl.in_flight && sl.serial == prev) {
         if (stream_submitted_serial() <= prev) return;  // not even on the queue yet: the recorder is behind, not the GPU
-        if (vkGetFenceStatus(g.device, sl.fence) != VK_SUCCESS) return;  // the GPU still has work
+        const VkFence cover = slot_fence(sl);
+        if (cover && vkGetFenceStatus(g.device, cover) != VK_SUCCESS) return;  // the GPU still has work
     }
     submit_locked();
     g_submit_splits.fetch_add(1, std::memory_order_relaxed);
@@ -4894,7 +5040,7 @@ void wait_submission_locked(std::uint64_t serial) {
     if (!sl.in_flight || sl.serial != serial) return;  // retired, and its slot taken again
     stream_wait_submitted(serial);                      // its fence has gone to the queue
     const auto t0 = std::chrono::steady_clock::now();
-    vkWaitForFences(g.device, 1, &sl.fence, VK_TRUE, 10000000000ull);
+    if (const VkFence cover = slot_fence(sl)) vkWaitForFences(g.device, 1, &cover, VK_TRUE, 10000000000ull);
     g.gpu_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
 }
 
@@ -6390,7 +6536,7 @@ std::uint64_t host_gpu_submissions_completed() {
     std::uint64_t done = g.completed_submits;
     for (const Gpu::Slot& sl : g.slots) {
         // Only a fence already submitted (bb-submit may be submitting it now).
-        if (sl.in_flight && sl.serial + 1 > done && sl.serial < stream_submitted_serial() && vkGetFenceStatus(g.device, sl.fence) == VK_SUCCESS) {
+        if (sl.in_flight && sl.serial + 1 > done && sl.serial < stream_submitted_serial() && slot_fence_signaled(sl)) {
             done = sl.serial + 1;
         }
     }

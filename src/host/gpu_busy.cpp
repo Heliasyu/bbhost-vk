@@ -484,6 +484,12 @@ std::string host_gpu_idle_report() {
                   static_cast<double>(lat.flushes - prev.flushes) * per_s, static_cast<double>(lat.flush_ns - prev.flush_ns) / 1e6 * per_s,
                   static_cast<double>(lat.splits - prev.splits) * per_s);
     r += buf;
+    // test7c, BBHOST_SUBMIT_BATCH: merged submissions, the jobs in them, and the holds.
+    std::snprintf(buf, sizeof(buf), "; batched %.0f jobs/s into %.0f submits/s, held %.0f/s for %.2f ms/s",
+                  static_cast<double>(lat.batch_jobs - prev.batch_jobs) * per_s, static_cast<double>(lat.batch_submits - prev.batch_submits) * per_s,
+                  static_cast<double>(lat.batch_holds - prev.batch_holds) * per_s,
+                  static_cast<double>(lat.batch_hold_ns - prev.batch_hold_ns) / 1e6 * per_s);
+    r += buf;
     // The late gaps by what ended the command buffer before them, the top
     // eight, as offsets in bbhost's image (tools/gpu_gaps.py --idle names them).
     std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });

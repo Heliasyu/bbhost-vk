@@ -910,7 +910,13 @@ struct SubmitLatencyTotals {
     std::uint64_t record_max = 0, queue_max = 0, submit_max = 0;  // since the last call
     std::uint64_t flushes = 0, flush_ns = 0;  // flush_locked: the command processor waiting for the GPU
     std::uint64_t splits = 0;                 // BBHOST_SUBMIT_SPLIT submissions
+    std::uint64_t batch_submits = 0, batch_jobs = 0;   // BBHOST_SUBMIT_BATCH: merged vkQueueSubmits and the jobs in them
+    std::uint64_t batch_holds = 0, batch_hold_ns = 0;  // jobs held while the GPU had two ahead, and for how long
 };
+// test7c: the fence covering a slot's submission (its own, or its batch's;
+// null once that has retired), and whether it has signalled. Under g.mu.
+VkFence slot_fence(const Gpu::Slot& sl);
+bool slot_fence_signaled(const Gpu::Slot& sl);
 SubmitLatencyTotals submit_latency_totals();
 void submit_split_point();  // a draw's start, outside g.mu (BBHOST_SUBMIT_SPLIT)
 struct DrawCall;

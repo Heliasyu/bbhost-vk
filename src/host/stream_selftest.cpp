@@ -1147,6 +1147,12 @@ int host_gpu_stream_selftest(int rounds) {
     host_log("%s", recorder_report().c_str());
     const std::uint64_t view_faults = g_pass_view_faults.load();
     if (view_faults) host_log("stream selftest: pass_view_locked faults %llu", static_cast<unsigned long long>(view_faults));
+    {
+        const SubmitLatencyTotals lt = submit_latency_totals();  // BBHOST_SUBMIT_BATCH: what was merged
+        host_log("stream selftest: submit batching merged %llu jobs into %llu submissions; %llu holds, %.2f ms",
+                 static_cast<unsigned long long>(lt.batch_jobs), static_cast<unsigned long long>(lt.batch_submits),
+                 static_cast<unsigned long long>(lt.batch_holds), static_cast<double>(lt.batch_hold_ns) / 1e6);
+    }
     const bool pass = g.ok && !failed_rounds && !validation && !view_faults;
     host_log("stream selftest: %s", pass ? "pass" : "FAIL");
     return pass ? 0 : 1;
