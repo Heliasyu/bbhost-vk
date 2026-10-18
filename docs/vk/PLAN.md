@@ -131,6 +131,7 @@ Goal: anyone without an RDNA4 card gets a good temporal upscaler too. All of the
 - **FSR 4 INT8 (Steam Deck / RDNA2-3 compatible):** the INT8 path of FSR 4, built from the user's own DLL like Phase 4, for GPUs without FP8 (Steam Deck, RX 6000/7000). Needs its own performance presets, since INT8 costs more per frame on older cards.
 - **DLSS (NVIDIA RTX):** through NVIDIA's Vulkan DLSS SDK. The SDK's license terms decide whether the runtime can ship with the project or has to be supplied by the user; checked before any code is written.
 - **XeSS (Intel Arc, plus a fallback path for other GPUs):** through Intel's XeSS SDK, which has a Vulkan backend.
+- If a license forbids shipping a runtime, it is user-provided instead: the Upscaling tab gets a "locate file" field for it, just like the FSR 4.1.1 DLL builder, and nothing proprietary is ever committed.
 - The Upscaling tab and F10 list only what the current GPU supports, with FSR 3.1 always available as the fallback.
 - **Milestone:** each upscaler matches FSR 3.1's image stability with no new ghosting, and switching between them in F10 works without a restart or crash.
 - **Testing:** the user's RX 9070 XT covers FSR 4 INT8 and XeSS. DLSS and the Steam Deck need testers with that hardware (community testers, or a Steam Deck if one is available).
@@ -160,5 +161,5 @@ Goal: anyone without an RDNA4 card gets a good temporal upscaler too. All of the
 - **Upstream updates:** each new bbhost release needs the patch set reapplied.
 - **Legal:** FSR 4.1.1 assets have to be built from your own DLL and can't be shared.
 - **Online play:** unaffected, since all of this is display-only.
-- **DLSS licensing:** NVIDIA's SDK terms may limit what can ship in a GPLv3 project; checked first in Phase 7.
+- **DLSS/XeSS licensing:** NVIDIA's and Intel's SDK terms may limit what can ship in a GPLv3 project; checked first in Phase 7. Fallback (user-approved): the runtime files (DLL or .so) are user-provided, like the FSR 4.1.1 DLL, loaded at runtime and never bundled or committed.
 - **Windows port:** bbhost's host layer is Linux-specific, so Phase 8 is a real porting job, not just a recompile; its size gets estimated once Phase 7 is done.
