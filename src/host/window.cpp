@@ -4,6 +4,7 @@
 
 #include "core/config.h"
 
+#include "engine/frame_rate.h"
 #include "engine/graphics_patch.h"
 #include "engine/menu_pointer.h"
 #include "engine/mouse_camera_step.h"
@@ -20,6 +21,7 @@
 #include "host/fsr3_pass.h"
 #include "host/gpu.h"
 #include "host/temporal_inputs.h"
+#include "host/temporal/present_pacer.h"
 #include "host/upscaler.h"
 #include "log.h"
 #if !defined(_WIN32)
@@ -34,6 +36,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -703,6 +706,93 @@ bool vk_pass_timer_frame_begin(VkCommandBuffer cmd) {
 std::mutex g_fps_mu;
 std::deque<std::chrono::steady_clock::time_point> g_present_times;  // the last second's presents
 
+// test11, BBHOST_PRESENT_PACE (host/temporal/present_pacer.h): on unless =0,
+// at the game's fixed pace. BBHOST_AB_SECONDS=<s> (with BBHOST_AB_TOGGLE unset
+// or "pace") turns it off and on every s seconds and logs each half's present
+// intervals - what MangoHud times - as `ab: present pace` lines.
+const bool g_pace_mode = [] {
+    const char* e = std::getenv("BBHOST_PRESENT_PACE");
+    return !(e && e[0] == '0');
+}();
+bool g_pace_on = g_pace_mode;
+temporal::PresentPacer g_pacer;
+
+std::int64_t pace_now_ns() {
+    return static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// The present about to go: held to its slot. Returns when it may go.
+std::int64_t pace_present() {
+    const int fps = frame_rate_game_fps();  // each time: the pace is chosen when the game starts, after the first presents
+    const std::int64_t period = fps >= 30 ? static_cast<std::int64_t>(1000000000.0 / fps + 0.5) : 0;
+    static bool said = false;
+    if (!said && period) {
+        said = true;
+        host_log("present: pacing %s (BBHOST_PRESENT_PACE%s): presents held to an even %.3f ms grid, a late frame at once",
+                 g_pace_mode && period ? "on" : "off", g_pace_mode ? "=0 turns it off" : "=0", static_cast<double>(period) / 1e6);
+    }
+    std::int64_t now = pace_now_ns();
+    g_pacer.set_period(g_pace_on && period ? period : 0);
+    const std::int64_t w = g_pacer.wait_ns(now);
+    if (w > 0) {
+        const std::int64_t until = now + w;
+        if (w > 400000) std::this_thread::sleep_for(std::chrono::nanoseconds(w - 300000));
+        while ((now = pace_now_ns()) < until) {
+#if defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    g_pacer.presented(now);
+    return now;
+}
+
+// The A/B halves' present intervals.
+void pace_ab_note(std::int64_t t) {
+    static const long ab_s = [] {
+        const char* e = std::getenv("BBHOST_AB_SECONDS");
+        const char* w = std::getenv("BBHOST_AB_TOGGLE");
+        const bool pace = !w || !*w || std::strcmp(w, "pace") == 0;
+        return e && pace ? std::strtol(e, nullptr, 10) : 0L;
+    }();
+    if (ab_s <= 0 || !g_pace_mode) return;
+    static std::int64_t last = 0, start = 0;
+    static std::vector<float> ms;
+    if (!start) start = t;
+    if (last && t - last < 1000000000) ms.push_back(static_cast<float>(static_cast<double>(t - last) / 1e6));
+    last = t;
+    if (t - start < static_cast<std::int64_t>(ab_s) * 1000000000) return;
+    if (!ms.empty()) {
+        double sum = 0, mx = 0;
+        unsigned long long o833 = 0, o842 = 0, o85 = 0, o9 = 0, o12 = 0;
+        for (float v : ms) {
+            sum += v;
+            mx = std::max(mx, static_cast<double>(v));
+            o833 += v > 8.333f;
+            o842 += v > 8.42f;
+            o85 += v > 8.5f;
+            o9 += v > 9.0f;
+            o12 += v > 12.0f;
+        }
+        std::vector<float> sorted = ms;
+        std::sort(sorted.begin(), sorted.end());
+        const double p99 = sorted[std::min(sorted.size() - 1, static_cast<std::size_t>(sorted.size() * 0.99))];
+        const double p999 = sorted[std::min(sorted.size() - 1, static_cast<std::size_t>(sorted.size() * 0.999))];
+        host_log("ab: present pace %s for %.0f s: %zu frames, %.1f fps, %.3f ms average, 1%% low %.1f, 0.1%% low %.1f, max %.1f ms, "
+                 "%llu over 8.33 ms, %llu over 8.42 ms, %llu over 8.5 ms, %llu over 9 ms, %llu over 12 ms; paced: %llu waited (%.0f us avg), %llu late, %llu restarts",
+                 g_pace_on ? "on" : "off", static_cast<double>(t - start) / 1e9, ms.size(), 1000.0 * static_cast<double>(ms.size()) / sum,
+                 sum / static_cast<double>(ms.size()), 1000.0 / p99, 1000.0 / p999, mx, o833, o842, o85, o9, o12,
+                 static_cast<unsigned long long>(g_pacer.waited()),
+                 g_pacer.waited() ? static_cast<double>(g_pacer.wait_total_ns()) / 1e3 / static_cast<double>(g_pacer.waited()) : 0.0,
+                 static_cast<unsigned long long>(g_pacer.late()), static_cast<unsigned long long>(g_pacer.reanchors()));
+    }
+    ms.clear();
+    start = t;
+    g_pace_on = !g_pace_on;
+    g_pacer = temporal::PresentPacer{};
+}
+
 void note_present(std::chrono::steady_clock::time_point t) {
     std::lock_guard<std::mutex> lock(g_fps_mu);
     g_present_times.push_back(t);
@@ -1105,6 +1195,9 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     // in; what the game queued since need not be), and with no submission
     // thread under the renderer's lock too, which is what orders the command
     // processor's own submits there.
+    // test11: the present held to its slot on the pace's grid, on no lock
+    // (BBHOST_PRESENT_PACE; the A/B halves' intervals logged from here).
+    pace_ab_note(pace_present());
     bool queue_held = false;
     if (!g_vk.present_queue) {
         if (!ticket) {
