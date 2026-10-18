@@ -707,7 +707,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::TextDisabled("%s", updater::status().c_str());
             if (const std::string d = updater::detail(); !d.empty()) ImGui::TextDisabled("%s", d.c_str());
         }
-        path_row("GitHub token file (only while the releases are private)", kToken, false, "");
+        path_row("GitHub token file (optional; the update check works without one)", kToken, false, "");
 
         }
         if (game_tab) ImGui::EndChild();
