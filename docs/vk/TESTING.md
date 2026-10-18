@@ -87,6 +87,11 @@ show a short notification when `notify-send` exists.
   overlay - to `BBHOST_VK_CAPTURE_DIR` (default `logs/captures`) as
   `frame-<date>-<time>-<ms>-<upscaler>.png`. Without the variable Shift+F12
   is plain F12 (the game's render targets, pre-upscale), as in stock bbhost.
+- **Scene split** (Phase 1): `BBHOST_SCENE_SPLIT=0` never splits the scene
+  from the output (Upscaling quality then changes nothing, as in Phase 0).
+  The log's `scene-split:` lines say the render size, the scale pass and, at
+  start, every patched site's original bytes; `heap:` lines come before and
+  after each size change, `yebis: restart N` with each YEBIS restart.
 
 ## Phase 0 test (5 min)
 1. Install the Phase 0 `bbhost.bin` into the game folder (keep the old one:
@@ -106,3 +111,49 @@ show a short notification when `notify-send` exists.
 Pass: every option is in `options-after.toml` with the value last set; the
 log has `upscaler:` lines for each change and no new errors; the picture looks
 identical to stock (Phase 0 changes nothing on screen).
+
+## Pending combined test session (Phase 0 + Phase 1, ~20 min)
+The Phase 0 and Phase 1 checks in one sitting, with the Phase 1 binary
+(`/workspace/bbhost-vk-builds/phase1/bbhost.bin` on the build box; check its
+SHA-256 against `bbhost.bin.sha256`). Install it over `bbhost.bin` (keep the
+old one: `mv bbhost.bin bbhost.bin.vk0` first). No `--capture` for part A.
+
+### A. Phase 0 checks (5 min): `bbtest start p0`
+1. In the setup window: set **Upscaler**, **Upscaling quality**,
+   **Upscaler sharpness** and the two debug checkboxes to non-default
+   values, then back to **Upscaler FSR 1** (or Off) and **Native AA**; Play.
+2. In game, F10: flip every **UPSCALING** row (Upscaler through all four,
+   Quality through all five, Sharpness, both debug toggles), turning on
+   **Show Upscaler GPU Time** once with the FPS counter on. End on
+   **FSR 1** (then once on **Off**) with **Native AA**.
+3. Load your save, look around a minute, quit from the menu.
+
+Pass: every option is in `options-after.toml` with its last value; `upscaler:`
+lines for each change, no new errors; with Off / FSR 1 at Native AA the
+picture looks exactly like stock (the log says `scene-split: render size ... (not
+split - the game's own bytes at every site)`, no `scale pass` lines).
+
+### B. Phase 1 checks (15 min): `bbtest start p1` (add `--record` if you can)
+1. Setup window: **Upscaler FSR 1**, **Upscaling quality Quality (67%)**,
+   your usual Resolution. Play, load your save.
+2. Visit each spot below. At each: look for a few seconds, then F10 ->
+   Upscaling quality **Native AA**, wait ~2 s (the change waits for the menu
+   to settle), close F10, look; then back to **Quality (67%)**, look again.
+   - the Hunter's Dream (outdoors, the doll, the workshop);
+   - a lamp menu (the lamp's own menu and its sub-menus);
+   - the inventory / item screens (item icons, descriptions);
+   - a cutscene (any that you can trigger: a boss intro, or the Dream's
+     first visit);
+   - an area with messages and bloodstains (read one of each).
+3. `bbtest mark <what>` whenever something looks wrong: UI blurry at 67%,
+   a black or grey band or border, garbage in a menu or cutscene, blocky
+   effects (fog, bloom, depth of field), icons missing or wrong-sized,
+   message text unreadable, a hitch on the toggle.
+4. Quit from the menu.
+
+Pass: at 67% the 3D scene is softer but the UI, text and icons are as sharp as
+at Native; nothing is corrupt; no crash. In the log: one `scene-split: render
+size` line per toggle, `the graphics manager's scene is ...` without
+`not the ... asked for`, `scale pass ... drawn`, `heap:` with free space left,
+and `yebis: restart` lines only next to size changes (none while just playing). If 67% shows a band or corruption,
+run once with `BBHOST_SCENE_SPLIT=0` to confirm it is the split.
