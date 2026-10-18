@@ -146,7 +146,7 @@ Goal: anyone without an RDNA4 card gets a good temporal upscaler too. All of the
 - **Testing:** the user's RX 9070 XT covers FSR 4 INT8 and XeSS. DLSS and the Steam Deck need testers with that hardware (community testers, or a Steam Deck if one is available).
 
 ## Phase 8: Windows release (only once Phase 7 is working)
-- bbhost is Linux-only today, so this means porting the host's platform layer (windowing and input are already SDL3, but memory mapping, threading, file paths and the PS4 runtime pieces are Linux-specific) to Windows.
+- Correction (2026-10-18): upstream bbhost already ships a Windows build (cross-compiled in CI, `tools/ci_windows.sh`, `.github/workflows/release.yml`), so this is not a port. The work is making bbhost-vk's own additions (upscalers, FSR 4.1.1 builder, launcher, bbtest equivalents) build and work on Windows.
 - Native Windows builds of the same Vulkan renderer and upscalers; FSR 4 there can use the user's DLL directly instead of the captured-shader path.
 - A Windows CI build and a Windows test pass.
 - **Milestone:** the Windows build matches the Linux build in features, image quality and performance.
@@ -186,4 +186,4 @@ The PS4 game only has DualShock 4 rumble, so haptic data has to be made, not con
 - **Legal:** FSR 4.1.1 assets have to be built from your own DLL and can't be shared.
 - **Online play:** unaffected, since all of this is display-only.
 - **DLSS/XeSS licensing:** NVIDIA's and Intel's SDK terms may limit what can ship in a GPLv3 project; checked first in Phase 7. Fallback (user-approved): the runtime files (DLL or .so) are user-provided, like the FSR 4.1.1 DLL, loaded at runtime and never bundled or committed.
-- **Windows port:** bbhost's host layer is Linux-specific, so Phase 8 is a real porting job, not just a recompile; its size gets estimated once Phase 7 is done.
+- **Windows build:** upstream already builds for Windows; the risk is only in bbhost-vk's own additions (Linux-only paths, the FSR 4 capture tool, bbtest).
