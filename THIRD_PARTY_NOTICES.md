@@ -21,6 +21,27 @@ its own license file there), bbhost-vk links:
 - MIT is GPL-3.0-compatible; the Linux package (`tools/package_linux.sh`)
   ships these notices under `licenses/`.
 
+## Ideas and facts used, no code copied (Phase 1)
+The scene/UI split (`src/engine/scene_split*`) is bbhost-vk's own code. It
+uses facts and ideas from these projects, credited here and in
+docs/vk/DEVLOG.md; none of their code is in bbhost-vk:
+- **Kyo's "Decoupled UI" patches** for Bloodborne 1.09, as published in
+  [shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)
+  (`PATCHES/Bloodborne.xml`): the list of eboot sites that size the scene
+  separately from the output. bbhost-vk re-encodes them for any size and
+  replaces their code caves with its own stubs; `tests/scene_split_test.cpp`
+  embeds his published byte values to check the encoder.
+- **IFreemz**, [shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR)
+  (GPL-2.0): the identification of the scene-to-UI scale pass
+  (`HdrSceneCopy`, pixel shader `ccbf44a6`).
+- **bbport**, [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc)
+  (GPL-2.0), and **Supermedo**'s Windows build of it,
+  [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc)
+  (GPL-2.0): render-size alignment and changing sizes at a display-pass
+  boundary.
+- **Awakenchan**, [BloodBorneButPc](https://github.com/Awakenchan/BloodBorneButPc)
+  (GPL-2.0): how scene size versus output size affects the game's memory.
+
 ## Not distributed
 AMD's FSR 4.1.1 (`amd_fidelityfx_upscaler_dx12.dll`) and anything built from
 it are never part of this repository or its packages (docs/vk/PLAN.md,

@@ -23,6 +23,7 @@ No game files are included or supported here. Online play uses bbhost's servers 
 - [droogie/bbhost](https://github.com/droogie/bbhost): everything this fork builds on.
 - [FireBurn/FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) (MIT): AMD FidelityFX FSR 3.1 on native Vulkan, a submodule at `third_party/FSR-Vulkan`.
 - AMD FidelityFX SDK (MIT), carried inside FSR-Vulkan.
+- Kyo's Decoupled UI patches (via [shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)), [IFreemz](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR), [bbport](https://github.com/deadinside28/bloodborne_pc), [Supermedo](https://github.com/Supermedo/bloodborne_pc) and [Awakenchan](https://github.com/Awakenchan/BloodBorneButPc): the findings the scene/UI split builds on (no code copied; THIRD_PARTY_NOTICES.md).
 
 ## License
 GPL-3.0, same as bbhost. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
