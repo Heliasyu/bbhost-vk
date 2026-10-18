@@ -6,6 +6,20 @@ Mockup of the new Upscaling page: [mock/upscaling-tabs.png](mock/upscaling-tabs.
 
 References: Supermedo's Windows bbport launcher (visual style only), bbport (deadinside28, GPL-2.0+), IFreemz shadPS4 fork (GPL-2.0+), FireBurn/FSR-Vulkan (MIT). Their methods carry over; their code has to be adapted, because bbhost has its own renderer.
 
+## Work order (quickest first, within dependencies)
+1. Phase 0: Groundwork (1-2 days)
+2. Phase 1: Scene/UI split (3-5 days)
+3. Phase 2: Motion vectors and jitter (4-7 days)
+4. Phase 3: FSR 3.1 (3-5 days), which ends with an early playable FSR 3.1 build
+5. Phase L: Launcher overhaul (5-8 days)
+6. Phase 4: FSR 4.1.1 (5-8 days)
+7. Phase 5: Optimization (4-7 days)
+8. Phase 6: Polish and release (3-5 days)
+
+Phases 1-3 have to go in this order because each one needs the one before it. The launcher could start any time, but it goes after FSR 3.1 so its Upscaling tab controls a working upscaler.
+
+---
+
 ## How your test sessions work
 
 Every phase ends with a short test you play on your PC while I monitor it from my end. I'll set up a small `bbtest` command for this:
