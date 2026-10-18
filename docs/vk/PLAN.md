@@ -19,7 +19,7 @@ References: Supermedo's Windows bbport launcher (visual style only), bbport (dea
 8. Phase 6: Polish and release (3-5 days), the first working release
 9. Phase 7: More upscalers for non-RDNA4 GPUs (after the first working release)
 10. Phase 8: Windows release (only once Phase 7 is working)
-11. Phase H (optional, after the first working release): DualSense HD haptics and adaptive triggers
+11. Phase H (MAYBE, not committed; decide after the first working release): DualSense HD haptics and adaptive triggers
 
 Phases 1-3 have to go in this order because each one needs the one before it. The launcher could start any time, but it goes after FSR 3.1 so its Upscaling tab controls a working upscaler.
 
@@ -144,7 +144,8 @@ Goal: anyone without an RDNA4 card gets a good temporal upscaler too. All of the
 - **Milestone:** the Windows build matches the Linux build in features, image quality and performance.
 - **Testing:** the user, or community testers, on a Windows install.
 
-## Phase H: DualSense HD haptics and adaptive triggers (optional, after the first working release)
+## Phase H (MAYBE): DualSense HD haptics and adaptive triggers
+**Status: maybe.** Not part of the committed plan; the user decides after the first working release whether to do it.
 The PS4 game only has DualShock 4 rumble, so haptic data has to be made, not converted 1:1. Can slot in any time after Phase 6; it doesn't touch rendering.
 1. **Better rumble:** translate the game's rumble motor values into DualSense haptic waveforms (quickest).
 2. **Audio-driven haptics:** pick game sound events (gunshots, parries, weapon impacts, footsteps, rain) and route them as haptic waveforms, the way PC ports like FF7 Rebirth do. Closest to the "HD haptics" feel.
