@@ -1,0 +1,244 @@
+# bbhost-vk: applied at configure time to copies of these FSR-Vulkan files in the build tree (cmake/fsr_vulkan.cmake);
+# the submodule itself stays at its pinned commit, unmodified. Recycles the FSR 3.1 backend bridge's per-dispatch
+# constant buffers (a vkAllocateMemory each) and descriptor pools instead of destroying and remaking them.
+# Against FireBurn/FSR-Vulkan c64f093. MIT, as the files it changes. Off: -DBBHOST_FSR_VULKAN_PATCHES=OFF.
+diff -ru a/include/ffx_vk_fsr3_3_1_5_descriptor.h b/include/ffx_vk_fsr3_3_1_5_descriptor.h
+--- a/include/ffx_vk_fsr3_3_1_5_descriptor.h	2026-10-18 02:38:59.204284497 -0500
++++ b/include/ffx_vk_fsr3_3_1_5_descriptor.h	2026-10-18 02:43:12.084284497 -0500
+@@ -35,6 +35,15 @@
+     uint32_t resourceCount,
+     FfxVkFsr3_3_1_5DescriptorSet* outDescriptorSet);
+ 
++/* bbhost-vk patch: as above, from `reusePool` (made earlier for the same
++ * pipeline layout, reset since) when it is not VK_NULL_HANDLE. */
++FfxVkPortableResult ffxVkFsr3_3_1_5CreateDescriptorSetInPool(
++    const FfxVkFsr3_3_1_5Pipeline* pipeline,
++    const FfxVkFsr3_3_1_5DescriptorResource* resources,
++    uint32_t resourceCount,
++    VkDescriptorPool reusePool,
++    FfxVkFsr3_3_1_5DescriptorSet* outDescriptorSet);
++
+ void ffxVkFsr3_3_1_5DestroyDescriptorSet(FfxVkFsr3_3_1_5DescriptorSet* descriptorSet);
+ 
+ #if defined(__cplusplus)
+diff -ru a/src/ffx_vk_fsr3_3_1_5_bridge.cpp b/src/ffx_vk_fsr3_3_1_5_bridge.cpp
+--- a/src/ffx_vk_fsr3_3_1_5_bridge.cpp	2026-10-18 02:38:59.204284497 -0500
++++ b/src/ffx_vk_fsr3_3_1_5_bridge.cpp	2026-10-18 02:43:25.944284497 -0500
+@@ -53,11 +53,14 @@
+     VkDeviceMemory memory = VK_NULL_HANDLE;
+     VkDeviceSize size = 0u;
+     uint64_t frameId = 0u;
++    VkDeviceSize capacity = 0u;  /* bbhost-vk patch: the buffer's size, for reuse */
++    bool coherent = true;        /* bbhost-vk patch: its memory needs no flush */
+ };
+ 
+ struct BridgeDescriptorSet {
+     FfxVkFsr3_3_1_5DescriptorSet descriptorSet{};
+     uint64_t frameId = 0u;
++    VkDescriptorSetLayout layout = VK_NULL_HANDLE;  /* bbhost-vk patch: its pool's key for reuse */
+ };
+ 
+ } // namespace
+@@ -74,6 +77,12 @@
+      * will recycle these against a caller fence; retaining is deliberately
+      * conservative and makes this first native graph recorder GPU-safe. */
+     std::vector<std::unique_ptr<BridgeDescriptorSet>> descriptorSets;
++    /* bbhost-vk patch (cmake/patches/fsr-vulkan-recycle.patch): what the
++     * retire gives back is kept for the next frames instead of destroyed -
++     * constant buffers (one vkAllocateMemory each, a dozen a dispatch) and
++     * descriptor pools (reset, by the layout they were made for). */
++    std::vector<std::unique_ptr<BridgeConstantBuffer>> freeConstantBuffers;
++    std::vector<std::pair<VkDescriptorSetLayout, VkDescriptorPool>> freePools;
+     std::vector<FfxGpuJobDescription> jobs;
+     std::vector<int32_t> registeredImportedResources;
+     uint64_t activeFrameId = 0u;
+@@ -484,10 +493,33 @@
+         return false;
+ 
+     std::unique_ptr<BridgeDescriptorSet> descriptorSet(new (std::nothrow) BridgeDescriptorSet);
+-    if (!descriptorSet || ffxVkFsr3_3_1_5CreateDescriptorSet(
+-            &pipeline->pipeline, descriptorResources, descriptorCount,
+-            &descriptorSet->descriptorSet) != FFX_VK_PORTABLE_OK)
++    if (!descriptorSet)
+         return false;
++    /* bbhost-vk patch: a reset pool made for this layout, when one is free. */
++    const VkDescriptorSetLayout layout = pipeline->pipeline.descriptorSetLayout;
++    VkDescriptorPool reusePool = VK_NULL_HANDLE;
++    {
++        std::lock_guard<std::mutex> lock(bridge->mutex);
++        auto& pools = bridge->freePools;
++        for (size_t i = pools.size(); i-- > 0u;) {
++            if (pools[i].first == layout) {
++                reusePool = pools[i].second;
++                pools[i] = pools.back();
++                pools.pop_back();
++                break;
++            }
++        }
++    }
++    FfxVkPortableResult made = ffxVkFsr3_3_1_5CreateDescriptorSetInPool(
++        &pipeline->pipeline, descriptorResources, descriptorCount, reusePool,
++        &descriptorSet->descriptorSet);
++    if (made != FFX_VK_PORTABLE_OK && reusePool != VK_NULL_HANDLE)  /* that pool is gone: a new one, as before */
++        made = ffxVkFsr3_3_1_5CreateDescriptorSetInPool(
++            &pipeline->pipeline, descriptorResources, descriptorCount, VK_NULL_HANDLE,
++            &descriptorSet->descriptorSet);
++    if (made != FFX_VK_PORTABLE_OK)
++        return false;
++    descriptorSet->layout = layout;
+     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline.pipeline);
+     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                             pipeline->pipeline.pipelineLayout, 0u, 1u,
+@@ -612,6 +644,10 @@
+         destroy_constant_buffer(bridge, constantBuffer.get());
+     for (const std::unique_ptr<BridgeDescriptorSet>& descriptorSet : bridge->descriptorSets)
+         destroy_descriptor_set(descriptorSet.get());
++    for (const std::unique_ptr<BridgeConstantBuffer>& constantBuffer : bridge->freeConstantBuffers)
++        destroy_constant_buffer(bridge, constantBuffer.get());
++    for (const auto& pool : bridge->freePools)
++        vkDestroyDescriptorPool(bridge->device, pool.second, bridge->allocationCallbacks);
+     delete bridge;
+ }
+ 
+@@ -825,6 +861,48 @@
+         return static_cast<FfxErrorCode>(FFX_ERROR_INVALID_ARGUMENT);
+     if (!constantBuffer)
+         return static_cast<FfxErrorCode>(FFX_ERROR_OUT_OF_MEMORY);
++    {
++        /* bbhost-vk patch: a retired buffer large enough, rewritten. */
++        std::unique_ptr<BridgeConstantBuffer> reused;
++        {
++            std::lock_guard<std::mutex> lock(bridge->mutex);
++            auto& pool = bridge->freeConstantBuffers;
++            for (size_t i = 0; i < pool.size(); ++i) {
++                if (pool[i] && pool[i]->capacity >= size) {
++                    reused = std::move(pool[i]);
++                    pool[i] = std::move(pool.back());
++                    pool.pop_back();
++                    break;
++                }
++            }
++        }
++        if (reused) {
++            void* mapped = nullptr;
++            bool ok = vkMapMemory(bridge->device, reused->memory, 0u, VK_WHOLE_SIZE, 0u, &mapped) == VK_SUCCESS;
++            if (ok) {
++                std::memcpy(mapped, data, size);
++                if (!reused->coherent) {
++                    VkMappedMemoryRange range{};
++                    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++                    range.memory = reused->memory;
++                    range.size = VK_WHOLE_SIZE;
++                    ok = vkFlushMappedMemoryRanges(bridge->device, 1u, &range) == VK_SUCCESS;
++                }
++                vkUnmapMemory(bridge->device, reused->memory);
++            }
++            if (!ok) {
++                destroy_constant_buffer(bridge, reused.get());
++            } else {
++                reused->size = size;
++                reused->frameId = bridge->activeFrameId;
++                outConstantBuffer->num32BitEntries = size / sizeof(uint32_t);
++                outConstantBuffer->data = reinterpret_cast<uint32_t*>(reused.get());
++                std::lock_guard<std::mutex> lock(bridge->mutex);
++                bridge->constantBuffers.emplace_back(std::move(reused));
++                return FFX_OK;
++            }
++        }
++    }
+     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+     bufferInfo.size = size;
+     bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+@@ -855,6 +933,7 @@
+         vkGetPhysicalDeviceMemoryProperties(bridge->physicalDevice, &memoryProperties);
+         if ((memoryProperties.memoryTypes[allocationInfo.memoryTypeIndex].propertyFlags &
+              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0u) {
++            constantBuffer->coherent = false;
+             VkMappedMemoryRange range{};
+             range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+             range.memory = constantBuffer->memory;
+@@ -868,6 +947,7 @@
+     }
+     vkUnmapMemory(bridge->device, constantBuffer->memory);
+     constantBuffer->size = size;
++    constantBuffer->capacity = size;
+     constantBuffer->frameId = bridge->activeFrameId;
+     outConstantBuffer->num32BitEntries = size / sizeof(uint32_t);
+     outConstantBuffer->data = reinterpret_cast<uint32_t*>(constantBuffer.get());
+@@ -911,10 +991,37 @@
+                                std::make_move_iterator(bridge->constantBuffers.end()));
+         bridge->constantBuffers.erase(constantEnd, bridge->constantBuffers.end());
+     }
+-    for (const std::unique_ptr<BridgeDescriptorSet>& item : descriptorSets)
++    constexpr size_t kMaxFree = 512u;
++    for (const std::unique_ptr<BridgeDescriptorSet>& item : descriptorSets) {
++        if (!item)
++            continue;
++        const VkDescriptorPool pool = item->descriptorSet.descriptorPool;
++        bool kept = false;
++        if (pool != VK_NULL_HANDLE && item->layout != VK_NULL_HANDLE &&
++            vkResetDescriptorPool(bridge->device, pool, 0u) == VK_SUCCESS) {
++            std::lock_guard<std::mutex> lock(bridge->mutex);
++            if (bridge->freePools.size() < kMaxFree) {
++                bridge->freePools.emplace_back(item->layout, pool);
++                kept = true;
++            }
++        }
++        if (kept)
++            item->descriptorSet.descriptorPool = VK_NULL_HANDLE;
+         destroy_descriptor_set(item.get());
+-    for (const std::unique_ptr<BridgeConstantBuffer>& item : constantBuffers)
++    }
++    for (std::unique_ptr<BridgeConstantBuffer>& item : constantBuffers) {
++        if (!item)
++            continue;
++        {
++            std::lock_guard<std::mutex> lock(bridge->mutex);
++            if (item->capacity && bridge->freeConstantBuffers.size() < kMaxFree) {
++                item->frameId = 0u;
++                bridge->freeConstantBuffers.emplace_back(std::move(item));
++                continue;
++            }
++        }
+         destroy_constant_buffer(bridge, item.get());
++    }
+ }
+ 
+ extern "C" FfxErrorCode ffxVkFsr3_3_1_5BridgeCreateResource(
+diff -ru a/src/ffx_vk_fsr3_3_1_5_descriptor.c b/src/ffx_vk_fsr3_3_1_5_descriptor.c
+--- a/src/ffx_vk_fsr3_3_1_5_descriptor.c	2026-10-18 02:38:59.204284497 -0500
++++ b/src/ffx_vk_fsr3_3_1_5_descriptor.c	2026-10-18 02:43:12.084284497 -0500
+@@ -33,6 +33,20 @@
+     uint32_t resourceCount,
+     FfxVkFsr3_3_1_5DescriptorSet* outDescriptorSet)
+ {
++    return ffxVkFsr3_3_1_5CreateDescriptorSetInPool(pipeline, resources, resourceCount,
++                                                    VK_NULL_HANDLE, outDescriptorSet);
++}
++
++/* bbhost-vk patch (cmake/patches/fsr-vulkan-recycle.patch): the same, from a
++ * pool made earlier for this pipeline's layout and reset since, instead of a
++ * new pool per dispatch. VK_NULL_HANDLE makes one as before. */
++FfxVkPortableResult ffxVkFsr3_3_1_5CreateDescriptorSetInPool(
++    const FfxVkFsr3_3_1_5Pipeline* pipeline,
++    const FfxVkFsr3_3_1_5DescriptorResource* resources,
++    uint32_t resourceCount,
++    VkDescriptorPool reusePool,
++    FfxVkFsr3_3_1_5DescriptorSet* outDescriptorSet)
++{
+     VkDescriptorPoolSize poolSizes[5] = {0};
+     VkDescriptorImageInfo imageInfos[FFX_VK_FSR3_3_1_5_MAX_PIPELINE_BINDINGS] = {0};
+     VkDescriptorBufferInfo bufferInfos[FFX_VK_FSR3_3_1_5_MAX_PIPELINE_BINDINGS] = {0};
+@@ -149,8 +163,10 @@
+     poolInfo.maxSets = 1u;
+     poolInfo.poolSizeCount = poolCount;
+     poolInfo.pPoolSizes = poolSizes;
+-    if (vkCreateDescriptorPool(pipeline->device, &poolInfo, pipeline->allocationCallbacks,
+-                               &outDescriptorSet->descriptorPool) != VK_SUCCESS)
++    if (reusePool != VK_NULL_HANDLE)
++        outDescriptorSet->descriptorPool = reusePool;
++    else if (vkCreateDescriptorPool(pipeline->device, &poolInfo, pipeline->allocationCallbacks,
++                                    &outDescriptorSet->descriptorPool) != VK_SUCCESS)
+         goto fail;
+     setInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+     setInfo.descriptorPool = outDescriptorSet->descriptorPool;
