@@ -112,9 +112,9 @@ Pass: every option is in `options-after.toml` with the value last set; the
 log has `upscaler:` lines for each change and no new errors; the picture looks
 identical to stock (Phase 0 changes nothing on screen).
 
-## Pending combined test session (Phase 0 + Phase 1, ~20 min)
-The Phase 0 and Phase 1 checks in one sitting, with the Phase 1 binary
-(`/workspace/bbhost-vk-builds/phase1/bbhost.bin` on the build box; check its
+## Pending combined test session (Phase 0 + Phase 1 + Phase 2, ~35 min)
+The Phase 0, 1 and 2 checks in one sitting, with the Phase 2 binary
+(`/workspace/bbhost-vk-builds/phase2/bbhost.bin` on the build box; check its
 SHA-256 against `bbhost.bin.sha256`). Install it over `bbhost.bin` (keep the
 old one: `mv bbhost.bin bbhost.bin.vk0` first). No `--capture` for part A.
 
@@ -157,3 +157,31 @@ size` line per toggle, `the graphics manager's scene is ...` without
 `not the ... asked for`, `scale pass ... drawn`, `heap:` with free space left,
 and `yebis: restart` lines only next to size changes (none while just playing). If 67% shows a band or corruption,
 run once with `BBHOST_SCENE_SPLIT=0` to confirm it is the split.
+
+### C. Phase 2 checks (15 min): `bbtest start p2 --record`
+1. Setup window: **Upscaler FSR 3.1**, **Upscaling quality Quality (67%)**,
+   **Show motion vectors** on. Play, load your save (somewhere with enemies,
+   e.g. Central Yharnam). The 3D scene may shimmer slightly: the jitter is
+   on and nothing resolves it until Phase 3 (expected).
+2. With the motion-vector overlay on, do each for ~10 s and `bbtest clip`
+   after each (or `bbtest mark <what>` if it looks wrong):
+   - walk forward, then strafe: the world turns red/green evenly, stronger
+     at the sides and near the floor; standing still: dark/black;
+   - spin the camera fast both ways: strong red, no blocky holes;
+   - roll and quickstep: the character shows blue (object motion);
+   - light/close the lantern; use a Beast Blood pellet (particles, glow);
+   - fight a group of enemies: moving enemies and weapons blue;
+   - one boss fight (its arena entry and camera).
+3. F10: Show Motion Vectors off; look ~10 s at a detailed area; then quit
+   from the menu. Optional: one run with `BBHOST_JITTER=0` for comparison of
+   the shimmer.
+
+Pass: no crash, no change at FSR 1 / Native (part A); the overlay follows the
+camera and shows dark when still. In the log: `motion: scene constants
+found ...` (with the render size, not `the output's`), `motion: the scene
+depth is ...`, `motion: first motion pass ... camera valid`, `jitter:
+Halton(2,3), 18 phases`, a handful of `camera-cut:` lines (lamp warps,
+loading, cutscenes; not one per roll), and the `motion:` summaries
+(velocity draws per frame, `after the scale pass` should be 0). If blue
+never appears on enemies, run once with `BBHOST_OBJECT_MOTION=0` and
+compare.
