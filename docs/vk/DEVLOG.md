@@ -677,8 +677,8 @@ Base: `phase-L-launcher`. The user moved every effort to a first test release.
   until after the test release; the mockups wait for approval.
 
 ### Updater
-The update check reads Heliasyu/bbhost-vk's latest release (a private repo
-needs update.token_file), and `-vk.N` versions are compared. The official
+The update check reads Heliasyu/bbhost-vk's latest release (a public repo,
+read anonymously like upstream's; corrected 2026-10-18), and `-vk.N` versions are compared. The official
 plugins still come from upstream's release, signed with its key. Nothing is
 published.
 
