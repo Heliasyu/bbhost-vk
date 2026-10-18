@@ -1,0 +1,35 @@
+#pragma once
+
+// bbhost-vk's upscaler (docs/vk/PLAN.md). Phase 0 is scaffolding: the
+// settings (host/settings.h) are saved, shown in F10, the System menu's PC
+// Upscaling sections and the setup window, and logged - but what reaches the
+// screen is bbhost's own path, FSR 1 at the Resolution setting
+// (host/fsr.cpp), whatever they say. The temporal upscalers come in Phase 3
+// (FSR 3.1, FireBurn/FSR-Vulkan, linked from Phase 0 on) and Phase 4 (FSR
+// 4.1.1, built from the player's own DLL).
+
+#include "host/upscaler_presets.h"
+
+#include <cstdint>
+#include <string>
+
+// Once at start, after the options are loaded: the chosen upscaler, preset
+// and sharpness, and what this build has linked of FSR-Vulkan.
+void upscaler_log_startup();
+
+// FireBurn/FSR-Vulkan, when this build links it (cmake/fsr_vulkan.cmake):
+// how many of the FSR 3.1.5 upscaler's embedded SPIR-V modules are present
+// and start with the SPIR-V magic (11 when the shader tables are whole), 0
+// when it is not linked. Pure: no Vulkan call.
+int upscaler_fsr3_embedded_modules();
+// Whether the FSR 3.1.4 / 3.1.5 upscalers' entry points are in the binary.
+bool upscaler_fsr3_linked();
+
+// Whenever a setting changes (host_opt_serial moved): logs the new upscaler
+// choices once per change, so a test session's log says what was picked.
+void upscaler_note_settings();
+
+// The motion-vector view (settings debug_motion_vectors). A hook the
+// presenter calls each frame it is on; it draws nothing until Phase 2 makes
+// motion vectors, and logs that once.
+void upscaler_debug_motion_vectors_hook();

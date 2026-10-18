@@ -110,6 +110,7 @@ add_executable(bbhost
   src/host/present_pass.cpp
   src/host/ingame_menu.cpp
   src/host/options.cpp
+  src/host/upscaler.cpp
   src/host/updater.cpp
   src/host/update_verify.cpp
   src/host/bindings.cpp
@@ -386,6 +387,15 @@ if(UNIX)
   add_executable(stun_test tests/stun_test.cpp src/net/stun.cpp)
   target_include_directories(stun_test PRIVATE src)
   add_test(NAME stun_test COMMAND stun_test)
+  # bbhost-vk: the upscaler presets, and FSR-Vulkan's shader tables when it is linked.
+  add_executable(upscaler_test tests/upscaler_test.cpp)
+  target_include_directories(upscaler_test PRIVATE src)
+  if(TARGET ffx-vulkan::fsr3-vk-backend-3.1.5)
+    target_sources(upscaler_test PRIVATE src/host/upscaler_fsr3.cpp)
+    target_compile_definitions(upscaler_test PRIVATE UPSCALER_TEST_FSR3=1)
+    target_link_libraries(upscaler_test PRIVATE ffx-vulkan::portable ffx-vulkan::fsr3-vk-backend-3.1.5)
+  endif()
+  add_test(NAME upscaler_test COMMAND upscaler_test)
   add_executable(tess_lds_test tests/tess_lds_test.cpp src/host/tess_lds.cpp)
   target_include_directories(tess_lds_test PRIVATE src)
   add_test(NAME tess_lds_test COMMAND tess_lds_test)

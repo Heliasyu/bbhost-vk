@@ -66,6 +66,15 @@ struct HostSettings {
     bool change_appearance = true;
     bool rebirth = true;
     bool five_players = true;
+
+    // bbhost-vk's upscaler (host/upscaler.h; docs/vk/PLAN.md). Phase 0 only
+    // carries them: what reaches the screen is still FSR 1 at the Resolution
+    // setting whatever they say.
+    int upscaler = 1;                // 0 Off, 1 FSR 1 (bbhost's own), 2 FSR 3.1, 3 FSR 4.1.1
+    int upscale_quality = 0;         // 0 Native AA, 1 Quality, 2 Balanced, 3 Performance, 4 Ultra Performance
+    float upscale_sharpness = 0.8f;  // 0..1; 0.8 is RCAS at 0.2 stops, FSR 1's own
+    bool debug_motion_vectors = false;  // the motion-vector view (a no-op until Phase 2)
+    bool debug_upscaler_time = false;   // the presenter's GPU timestamps, under the FPS counter
 };
 
 // A copy of the current settings.

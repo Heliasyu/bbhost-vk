@@ -22,6 +22,7 @@
 #include "hle/modules.h"
 #include "host/gpu.h"
 #include "host/options.h"
+#include "host/upscaler.h"
 #include "host/updater.h"
 #if defined(BBHOST_HAVE_SDL3)
 #include "host/launcher.h"
@@ -968,6 +969,7 @@ int main(int argc, char** argv) {
     // and they seed from bbhost.toml, so a run with no options file behaves
     // exactly as it did.
     host_options_load();
+    upscaler_log_startup();  // bbhost-vk: the upscaler settings and FSR-Vulkan (host/upscaler.h); no effect yet
     config_set_skip_intro(host_settings().skip_logos);
     // The PC enhancements are read the same way, once: each installs (or its
     // patch applies) while the guest is prepared, so a change waits for the

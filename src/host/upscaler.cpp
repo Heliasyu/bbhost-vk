@@ -1,0 +1,60 @@
+// bbhost-vk's upscaler settings and their scaffolding (host/upscaler.h).
+#include "host/upscaler.h"
+
+#include "host/options.h"
+#include "host/settings.h"
+#include "log.h"
+
+#include <atomic>
+#include <cstdint>
+
+#if !defined(BBHOST_HAVE_FSR_VULKAN)
+// No FSR-Vulkan in this build (BBHOST_FSR_VULKAN=OFF, or no Vulkan).
+int upscaler_fsr3_embedded_modules() { return 0; }
+bool upscaler_fsr3_linked() { return false; }
+#endif
+
+namespace {
+
+void log_settings(const char* why) {
+    const HostSettings s = host_settings();
+    std::uint32_t w = 0, h = 0;
+    upscaler::render_size(s.upscale_quality, 3840, 2160, &w, &h);
+    host_log("upscaler: %s: %s, %s (%ux%u from 3840x2160), sharpness %.1f; motion vectors view %s, GPU time %s "
+             "(Phase 0: the picture is FSR 1 at the Resolution setting, as stock bbhost)",
+             why, upscaler::kind_name(s.upscaler), upscaler::preset_name(s.upscale_quality), w, h, static_cast<double>(s.upscale_sharpness),
+             s.debug_motion_vectors ? "on" : "off", s.debug_upscaler_time ? "on" : "off");
+}
+
+}  // namespace
+
+void upscaler_log_startup() {
+    const int modules = upscaler_fsr3_embedded_modules();
+    if (upscaler_fsr3_linked()) {
+        host_log("upscaler: FSR-Vulkan linked: FSR 3.1.5 and 3.1.4 upscalers, %d of 11 FSR 3.1.5 shader modules embedded%s", modules,
+                 modules == 11 ? "" : "  <- the shader tables are incomplete");
+    } else {
+        host_log("upscaler: FSR-Vulkan not in this build");
+    }
+    log_settings("settings at start");
+}
+
+void upscaler_note_settings() {
+    static int last[5] = {-1, -1, -1, -1, -1};
+    const HostSettings s = host_settings();
+    const int now[5] = {s.upscaler, s.upscale_quality, static_cast<int>(s.upscale_sharpness * 10.0f + 0.5f), s.debug_motion_vectors ? 1 : 0,
+                        s.debug_upscaler_time ? 1 : 0};
+    bool changed = false;
+    for (int i = 0; i < 5; ++i) changed |= now[i] != last[i];
+    const bool first = last[0] < 0;
+    for (int i = 0; i < 5; ++i) last[i] = now[i];
+    if (changed && !first) log_settings("changed");
+}
+
+void upscaler_debug_motion_vectors_hook() {
+    // Phase 2 draws the motion vectors here (a compute pass from depth and the
+    // two frames' matrices, shown as colour over the picture). Until then the
+    // toggle is only remembered.
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true)) host_log("upscaler: the motion-vector view is on, but this build has no motion vectors yet (Phase 2)");
+}

@@ -88,6 +88,13 @@ enum SettingId {
     kChangeAppearance,
     kRebirth,
     kFivePlayers,
+    // bbhost-vk (docs/vk/PLAN.md): the upscaler and its debug views. Phase 0
+    // saves and shows them; nothing renders differently yet (host/upscaler.h).
+    kUpscaler,
+    kUpscaleQuality,
+    kUpscaleSharpness,
+    kDebugMotionVectors,
+    kDebugUpscalerTime,
     kSettingCount,
 };
 
@@ -239,6 +246,26 @@ Setting g_set[kSettingCount] = {
      "Requires a restart. With the Yharnam Stone, the Altar of Despair resets level and attributes.", true},
     {"five_players", "Five players", {"On", "Off"}, 0,
      "Requires a restart. Two invaders in Mensis, Mergo's Loft, the Frontier and the DLC; all players need it.", true},
+    // bbhost-vk's upscaler (host/upscaler.h). FSR 1 is what bbhost always did:
+    // the presenter's EASU + RCAS when the game renders smaller than the
+    // window (host/fsr.cpp). Phase 0 keeps these to the file and the menus.
+    {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"}, 1,
+     "FSR 1 is bbhost's own. FSR 3.1 and FSR 4.1.1 are temporal and come in later builds: for now every choice draws as FSR 1.",
+     false},
+    // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
+    {"upscale_quality", "Upscaling quality",
+     {"Native AA", "Quality", "Balanced", "Performance", "Ultra Performance"}, 0,
+     "Render scale for FSR 3.1 / 4.1.1: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. "
+     "Not used yet: the Resolution setting still decides.",
+     false},
+    // 0..1 like FSR 3's sharpness; 0.8 is RCAS at 0.2 stops, what FSR 1 uses.
+    {"upscale_sharpness", "Upscaling sharpness", {"0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"}, 8,
+     "How much the upscaler sharpens. 0.8 matches FSR 1 as bbhost ships it. Not used yet.", false},
+    {"debug_motion_vectors", "Show motion vectors", {"Off", "On"}, 0,
+     "Debug: draws the motion vectors over the picture. They exist from a later build; until then it only logs that.", false},
+    {"debug_upscaler_time", "Show upscaler GPU time", {"Off", "On"}, 0,
+     "Debug: the GPU time of the presenter's passes (the upscale, the whole present) under the FPS counter, and in the log.",
+     false},
 };
 
 const Row g_rows[] = {
@@ -273,6 +300,12 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kFog},
     {Row::Option, nullptr, kModelDetail},
     {Row::Option, nullptr, kResolution},
+    {Row::Header, "UPSCALING"},
+    {Row::Option, nullptr, kUpscaler},
+    {Row::Option, nullptr, kUpscaleQuality},
+    {Row::Option, nullptr, kUpscaleSharpness},
+    {Row::Option, nullptr, kDebugMotionVectors},
+    {Row::Option, nullptr, kDebugUpscalerTime},
     {Row::Header, "PC ENHANCEMENTS"},
     {Row::Option, nullptr, kChangeAppearance},
     {Row::Option, nullptr, kRebirth},
@@ -637,6 +670,12 @@ void apply(int id) {
         case kRebirth:
         case kFivePlayers:
             break;  // read by the loader before any of this exists
+        case kUpscaler:
+        case kUpscaleQuality:
+        case kUpscaleSharpness:
+        case kDebugMotionVectors:
+        case kDebugUpscalerTime:
+            break;  // the settings object carries them (host/upscaler.h reads it)
         default: break;
     }
 }
@@ -756,6 +795,11 @@ void rebuild_settings() {
     h.change_appearance = on_of(kChangeAppearance);
     h.rebirth = on_of(kRebirth);
     h.five_players = on_of(kFivePlayers);
+    h.upscaler = std::clamp(index_of(kUpscaler), 0, 3);
+    h.upscale_quality = std::clamp(index_of(kUpscaleQuality), 0, 4);
+    h.upscale_sharpness = static_cast<float>(std::clamp(index_of(kUpscaleSharpness), 0, 10)) / 10.0f;
+    h.debug_motion_vectors = on_of(kDebugMotionVectors);
+    h.debug_upscaler_time = on_of(kDebugUpscalerTime);
     std::lock_guard<std::mutex> lk(g_settings_mu);
     g_settings = h;
 }
