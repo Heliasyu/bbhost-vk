@@ -346,6 +346,7 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
         g_history4 = {};
         if (fatal) {
             g_fsr4_off = true;
+            host_opt_fsr4_unavailable();  // anti_alias Auto: the game's AA back on
             host_log("fsr4: %s: FSR 3.1 upscales instead", why4.c_str());
         } else {
             static int said = 0;

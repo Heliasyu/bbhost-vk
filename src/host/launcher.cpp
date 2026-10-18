@@ -196,6 +196,8 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     int upscaler = std::clamp(host_opt_index("upscaler"), 0, 3);
     int upscale_quality = std::clamp(host_opt_index("upscale_quality"), 0, 4);
     int upscale_sharpness = std::clamp(host_opt_index("upscale_sharpness"), 0, 10);  // tenths
+    // test7: the game's AA - On, Off, or Auto (off while FSR 4.1.1 upscales).
+    int anti_alias = std::clamp(host_opt_index("anti_alias"), 0, 2);
     bool debug_motion_vectors = host_opt_get("debug_motion_vectors");
     bool debug_upscaler_time = host_opt_get("debug_upscaler_time");
     bool upscale_reactive = host_opt_get("upscale_reactive");
@@ -335,6 +337,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         host_opt_set_index("upscaler", upscaler);
         host_opt_set_index("upscale_quality", upscale_quality);
         host_opt_set_index("upscale_sharpness", upscale_sharpness);
+        host_opt_set_index("anti_alias", anti_alias);
         host_opt_set("debug_motion_vectors", debug_motion_vectors);
         host_opt_set("debug_upscaler_time", debug_upscaler_time);
         host_opt_set("upscale_reactive", upscale_reactive);
@@ -660,7 +663,12 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::SetTooltip("bbhost-vk: the 3D scene's render scale, with the menus, text and post-processing kept at the render resolution. Native AA is stock. Not used while Upscaler is Off.");
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::SliderInt("Upscaler sharpness", &upscale_sharpness, 0, 10, "%d / 10");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: FSR 3.1's sharpening (RCAS); 0 turns it off. 8 matches stock bbhost's FSR 1, which keeps its own.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: FSR 3.1's and FSR 4.1.1's sharpening (RCAS); 0 turns it off. 8 matches stock bbhost's FSR 1, which keeps its own.");
+        ImGui::SetNextItemWidth(200 * scale);
+        static const char* const kAntiAlias[] = {"On", "Off", "Auto (off with FSR 4.1.1)"};
+        ImGui::Combo("Anti-aliasing", &anti_alias, kAntiAlias, 3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The game's own AA pass (about 0.35 ms at 4K). Auto turns it off while FSR 4.1.1 upscales, which smooths edges itself, and keeps it on otherwise.");
         ImGui::Checkbox("Upscaler reactive mask", &upscale_reactive);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("bbhost-vk, FSR 3.1: keeps particles, fog, Blood Echoes and the lantern's glow from smearing. Off for comparison.");

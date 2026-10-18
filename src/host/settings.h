@@ -47,7 +47,8 @@ struct HostSettings {
     // host/shader_patch.cpp apply them)
     bool ssao = true;
     bool motion_blur = true;
-    bool anti_alias = true;
+    bool anti_alias = true;       // in effect (Auto resolved)
+    bool anti_alias_auto = true;  // the setting is Auto (test7)
     bool depth_of_field = true;
     bool chromatic_aberration = true;
     bool vignette = true;

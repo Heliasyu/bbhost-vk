@@ -57,6 +57,9 @@ void host_opt_set(const char* key, bool on);
 // -1 for an unknown name. Saved at once, like host_opt_set.
 int host_opt_index(const char* key);
 void host_opt_set_index(const char* key, int index);
+// test7: FSR 4.1.1 will not run this session (FSR 3.1 stands in): anti_alias
+// Auto turns the game's AA back on. Any thread.
+void host_opt_fsr4_unavailable();
 // Writes the options file now: the key bindings changed (host/bindings.h).
 void host_options_save_now();
 

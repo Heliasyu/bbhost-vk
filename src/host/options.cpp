@@ -180,8 +180,11 @@ Setting g_set[kSettingCount] = {
     // (host/shader_patch.h).
     {"motion_blur", "Motion blur", {"On", "Off"}, 0,
      "The blur on fast camera and character movement.", false},
-    {"anti_alias", "Anti-aliasing", {"On", "Off"}, 0,
-     "The game's own AA pass.", false},
+    // test7: Auto (the default) is Off while FSR 4.1.1 upscales - it
+    // smooths edges itself, and the game's AA pass costs ~0.35 ms at 4K -
+    // and On otherwise (FSR 3.1, FSR 1, native, or FSR 4.1.1 not running).
+    {"anti_alias", "Anti-aliasing", {"On", "Off", "Auto"}, 2,
+     "The game's own AA pass. Auto: off while FSR 4.1.1 upscales (it smooths edges itself), on otherwise.", false},
     {"depth_of_field", "Depth of field", {"On", "Off"}, 0,
      "Blurs distant scenery; indoors there is rarely anything far enough to blur.", false},
     {"chromatic_aberration", "Chromatic aberration", {"On", "Off"}, 0,
@@ -740,6 +743,8 @@ void save() {
 // Bumped on every change, for readers that act on a setting live and would
 // rather not look it up by name on every frame (host_opt_serial).
 std::atomic<std::uint64_t> g_serial{1};
+// FSR 4.1.1 cannot run this session (host_opt_fsr4_unavailable): Auto AA stays on.
+std::atomic<bool> g_fsr4_unavailable{false};
 
 // The settings object (host/settings.h): every field from the table, scaled
 // the way its consumer wants it, rebuilt whenever a setting changes.
@@ -793,7 +798,6 @@ void rebuild_settings() {
     h.button_prompts = index_of(kButtonPrompts) < 0 ? 0 : index_of(kButtonPrompts);
     h.ssao = on_of(kSsao);
     h.motion_blur = on_of(kMotionBlur);
-    h.anti_alias = on_of(kAntiAlias);
     h.depth_of_field = on_of(kDepthOfField);
     h.chromatic_aberration = on_of(kChromaticAberration);
     h.vignette = on_of(kVignette);
@@ -814,6 +818,9 @@ void rebuild_settings() {
     h.rebirth = on_of(kRebirth);
     h.five_players = on_of(kFivePlayers);
     h.upscaler = std::clamp(index_of(kUpscaler), 0, 3);
+    // Auto: off while FSR 4.1.1 is the upscaler and runs (host_opt_fsr4_unavailable).
+    h.anti_alias_auto = index_of(kAntiAlias) == 2;
+    h.anti_alias = h.anti_alias_auto ? !(h.upscaler == 3 && !g_fsr4_unavailable.load()) : on_of(kAntiAlias);
     h.upscale_quality = std::clamp(index_of(kUpscaleQuality), 0, 4);
     h.upscale_sharpness = static_cast<float>(std::clamp(index_of(kUpscaleSharpness), 0, 10)) / 10.0f;
     h.upscale_reactive = on_of(kUpscaleReactive);
@@ -1052,7 +1059,8 @@ void host_options_load() {
                                   {"BBHOST_DEPTH_OF_FIELD", kDepthOfField},
                                   {"BBHOST_CHROMATIC_ABERRATION", kChromaticAberration}}) {
         if (const char* e = std::getenv(env); e && e[0]) {
-            g_set[id].index = e[0] == '0' ? 1 : 0;  // these are {"On","Off"}
+            // {"On","Off"} first (anti_alias adds "Auto"): 0 off, a or A Auto, else on.
+            g_set[id].index = e[0] == '0' ? 1 : (id == kAntiAlias && (e[0] == 'a' || e[0] == 'A')) ? 2 : 0;
         }
     }
     if (const char* e = std::getenv("BBHOST_MOUSE_CAMERA"); e && e[0]) {
@@ -1428,6 +1436,12 @@ int setting_id(const char* key) {
 }  // namespace
 
 std::uint64_t host_opt_serial() { return g_serial.load(std::memory_order_acquire); }
+
+void host_opt_fsr4_unavailable() {
+    if (g_fsr4_unavailable.exchange(true)) return;
+    g_serial.fetch_add(1, std::memory_order_release);
+    rebuild_settings();
+}
 
 bool host_opt_default_get(const char* key) {
     const int id = setting_id(key);

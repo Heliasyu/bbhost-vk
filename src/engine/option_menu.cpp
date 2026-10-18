@@ -16,6 +16,7 @@
 #include "hle/modules.h"
 #include "host/bindings.h"
 #include "host/options.h"
+#include "host/settings.h"
 #include "log.h"
 
 #include <atomic>
@@ -656,7 +657,8 @@ void seed_deck() {
 // changed it since - so each section seeds its values when it opens, and the
 // poll then pushes only what the player changes.
 void seed(Toggle& t) {
-    t.value = host_opt_get(t.key) ? 1 : 0;
+    // anti_alias Auto (test7) shows what is in effect; flipping the row sets On or Off.
+    t.value = (std::strcmp(t.key, "anti_alias") == 0 ? host_settings().anti_alias : host_opt_get(t.key)) ? 1 : 0;
     t.last = t.value;
 }
 
