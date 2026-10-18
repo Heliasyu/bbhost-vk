@@ -672,6 +672,9 @@ void apply(int id) {
             break;  // read by the loader before any of this exists
         case kUpscaler:
         case kUpscaleQuality:
+            // bbhost-vk Phase 1: the scene's size follows (engine/scene_split.h).
+            live_resolution_scale_changed();
+            break;
         case kUpscaleSharpness:
         case kDebugMotionVectors:
         case kDebugUpscalerTime:

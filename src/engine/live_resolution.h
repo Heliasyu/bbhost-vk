@@ -41,6 +41,12 @@ int live_resolution_take_answer();
 // a "go back" whose old entry waits for the next start.
 void live_resolution_go_back();
 
+// bbhost-vk: the upscaler or its preset changed - the scene's size
+// (engine/scene_split.h) follows at the next quiet point, the output staying.
+void live_resolution_scale_changed();
+// The scene's size now: the render size when split, else the output's.
+void live_resolution_scene(unsigned* w, unsigned* h);
+
 // The render size now, and a counter that moves each time a change has been
 // applied (0 before any).
 std::uint64_t live_resolution_current(unsigned* w, unsigned* h);

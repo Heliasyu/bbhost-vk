@@ -9,6 +9,7 @@
 #include "engine/graphics_patch.h"
 #include "engine/gx_resources.h"
 #include "engine/option_menu.h"
+#include "engine/scene_split.h"
 #include "hle/modules.h"
 #include "host/gpu.h"
 #include "host/options.h"
@@ -113,6 +114,11 @@ std::atomic<int> g_answer{0};  // 1 keep, 2 go back; taken by the host
 std::atomic<std::uint64_t> g_current{0};  // w << 32 | h once the output entry is set
 std::atomic<std::uint64_t> g_before_asked{0};  // the size before the last change that asks to be kept
 std::atomic<std::uint64_t> g_applied{0};
+// bbhost-vk: the scene's size (engine/scene_split.h), w << 32 | h; the same as
+// g_current unless the scene is split from the output.
+std::atomic<std::uint64_t> g_scene{0};
+std::atomic<bool> g_rescale{false};  // the upscaler preset changed: the scene's size may have
+std::atomic<int> g_yebis_restarts{0};
 // BBHOST_RESIZE_TEST=<flip>:<w>x<h>[,...]: changes at those flips.
 std::vector<std::pair<std::uint64_t, std::uint64_t>> g_tests;  // flip, size; main thread only
 std::size_t g_next_test = 0;
@@ -167,9 +173,15 @@ GUEST_ABI std::int64_t yebis_shutdown_call_hook(std::uint64_t, const std::uint64
     const std::int32_t size = at_<std::int32_t>(glue + 0x2714);
     g_dead_lo.store(lo);
     g_dead_hi.store(lo && size > 0 ? lo + static_cast<std::uint64_t>(size) : 0);
+    const int dropped_before = g_dead_frees.load();
     hle_call_guest6(guest_fn(kYebisShutdown), static_cast<std::int64_t>(glue), 0, 0, 0, 0, 0);
     g_dead_hi.store(0);
     g_dead_lo.store(0);
+    // bbhost-vk: every restart in the log, for the test sessions (the plan's
+    // "heap and YEBIS restart" watch): its heap region and the frees into it
+    // that were dropped. The listener starts YEBIS again after this.
+    host_log("yebis: restart %d - shut down (its heap region 0x%llx, %d bytes; %d frees into it dropped), started again by the listener",
+             g_yebis_restarts.fetch_add(1) + 1, static_cast<unsigned long long>(lo), size, g_dead_frees.load() - dropped_before);
     return 1;
 }
 
@@ -645,6 +657,7 @@ bool g_both_sides = false;  // install_scene_both_sides() went in
 // Where the graphics manager's scene renders its picture at w x h, by the test
 // Initialize makes (the patched one or the game's), for the log.
 const char* scene_target_path(std::uint32_t w, std::uint32_t h) {
+    if (scene_split_active()) return "at the render size, its colour into the display buffers at the output size (split)";
     const bool wide = g_display[0] == w, tall = g_display[1] == h;
     return (g_both_sides ? wide && tall : wide || tall) ? "straight into the display buffers" : "into a target of its own";
 }
@@ -753,7 +766,12 @@ bool remake_default_depth(std::uint64_t out, std::uint32_t w, std::uint32_t h) {
 // GX init's aspect fit inside the display buffer), which the scene contexts
 // rebuild from, DefDepthStencil and the rectangle binding the display buffers
 // sets; then the game's broadcast and the contexts it does not reach.
-int broadcast_size(std::uint64_t dev, std::uint64_t gm, std::uint32_t ow, std::uint32_t oh, std::uint32_t w, std::uint32_t h) {
+// The contexts made on demand follow the scene's size: from sw x sh (the
+// scene before) to nw x nh (after) - the output's own sizes unless the scene
+// is split (engine/scene_split.h), when sub_26f8c70 / sub_26f9330 make them at
+// the render size.
+int broadcast_size(std::uint64_t dev, std::uint64_t gm, std::uint32_t sw, std::uint32_t sh, std::uint32_t w, std::uint32_t h,
+                   std::uint32_t nw, std::uint32_t nh) {
     const std::uint64_t out = at_<std::uint64_t>(dev + 0x90);
     at_<std::uint32_t>(out + 0x80) = w;
     at_<std::uint32_t>(out + 0x84) = h;
@@ -765,12 +783,29 @@ int broadcast_size(std::uint64_t dev, std::uint64_t gm, std::uint32_t ow, std::u
     if (!remake_default_depth(out, w, h)) host_log("resolution: DefDepthStencil was not made at %ux%u; the scene keeps a depth of its own", w, h);
     const std::vector<std::uint64_t> before = live_scene_ctxs();
     hle_call_guest6(guest_fn(kResizeBroadcast), static_cast<std::int64_t>(dev), w, h, 0, 0, 0);
-    return resize_scene_ctxs(dev, gm, before, ow, oh, w, h);
+    return resize_scene_ctxs(dev, gm, before, sw, sh, nw, nh);
+}
+
+// The graphics manager's scene context's size (its description at +0x18),
+// 0 when it is not one.
+std::uint64_t manager_scene_size(std::uint64_t gm) {
+    const std::uint64_t c = gm + 0x60;
+    if (at_<std::uint64_t>(c) != guest(kSceneCtxVtable)) return 0;
+    return pack(at_<std::uint32_t>(c + 0x18), at_<std::uint32_t>(c + 0x1c));
+}
+
+// The render-target heap, for the log (bbhost-vk: the test sessions watch it).
+void log_heap(std::uint64_t dev, const char* when) {
+    std::uint64_t largest = 0;
+    const std::uint64_t free_mib = target_heap_free_mib(dev, &largest);
+    host_log("heap: render-target heap %s: %llu MiB free, largest block %llu MiB; %llu resources not made so far", when,
+             (unsigned long long)free_mib, (unsigned long long)largest, (unsigned long long)gx_resources_create_failures());
 }
 
 // False when nothing changed, or the size did not fit and the one before it
-// was put back.
-bool resize(std::uint32_t w, std::uint32_t h) {
+// was put back. w x h is the output; rw x rh the scene's (the same unless
+// split, engine/scene_split.h).
+bool resize(std::uint32_t w, std::uint32_t h, std::uint32_t rw, std::uint32_t rh) {
     std::uint64_t dev = 0, gm = 0;
     if (!device_ready(&dev, &gm)) return false;
     // The graphics manager's listener (its subobject at +8, whose resize slot
@@ -787,19 +822,44 @@ bool resize(std::uint32_t w, std::uint32_t h) {
     const std::uint64_t out = at_<std::uint64_t>(dev + 0x90);
     const auto t0 = std::chrono::steady_clock::now();
     const std::uint32_t was_w = at_<std::uint32_t>(out + 0x80), was_h = at_<std::uint32_t>(out + 0x84);
+    std::uint64_t scene_was = g_scene.load();
+    if (!scene_was) scene_was = pack(was_w, was_h);
+    const auto was_rw = static_cast<std::uint32_t>(scene_was >> 32), was_rh = static_cast<std::uint32_t>(scene_was);
     g_dead_frees.store(0);
     const std::uint64_t failed = gx_resources_create_failures();
-    int ctxs = broadcast_size(dev, gm, was_w, was_h, w, h);
+    log_heap(dev, "before the change");
+    // The sites first (the scene's size for every rebuild the broadcast
+    // makes), then the broadcast at the output's size.
+    if (!scene_split_apply(rw, rh, w, h)) rw = w, rh = h;
+    int ctxs = broadcast_size(dev, gm, was_rw, was_rh, w, h, rw, rh);
     bool fitted = true;
     const std::uint64_t unfit = unfit_scene_ctx();
     if (unfit || gx_resources_create_failures() != failed) {
-        host_log("resolution: %ux%u did not fit the render-target heap (%llu resources not made%s); back to %ux%u", w, h,
-                 (unsigned long long)(gx_resources_create_failures() - failed), unfit ? ", a scene context's pass among them" : "", was_w, was_h);
-        ctxs += broadcast_size(dev, gm, w, h, was_w, was_h);
+        host_log("resolution: %ux%u (scene %ux%u) did not fit the render-target heap (%llu resources not made%s); back to %ux%u (scene %ux%u)", w, h,
+                 rw, rh, (unsigned long long)(gx_resources_create_failures() - failed), unfit ? ", a scene context's pass among them" : "", was_w,
+                 was_h, was_rw, was_rh);
+        scene_split_apply(was_rw, was_rh, was_w, was_h);
+        ctxs += broadcast_size(dev, gm, rw, rh, was_w, was_h, was_rw, was_rh);
         w = was_w;
         h = was_h;
+        rw = was_rw;
+        rh = was_rh;
         fitted = false;
     }
+    // Whether the graphics manager's scene is at the size asked for: its
+    // listener rebuilds it from the size the sites give (the split) or the
+    // broadcast's. A change of the scene alone (the same output) relies on
+    // the listener rebuilding at an unchanged output size - said here when
+    // it did not.
+    if (const std::uint64_t ms = manager_scene_size(gm)) {
+        const auto mw = static_cast<std::uint32_t>(ms >> 32), mh = static_cast<std::uint32_t>(ms);
+        if (mw != rw || mh != rh)
+            host_log("scene-split: the graphics manager's scene is %ux%u, not the %ux%u asked for%s", mw, mh, rw, rh,
+                     w == was_w && h == was_h ? " (only the scene's size changed: its listener did not rebuild it)" : "");
+        else
+            host_log("scene-split: the graphics manager's scene is %ux%u (output %ux%u)", mw, mh, w, h);
+    }
+    g_scene.store(pack(rw, rh));
     // The window size SprjInitStuff derives from the res words at the start
     // (0x59404d8/dc), which sub_212c630 divides the res words by; the Sprj
     // listener sets only the res words and the UI scale. Booted at this size
@@ -813,12 +873,13 @@ bool resize(std::uint32_t w, std::uint32_t h) {
     g_applied.fetch_add(1);
     std::uint64_t largest = 0;
     const std::uint64_t free_mib = target_heap_free_mib(dev, &largest);
-    host_log("resolution: %ux%u -> %ux%u in %lld ms, the scene %s (%d other scene contexts, %d destroyed since the last change; "
+    log_heap(dev, "after the change");
+    host_log("resolution: %ux%u -> %ux%u (scene %ux%u -> %ux%u) in %lld ms, the scene %s (%d other scene contexts, %d destroyed since the last change; "
              "%d Scaleform viewports, %d YEBIS frees dropped; render-target heap %llu MiB free, largest block %llu)",
-             was_w, was_h, w, h,
+             was_w, was_h, w, h, was_rw, was_rh, rw, rh,
              static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()),
              scene_target_path(w, h), ctxs, g_ctx_gone.exchange(0), movies, g_dead_frees.load(), (unsigned long long)free_mib, (unsigned long long)largest);
-    return fitted && (w != was_w || h != was_h);
+    return fitted && (w != was_w || h != was_h || rw != was_rw || rh != was_rh);
 }
 
 void confirm_tick() {
@@ -926,16 +987,23 @@ GUEST_ABI std::int64_t present_frame_end_hook(std::uint64_t, const std::uint64_t
     const std::uint64_t f0 = hle_video_flip_count();
     if (g_next_test < g_tests.size() && f0 >= g_tests[g_next_test].first) g_request.store(g_tests[g_next_test++].second);
     const bool settled = std::chrono::steady_clock::now().time_since_epoch().count() >= g_request_not_before.load();
-    const std::uint64_t req = settled ? g_request.exchange(0) : 0;
+    const std::uint64_t asked = settled ? g_request.exchange(0) : 0;
+    const bool rescale = settled && g_rescale.exchange(false);
     hle_call_guest6(guest_fn(kFrameEnd), static_cast<std::int64_t>(dev), 0, 0, 0, 0, 0);
     if (!g_old_depth.empty()) release_old_depth(f0);
     confirm_tick();
-    if (!req) return 1;  // the frame end ran; back to the caller
+    if (!asked && !rescale) return 1;  // the frame end ran; back to the caller
+    // The output asked for (or the one shown, when only the upscaler preset
+    // moved), and the scene's size the settings want at it.
+    const std::uint64_t req = asked ? asked : g_current.load();
     const auto w = static_cast<std::uint32_t>(req >> 32), h = static_cast<std::uint32_t>(req);
-    if (req == g_current.load()) {
+    std::uint32_t rw = w, rh = h;
+    scene_split_wanted(w, h, &rw, &rh);
+    if (req == g_current.load() && pack(rw, rh) == g_scene.load()) {
         g_request_confirm.store(false);
         return 1;
     }
+    if (req == g_current.load()) g_request_confirm.store(false);  // the scene alone: nothing to keep or go back to
     const auto start = std::chrono::steady_clock::now();
     while (hle_video_flip_count() < f0 + 2 && std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500))
         host_sleep_us(200);
@@ -943,7 +1011,7 @@ GUEST_ABI std::int64_t present_frame_end_hook(std::uint64_t, const std::uint64_t
     host_gpu_flush();    // and the host GPU has finished it
     const bool confirm = g_request_confirm.exchange(false);
     const std::uint64_t before = g_current.load();
-    if (resize(w, h)) {
+    if (resize(w, h, rw, rh)) {
         if (confirm) {
             g_before_asked.store(before);
             g_confirm = Confirm::ToOpen;
@@ -970,8 +1038,15 @@ GUEST_ABI std::int64_t gx_init_call_hook(std::uint64_t, const std::uint64_t* sav
     const std::uint64_t out = dev ? at_<std::uint64_t>(dev + 0x90) : 0;
     if (out) {
         const std::uint32_t w = g_res_words[0], h = g_res_words[1];
-        host_log("resolution: display buffers %ux%u, rendering %ux%u; the scene renders %s", at_<std::uint32_t>(out + 0x80),
-                 at_<std::uint32_t>(out + 0x84), w, h, scene_target_path(w, h));
+        // The scene's size at the start (engine/scene_split.h): set at load
+        // for the Resolution setting; again here should the res words say
+        // another size (BBHOST_RES).
+        std::uint32_t rw = w, rh = h;
+        scene_split_wanted(w, h, &rw, &rh);
+        if (!scene_split_apply(rw, rh, w, h)) rw = w, rh = h;  // the same sizes: no write, no line
+        g_scene.store(pack(rw, rh));
+        host_log("resolution: display buffers %ux%u, rendering %ux%u (the scene %ux%u); the scene renders %s", at_<std::uint32_t>(out + 0x80),
+                 at_<std::uint32_t>(out + 0x84), w, h, rw, rh, scene_target_path(w, h));
         at_<std::uint32_t>(out + 0x80) = w;
         at_<std::uint32_t>(out + 0x84) = h;
         at_<float>(out + 0x88) = 0.0f;
@@ -1165,6 +1240,14 @@ bool live_resolution_install(ElfImage* image) {
     if (!install_display_rect_stubs())
         host_log("resolution: the render-target viewport code is not as expected; debug draws keep the display buffers' size");
     g_both_sides = install_scene_both_sides();
+    // bbhost-vk: the scene/UI split's sites, after the both-sides test they
+    // share a site with; the scene's size at the start goes in now, before
+    // the graphics manager is built.
+    if (scene_split_install(image)) {
+        std::uint32_t rw = 0, rh = 0;
+        scene_split_wanted(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), &rw, &rh);
+        scene_split_apply(rw, rh, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+    }
     if (!engine_prologue_hook(image, guest(kGxFree), free_pro, sizeof(free_pro), reinterpret_cast<void*>(&gx_free_hook)) ||
         !engine_prologue_hook(image, guest(kGxFreeRecord), free_rec_pro, sizeof(free_rec_pro), reinterpret_cast<void*>(&gx_free_record_hook)) ||
         !engine_prologue_hook(image, guest(kSwfPlayerCtor), swf_ctor_pro, sizeof(swf_ctor_pro), reinterpret_cast<void*>(&swf_player_ctor_hook)) ||
@@ -1250,6 +1333,20 @@ bool live_resolution_request(unsigned w, unsigned h, bool confirm) {
 }
 
 int live_resolution_take_answer() { return g_answer.exchange(0); }
+
+void live_resolution_scale_changed() {
+    if (!g_installed || !scene_split_available()) return;
+    // From a menu as a resolution is (the pick list closes first).
+    g_request_not_before.store(std::chrono::steady_clock::now().time_since_epoch().count() + kMenuSettleNs);
+    g_rescale.store(true);
+}
+
+void live_resolution_scene(unsigned* w, unsigned* h) {
+    std::uint64_t c = g_scene.load();
+    if (!c) c = g_current.load();
+    if (w) *w = static_cast<unsigned>(c >> 32);
+    if (h) *h = static_cast<unsigned>(c & 0xffffffffu);
+}
 
 void live_resolution_go_back() {
     const std::uint64_t b = g_before_asked.exchange(0);
