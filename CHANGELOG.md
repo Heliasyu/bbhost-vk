@@ -25,6 +25,11 @@
   - README: a "Testing bbhost-vk" section.
   - TESTING.md: the test-build session.
   - The updater needs no token (the repository is public).
+- **CI fix:** the release workflow's package-all job (the Steam Deck kit and the bundle check) failed
+  because it looked for `bbhost-linux-*` while the Linux package is now `bbhost-vk-linux-*`. The
+  Steam Deck and playtest kits, the bundle check, the publish step and the release announcement
+  now take either name (the kit is `bbhost-vk-steamdeck-*`), so the live-server check covers the
+  Linux and Steam Deck bundles again.
 
 ## Unreleased (Phase 4 groundwork and test-build prep, branch `phase-4-fsr411`)
 - **FSR 4.1.1** replays AMD's 4.1.1 upscaler on Vulkan (ported from

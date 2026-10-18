@@ -816,3 +816,21 @@ errors + warnings + perf) was run over everything that runs without the game, on
 `8b523a95a41ade1b9e868bba77c78e39ea491e79e1470d556d47569274fd0b0d`. It has no proprietary files and
 no missing libraries, and it reports `bbhost v0.2.18-vk.0-60-g3f98fb0`. Only this DEVLOG note
 comes after it.
+
+## 2026-10-18 (Sun), package-all CI fix (branch `phase-5-test-release`)
+
+PR #6's `package-all` check failed (run 39109940887): `tools/package_steamdeck.sh` looked for a
+`bbhost-linux-*` folder in the Linux tarball, found none (it is `bbhost-vk-linux-*` since
+e8a71d4), and copied the Deck files to `/`. The publish step and `check_release_bundle.sh` had
+the same old name, so the bundle check would have skipped the Linux and Steam Deck bundles
+(the live-server and https defaults that online play relies on).
+
+**Fixed:** the Steam Deck kit, the playtest kit, the bundle check, the publish step (it now
+reads the Linux tarball's own name instead of rebuilding it from the Windows zip's revision)
+and `announce_release.py` take either prefix. The kit is named `bbhost-vk-steamdeck-<rev>`.
+An empty match now stops with a message instead of copying to `/`.
+
+**Checked here:** the publish step's Linux half, run on the test tarball
+(-60-g3f98fb0): the Deck kit builds, the bare `bbhost` and the plugins extract, and the
+bundle check passes on 2 bundles (live server over https, no playtest kit). The Windows half
+runs in CI only.

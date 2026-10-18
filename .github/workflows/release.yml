@@ -137,19 +137,22 @@ jobs:
           w=$(ls dist/windows/bbhost-win-*.zip); v=$(basename "$w" .zip); v=${v#bbhost-win-}
           unzip -q -j "$w" "bbhost-win-$v/bbhost.exe" -d dist/x
           mv dist/x/bbhost.exe dist/release/bbhost.exe
-          tar xzf dist/linux/bbhost-linux-$v.tar.gz -C dist/x "bbhost-linux-$v/bbhost"
-          install -m 755 "dist/x/bbhost-linux-$v/bbhost" dist/release/bbhost
+          # bbhost-vk: the Linux package is named by tools/package_linux.sh
+          # (bbhost-vk-linux-<git describe>), not after the Windows zip's revision.
+          l=$(ls dist/linux/bbhost*-linux-*.tar.gz | head -1); ln=$(basename "$l" .tar.gz)
+          tar xzf "$l" -C dist/x "$ln/bbhost"
+          install -m 755 "dist/x/$ln/bbhost" dist/release/bbhost
           # The official plugins, signed in the packages, as assets of their own:
           # the plugin manager's "Get the latest official plugins" fetches
           # bbhost-plugin-<name>-windows.dll / -linux.so and their .sig.
           unzip -q "$w" "bbhost-win-$v/plugins/*" -d dist/x
-          tar xzf dist/linux/bbhost-linux-$v.tar.gz -C dist/x "bbhost-linux-$v/plugins"
+          tar xzf "$l" -C dist/x "$ln/plugins"
           for f in dist/x/bbhost-win-$v/plugins/*.dll; do
             [ -f "$f" ] || continue; n=$(basename "$f" .dll)
             cp "$f" "dist/release/bbhost-plugin-$n-windows.dll"
             [ -f "$f.sig" ] && cp "$f.sig" "dist/release/bbhost-plugin-$n-windows.dll.sig"
           done
-          for f in dist/x/bbhost-linux-$v/plugins/*.so; do
+          for f in dist/x/$ln/plugins/*.so; do
             [ -f "$f" ] || continue; n=$(basename "$f" .so)
             cp "$f" "dist/release/bbhost-plugin-$n-linux.so"
             [ -f "$f.sig" ] && cp "$f.sig" "dist/release/bbhost-plugin-$n-linux.so.sig"
