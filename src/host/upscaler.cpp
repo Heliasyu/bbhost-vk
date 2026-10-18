@@ -25,10 +25,10 @@ void log_settings(const char* why) {
     std::uint32_t w = 0, h = 0;
     upscaler::render_size(s.upscale_quality, 3840, 2160, &w, &h);
     g_kind.store(s.upscaler, std::memory_order_relaxed);
-    host_log("upscaler: %s: %s, %s (%ux%u from 3840x2160), sharpness %.1f, reactive mask %s; motion vectors view %s, GPU time %s "
+    host_log("upscaler: %s: %s, %s (%ux%u from 3840x2160), sharpness %.1f, reactive mask %s, jitter %s; motion vectors view %s, GPU time %s "
              "(a preset below Native AA renders the scene smaller: FSR 3.1 upscales it, otherwise bilinear; FSR 4.1.1 replays its assets when built, else FSR 3.1)",
              why, upscaler::kind_name(s.upscaler), upscaler::preset_name(s.upscale_quality), w, h, static_cast<double>(s.upscale_sharpness),
-             s.upscale_reactive ? "on" : "off", s.debug_motion_vectors ? "on" : "off", s.debug_upscaler_time ? "on" : "off");
+             s.upscale_reactive ? "on" : "off", s.upscale_jitter ? "on" : "off", s.debug_motion_vectors ? "on" : "off", s.debug_upscaler_time ? "on" : "off");
 }
 
 }  // namespace
@@ -45,15 +45,15 @@ void upscaler_log_startup() {
 }
 
 void upscaler_note_settings() {
-    static int last[6] = {-1, -1, -1, -1, -1, -1};
+    static int last[7] = {-1, -1, -1, -1, -1, -1, -1};
     const HostSettings s = host_settings();
     g_kind.store(s.upscaler, std::memory_order_relaxed);
-    const int now[6] = {s.upscaler, s.upscale_quality, static_cast<int>(s.upscale_sharpness * 10.0f + 0.5f), s.debug_motion_vectors ? 1 : 0,
-                        s.debug_upscaler_time ? 1 : 0, s.upscale_reactive ? 1 : 0};
+    const int now[7] = {s.upscaler, s.upscale_quality, static_cast<int>(s.upscale_sharpness * 10.0f + 0.5f), s.debug_motion_vectors ? 1 : 0,
+                        s.debug_upscaler_time ? 1 : 0, s.upscale_reactive ? 1 : 0, s.upscale_jitter ? 1 : 0};
     bool changed = false;
-    for (int i = 0; i < 6; ++i) changed |= now[i] != last[i];
+    for (int i = 0; i < 7; ++i) changed |= now[i] != last[i];
     const bool first = last[0] < 0;
-    for (int i = 0; i < 6; ++i) last[i] = now[i];
+    for (int i = 0; i < 7; ++i) last[i] = now[i];
     if (changed && !first) log_settings("changed");
 }
 

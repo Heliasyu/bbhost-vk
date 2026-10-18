@@ -73,6 +73,7 @@ struct HostSettings {
     int upscaler = 1;                // 0 Off, 1 FSR 1 (bbhost's own), 2 FSR 3.1, 3 FSR 4.1.1
     int upscale_quality = 0;         // 0 Native AA, 1 Quality, 2 Balanced, 3 Performance, 4 Ultra Performance
     float upscale_sharpness = 0.8f;  // 0..1; 0.8 is RCAS at 0.2 stops, FSR 1's own
+    bool upscale_jitter = true;      // the scene's sub-pixel jitter for FSR 3.1 / 4.1.1 (testers can turn it off)
     bool upscale_reactive = true;    // Phase 3: FSR 3.1's reactive mask from the opaque snapshot
     bool debug_motion_vectors = false;  // the motion-vector view (a no-op until Phase 2)
     bool debug_upscaler_time = false;   // the presenter's GPU timestamps, under the FPS counter

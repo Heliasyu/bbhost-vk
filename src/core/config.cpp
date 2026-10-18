@@ -148,6 +148,7 @@ void apply_values(const std::map<std::string, std::string>& kv, HostConfig* c) {
     }
     str("update.source", &c->update_source);
     str("update.token_file", &c->update_token_file);
+    str("upscaler.fsr4_dll", &c->fsr4_dll);
     str("player.name", &c->player_name);
     str("player.ime", &c->ime_mode);
     num("video.width", &c->width);

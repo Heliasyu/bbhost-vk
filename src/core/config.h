@@ -34,6 +34,7 @@ struct HostConfig {
     int update_check = -1;           // update.check: true/false
     std::string update_source;       // update.source: a GitHub "releases/latest" API URL
     std::string update_token_file;   // update.token_file
+    std::string fsr4_dll;            // upscaler.fsr4_dll: bbhost-vk, the user's amd_fidelityfx_upscaler_dx12.dll (FSR 4.1.1 is built from it)
     std::string player_name;   // player.name: what the name box starts from, or receives with "auto" (default online_id)
     std::string ime_mode;      // player.ime / BBHOST_IME: "type" (default: type in the window) or "auto" (the name is player.name at once)
     int width = 1920;          // video.width

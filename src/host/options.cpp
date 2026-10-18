@@ -94,6 +94,7 @@ enum SettingId {
     kUpscaleQuality,
     kUpscaleSharpness,
     kUpscaleReactive,
+    kUpscaleJitter,
     kDebugMotionVectors,
     kDebugUpscalerTime,
     kSettingCount,
@@ -267,6 +268,10 @@ Setting g_set[kSettingCount] = {
     {"upscale_reactive", "Upscaler reactive mask", {"Off", "On"}, 1,
      "FSR 3.1: marks particles, fog, Blood Echoes, the lantern's glow and other transparent effects so they do not smear or ghost. Off for comparison.",
      false},
+    // bbhost-vk: the scene's sub-pixel jitter (host/temporal_inputs.h), for testers.
+    {"upscale_jitter", "Upscaler jitter", {"Off", "On"}, 1,
+     "FSR 3.1 / 4.1.1: the 3D scene shifts by a fraction of a pixel each frame so the upscaler can rebuild detail. Off for comparison (a softer, more aliased picture); FSR 1 and Off never jitter.",
+     false},
     {"debug_motion_vectors", "Show motion vectors", {"Off", "On"}, 0,
      "Debug: draws the scene's motion vectors over the picture - red/green how far a pixel moved sideways/up-down, blue where a moving object (not the camera) moved it, dark where there is no camera. Needs the scene/UI split; computes motion vectors even with no temporal upscaler.", false},
     {"debug_upscaler_time", "Show upscaler GPU time", {"Off", "On"}, 0,
@@ -311,6 +316,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kUpscaleQuality},
     {Row::Option, nullptr, kUpscaleSharpness},
     {Row::Option, nullptr, kUpscaleReactive},
+    {Row::Option, nullptr, kUpscaleJitter},
     {Row::Option, nullptr, kDebugMotionVectors},
     {Row::Option, nullptr, kDebugUpscalerTime},
     {Row::Header, "PC ENHANCEMENTS"},
@@ -684,6 +690,7 @@ void apply(int id) {
             break;
         case kUpscaleSharpness:
         case kUpscaleReactive:
+        case kUpscaleJitter:
         case kDebugMotionVectors:
         case kDebugUpscalerTime:
             break;  // the settings object carries them (host/upscaler.h reads it)
@@ -810,6 +817,7 @@ void rebuild_settings() {
     h.upscale_quality = std::clamp(index_of(kUpscaleQuality), 0, 4);
     h.upscale_sharpness = static_cast<float>(std::clamp(index_of(kUpscaleSharpness), 0, 10)) / 10.0f;
     h.upscale_reactive = on_of(kUpscaleReactive);
+    h.upscale_jitter = on_of(kUpscaleJitter);
     h.debug_motion_vectors = on_of(kDebugMotionVectors);
     h.debug_upscaler_time = on_of(kDebugUpscalerTime);
     std::lock_guard<std::mutex> lk(g_settings_mu);
