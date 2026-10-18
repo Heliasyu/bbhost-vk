@@ -9,7 +9,8 @@
 // direction rotated without translation, the previous view times the
 // inverse current view built in double on the CPU - and the velocity
 // target's decoding follow IFreemz's bb_dlss_motion.comp
-// (shadPS4-Bloodborne-DLSS-FSR, GPL-2.0-or-later).
+// (shadPS4-Bloodborne-DLSS-FSR, GPL-2.0-or-later; portions Copyright 2026
+// IFreemz).
 //
 // Out: RGBA16F, rg = current-to-previous motion in render pixels (+y down),
 // b = 1 where the motion is an object's, a = 1 where the camera's was valid.

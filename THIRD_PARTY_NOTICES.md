@@ -42,6 +42,24 @@ docs/vk/DEVLOG.md; none of their code is in bbhost-vk:
 - **Awakenchan**, [BloodBorneButPc](https://github.com/Awakenchan/BloodBorneButPc)
   (GPL-2.0): how scene size versus output size affects the game's memory.
 
+## Adapted code (Phase 2)
+- **IFreemz**, [shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR)
+  (GPL-2.0-or-later, which is GPL-3.0-compatible): the motion-vector math
+  in `src/host/shaders/motion.comp` (view-space reprojection from D3D depth,
+  the sky as a direction, the previous view times the inverse current view
+  built in double, the decoding of the game's velocity target) follows his
+  `bb_dlss_motion.comp`; bbhost-vk's version is rewritten for its own
+  bindings and credited in the file. Facts from the same project: the
+  velocity, depth, motion-blur and UI shader hashes, the jitter rule, the
+  majority camera and the section-switch threshold.
+
+## Ideas and facts used, no code copied (Phase 2)
+- **bbport** (deadinside28/bloodborne_pc, GPL-2.0) and **Supermedo**'s
+  build of it: the 864-byte scene-constant layout, the constant-buffer
+  classes, the viewport-offset jitter, the moving gate and the
+  previous-frame-positions approach to object motion
+  (`src/host/temporal/`).
+
 ## Not distributed
 AMD's FSR 4.1.1 (`amd_fidelityfx_upscaler_dx12.dll`) and anything built from
 it are never part of this repository or its packages (docs/vk/PLAN.md,
