@@ -444,10 +444,14 @@ Phase 0).
   GPU Time on the PC.
 
 ### Test results (build box)
-- `ctest`: 46 tests, 0 failures (16 skip without game files).
-  `temporal_test` (Halton, phase counts, scene-constant parsing, history
+- `packaging/vk/build.sh`: configure, build and ctest pass: 46 tests, 0
+  failures (19 skip without game files). `temporal_test` (Halton, phase counts, scene-constant parsing, history
   and every cut kind, motion against direct projection to 0.02 px);
   `motion_shader_test`: "llvmpipe: 320x180 pixels match the CPU math
   (worst 0.0156 px, mean |motion| 8.83 px, 20404 sky)".
+- Phase 2 binary: built by `packaging/vk/build.sh` from 4341e1a
+  (`v0.2.18-vk.0-31-g4341e1a`), stripped, needs GLIBC_2.38, SHA-256
+  `fd56aa030e6ddbbafdac70647d4e3dd3fa1e445880c5904415fffd4832846728`
+  (on the build box at /workspace/bbhost-vk-builds/phase2/; not released).
 - Player's PC test: pending (TESTING.md, "Pending combined test session",
   part C).
