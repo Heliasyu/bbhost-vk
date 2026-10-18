@@ -104,7 +104,7 @@ and keep your own `plugins/`. Resolution is 3840x2160 (4K) unless a part says ot
 
 ### 1. Launches (A, 5 min): `bbtest start t1-launch`
 1. The setup window opens. Under the upscaling options: **Upscaler** has Off / FSR 1 / FSR 3.1 /
-   FSR 4.1.1, and **Upscaling quality**, **Upscaler sharpness**, **Upscaler reactive mask**,
+   FSR 4.1.1, and **Upscaling quality**, **Upscaling sharpness**, **Upscaler reactive mask**,
    **Upscaler jitter**, the two debug checkboxes and the **FSR 4.1.1 DLL** path row are all
    there. Frame rate offers **120**.
 2. Set them all to non-default values, then back to **FSR 1** / **Native AA**, and press Play.

@@ -26,7 +26,8 @@ DLL and no FSR 4.1.1 assets.
 **Install over an existing bbhost setup**
 1. Back up your current binary first: in your bbhost folder, `cp bbhost.bin bbhost.bin.upstream`
    (bbhost-vk's wrapper `packaging/vk/bbhost` runs `bbhost.bin`). Also keep a copy of
-   `~/.config/bbhost/bbhost.toml`. bbhost-vk adds its own keys to it, and upstream ignores them.
+   `~/.config/bbhost/bbhost-options.toml` (the F10 settings and your account sign-in) and
+   `~/.config/bbhost/bbhost.toml`. bbhost-vk adds its own keys to them, and upstream ignores them.
 2. Unpack the tarball anywhere, then copy its `bbhost` over your `bbhost.bin`:
    `tar xzf bbhost-vk-linux-*.tar.gz && cp bbhost-vk-linux-*/bbhost /path/to/your/bbhost/bbhost.bin`.
    Keep your own `plugins/` folder. The official plugins are signed by upstream, and the test
@@ -37,11 +38,12 @@ DLL and no FSR 4.1.1 assets.
 
 **Settings.** The setup window (`--setup`) and F10 > UPSCALING have: **Upscaler** (Off / FSR 1 /
 FSR 3.1 / FSR 4.1.1), **Upscaling quality** (Native AA, Quality 67%, Balanced 58%, Performance 50%,
-Ultra Performance 33%), **Upscaler sharpness**, **Upscaler reactive mask**, **Upscaler jitter**,
+Ultra Performance 33%), **Upscaling sharpness**, **Upscaler reactive mask**, **Upscaler jitter**,
 **Show motion vectors** and **Show Upscaler GPU Time**. The GPU time line shows each pass: MV,
 reactive, opaque, FSR 3.1 or 4.1.1, and copy. Frame rate goes up to **120**. The setup window
 also has the FSR 4.1.1 DLL path and whether its assets are built. The game's own System menu has
-PC Upscaling and Upscaling Quality. Everything is saved in `~/.config/bbhost/bbhost.toml`.
+PC Upscaling and Upscaling Quality. The settings are saved in `~/.config/bbhost/bbhost-options.toml`; the FSR 4.1.1 DLL path
+(`upscaler.fsr4_dll`) goes in `~/.config/bbhost/bbhost.toml`.
 
 **FSR 4.1.1 (optional, once per PC).** FSR 4.1.1 cannot be shipped, so you build it from your
 own copy of AMD's DLL:
