@@ -600,3 +600,12 @@ messages and bloodstains, a summon sign or bell).
 - `temporal_test`: the FSR 3.1 policy (sizes, every reset kind, sharpening,
   conventions, camera defaults).
 - `motion_shader_test`: the depth copy is bit-exact.
+- `packaging/vk/build.sh`: configure, build and ctest pass (47 tests, 0
+  failures, 19 skipped).
+- Phase 3 binary ("early playable FSR 3.1 build"): built by
+  `packaging/vk/build.sh` from 008165c (`v0.2.18-vk.0-39-g008165c`),
+  stripped, needs GLIBC_2.38, SHA-256
+  `d50f617592061a63f8137e4a3a2dcac88606acc6fe372d96c8e66d7ade46f511`
+  (on the build box at /workspace/bbhost-vk-builds/phase3/; not released).
+- Player's PC test: pending (TESTING.md, "Pending combined test session",
+  parts D and E).
