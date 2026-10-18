@@ -11,6 +11,7 @@
 // bilinear copy. FSR 4.1.1 selected uses this until Phase 4.
 
 #include "host/temporal/fsr3_policy.h"
+#include "host/upscaler_inputs.h"
 
 #include <cstdint>
 #include <string>
@@ -24,7 +25,9 @@ struct RtImage;
 // target written.
 // `out`: where in the target the scene goes (fsr3_output_rect_locked): FSR's
 // output size and the copy back, never the target's extent.
-bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out);
+// test10 (BBHOST_POST_AT_RENDER): `color`, when given, is the upscaler's
+// colour input instead of the scene's - the post chain's render-size result.
+bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, const UpscalerImage* color = nullptr);
 // test4: whether a colour target being made should take STORAGE usage so FSR
 // 3.1 writes it directly instead of its own image and a copy (0.23 ms a frame
 // at 3840x2160 in test3): RGBA16F, one layer, exactly the display buffers'

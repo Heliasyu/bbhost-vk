@@ -244,7 +244,7 @@ temporal::OutputRect fsr3_output_rect_locked(const RtImage* target, const float*
     return r;
 }
 
-bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
+bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, const UpscalerImage* color) {
     static const bool disabled = [] {
         const char* e = std::getenv("BBHOST_FSR3");
         return e && e[0] == '0';
@@ -260,7 +260,13 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
         serial = host_opt_serial();
         hs = host_settings();
     }
-    const UpscalerInputs& in = temporal_inputs_locked();
+    const UpscalerInputs& in0 = temporal_inputs_locked();
+    static UpscalerInputs in_post;  // test10: the inputs with the post chain's colour
+    if (color) {
+        in_post = in0;
+        in_post.color = *color;
+    }
+    const UpscalerInputs& in = color ? in_post : in0;
     if (!target || target->depth || target->layers != 1) return fall_back(Fallback::Target);
     if (!in.valid || !in.color.image || !in.depth_copy.image || !in.motion.image || in.frame != hle_video_flip_count())
         return fall_back(Fallback::NoInputs);
@@ -567,7 +573,7 @@ std::string host_gpu_upscale_timing() { return host_gpu_pass_timing(); }
 #else  // !BBHOST_HAVE_FSR_VULKAN: upscaler_scene_pass() never asks for FSR 3.1
 
 namespace gpu {
-bool fsr3_scale_pass_locked(RtImage*, const temporal::OutputRect&) { return false; }
+bool fsr3_scale_pass_locked(RtImage*, const temporal::OutputRect&, const UpscalerImage*) { return false; }
 bool fsr3_target_storage_wanted(int, std::uint32_t, std::uint32_t, std::uint32_t) { return false; }
 bool fsr4_replay_unavailable() { return true; }
 temporal::OutputRect fsr3_output_rect_locked(const RtImage*, const float*) { return {}; }

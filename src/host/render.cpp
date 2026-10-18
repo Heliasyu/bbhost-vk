@@ -1214,6 +1214,10 @@ void mb_skip_touched(std::uint64_t base) {
                  static_cast<unsigned long long>(base), static_cast<unsigned long long>(hle_video_flip_count()));
 }
 void mb_skip_materialize_locked();  // below copy_layers_locked
+// test10 (below): the render-size stand-in of a target while the post chain
+// runs at render size, else null; and closing that window (FSR first).
+RtImage* post_resolve_locked(std::uint64_t base);
+void post_end_window_locked(const char* why);
 // Other work is about to be recorded: a held-back draw 1 is done first.
 void mb_skip_other_work_locked() {
     if (g_mb_skip_mode && !t_mb_exempt && g_mb_b_bound) {  // B written by something other than draw 1
@@ -1290,12 +1294,231 @@ void mb_skip_materialize_locked() {
         host_log("render: motion blur skip: its first draw done after all (A 0x%llx -> B 0x%llx, flip %llu); learning again",
                  static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
                  static_cast<unsigned long long>(hle_video_flip_count()));
+    if (RtImage* sa = post_resolve_locked(g_mb_skip.a())) a = sa;  // test10: at render size
+    if (RtImage* sb = post_resolve_locked(g_mb_skip.b())) b = sb;
     if (!a || !b || a == b) return;
     const bool ex = t_mb_exempt;
     t_mb_exempt = true;  // our own copy into B is not "something else"
     copy_layers_locked(*a, *b);
     rt_written(*b);
     t_mb_exempt = ex;
+}
+
+// ---------------------------------------------------------------------------
+// test10, BBHOST_POST_AT_RENDER (on unless 0): the game's post-processing
+// before its tonemap at the render size, FSR 4.1.1 / 3.1 after it.
+//
+// The chain (t10/t11 `post-chain:` lines, FSR 4.1.1 Performance 1080p -> 4K):
+//   #0 the scale pass: FSR wrote A (0x161e60000, 4K RGBA16F) from the scene
+//   #1 7d668276+fbe7c4b6 onto A; #2-#3 A -> the 2352x882 DoF buffers;
+//   #4 d3ca03f3+111fce32 A + DoF -> C; #5 4c37ae6d+bf368417 onto C;
+//   #6 the 1080p velocity (d3c8bb21); #7-#8 the motion blur C -> B -> A;
+//   then (chromatic aberration bb92a5b6 A -> C, or) the bloom's downsample,
+//   the bloom, the tonemap 1ea5a07e+ccb08339, the grain and the UI.
+// With it on, the scale pass writes nothing: A gets a render-size stand-in
+// holding the scene. Every draw of the moved programs below into an
+// output-size RGBA16F target draws into that target's stand-in instead (its
+// viewport and scissor scaled), and every draw that samples a target with a
+// stand-in samples the stand-in. The first draw of any other program - or a
+// dispatch, copy or clear that touches a stand-in's target - closes the
+// window: FSR upscales the last stand-in written into its real target, and
+// everything after (CA, bloom, tonemap, grain, UI) runs as before, at 4K.
+// The moved programs' only resolution-dependent inputs found in the logs
+// are normalised UVs (the motion blur's taps, its 1/1080 threshold); a
+// shader using pixel offsets would show as a shifted or wider effect
+// (DoF, fog) - the risky passes, named in DEVLOG.
+// Per frame it falls back to the test9 order when the scale pass is not
+// FSR's (menus, the Dream's other paths, loads), FSR has no inputs, or the
+// sizes are not output = target; and for good if FSR fails at the window's
+// end (the stand-in is copied in, the log says why).
+const bool g_post_mode = [] {
+    const char* e = std::getenv("BBHOST_POST_AT_RENDER");
+    return !(e && e[0] == '0');
+}();
+bool g_post_on = g_post_mode;     // BBHOST_AB_SECONDS turns it off and on
+bool g_post_dead = false;         // FSR failed at a window's end: off for the session
+thread_local bool t_in_draw = false;  // draw_impl: a dispatch's prefetch is not a draw's
+std::map<std::uint64_t, RtImage> g_post_shadows;  // by the real target's base
+struct PostWindow {
+    bool open = false;
+    std::uint64_t flip = ~0ull;
+    temporal::OutputRect out;
+    std::uint32_t rw = 0, rh = 0;   // the render size
+    std::uint32_t ow = 0, oh = 0;   // the real targets' size
+    std::uint64_t last = 0;         // the stand-in written last: FSR's input
+    std::vector<std::uint64_t> bases;  // targets with a stand-in this frame
+};
+PostWindow g_pw;
+struct PostStats {
+    std::uint64_t frames = 0, redirected = 0, fallbacks = 0, fsr_failed = 0;
+    const char* last_fallback = "";
+    const char* last_end = "";
+} g_post_stats;
+
+bool post_moved_ps(std::uint32_t ps) {
+    switch (ps) {
+        case 0xfbe7c4b6u:  // #1 the colour/fog pass onto A
+        case 0x265a6d2du:  // #2 A -> the DoF's 2352x882 buffer
+        case 0xe80526ccu:  // #3 its blur (also the bloom's; harmless: those targets are small)
+        case 0x111fce32u:  // #4 the DoF composite
+        case 0xbf368417u:  // #5 onto the DoF result
+        case 0xd3c8bb21u:  // #6 the motion blur's 1080p velocity
+        case 0xe0305cefu:  // #7-#8 the motion blur
+            return true;
+        default:
+            return false;
+    }
+}
+
+RtImage* post_resolve_locked(std::uint64_t base) {
+    if (!g_pw.open || !base) return nullptr;
+    for (std::uint64_t b : g_pw.bases)
+        if (b == base) {
+            auto it = g_post_shadows.find(base);
+            return it == g_post_shadows.end() ? nullptr : &it->second;
+        }
+    return nullptr;
+}
+
+void ensure_initialised(RtImage& r);
+// The stand-in for `real` at the render size, made once (again on a size change).
+RtImage* post_shadow_locked(const RtImage& real) {
+    auto it = g_post_shadows.find(real.base);
+    if (it != g_post_shadows.end()) {
+        RtImage& sh = it->second;
+        if (sh.width == g_pw.rw && sh.height == g_pw.rh && sh.format == real.format) return &sh;
+        destroy_rt_image(sh);
+        g_post_shadows.erase(it);
+    }
+    RtImage r;
+    r.base = real.base;
+    r.format = real.format;
+    r.width = g_pw.rw;
+    r.height = g_pw.rh;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = r.format;
+    ici.extent = {r.width, r.height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(g.device, &ici, nullptr, &r.image) != VK_SUCCESS) return nullptr;
+    if (!rt_image_memory(r.image, r.memory)) {
+        vkDestroyImage(g.device, r.image, nullptr);
+        if (r.memory.memory) defer_destroy_image(VK_NULL_HANDLE, r.memory);
+        return nullptr;
+    }
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = r.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = r.format;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(g.device, &vci, nullptr, &r.view) != VK_SUCCESS) {
+        vkDestroyImage(g.device, r.image, nullptr);
+        defer_destroy_image(VK_NULL_HANDLE, r.memory);
+        return nullptr;
+    }
+    host_log("post-at-render: a %ux%u stand-in for target 0x%llx (%ux%u format %d)", r.width, r.height,
+             static_cast<unsigned long long>(real.base), real.width, real.height, static_cast<int>(real.format));
+    RtImage& made = (g_post_shadows[real.base] = r);
+    ensure_initialised(made);
+    return &made;
+}
+
+void post_fallback(const char* why) {
+    ++g_post_stats.fallbacks;
+    if (std::strcmp(g_post_stats.last_fallback, why) != 0) {
+        g_post_stats.last_fallback = why;
+        host_log("post-at-render: this frame as before (flip %llu): %s", static_cast<unsigned long long>(hle_video_flip_count()), why);
+    }
+}
+
+// At the scale pass: open the window, the scene copied into A's stand-in.
+// False: as before (FSR at the scale pass).
+bool post_begin_locked(RtImage* target, RtImage* scene, const temporal::OutputRect& out) {
+    if (!g_post_mode || !g_post_on || g_post_dead) return false;
+    if (g_pw.open) post_end_window_locked("a second scale pass");
+    const UpscalerInputs& in = temporal_inputs_locked();
+    if (!target || !scene || target->depth || target->layers != 1 || target->format != VK_FORMAT_R16G16B16A16_SFLOAT) {
+        post_fallback("the scale pass's target is not one RGBA16F image");
+        return false;
+    }
+    if (!in.valid || !in.color.image || !in.depth_copy.image || !in.motion.image || in.frame != hle_video_flip_count()) {
+        post_fallback("no upscaler inputs");
+        return false;
+    }
+    if (out.x || out.y || out.w != target->width || out.h != target->height || !in.render_w || !in.render_h ||
+        in.render_w >= out.w || in.render_h >= out.h || scene->width < in.render_w || scene->height < in.render_h ||
+        scene->format != target->format) {
+        post_fallback("the output is not the whole target, or the render size is not smaller");
+        return false;
+    }
+    g_pw = PostWindow{};
+    g_pw.flip = hle_video_flip_count();
+    g_pw.out = out;
+    g_pw.rw = in.render_w;
+    g_pw.rh = in.render_h;
+    g_pw.ow = target->width;
+    g_pw.oh = target->height;
+    RtImage* sh = post_shadow_locked(*target);
+    if (!sh) {
+        post_fallback("no memory for the stand-in");
+        return false;
+    }
+    copy_layers_locked(*scene, *sh);  // the scene's used corner, render size
+    rt_written(*sh);
+    g_pw.open = true;
+    g_pw.bases.push_back(target->base);
+    g_pw.last = target->base;
+    g_post_stats.last_fallback = "";
+    return true;
+}
+
+void post_end_window_locked(const char* why) {
+    if (!g_pw.open) return;
+    g_pw.open = false;  // first: what FSR records resolves the real targets
+    RtImage* real = find_render_target(g_pw.last);
+    auto it = g_post_shadows.find(g_pw.last);
+    if (!real || it == g_post_shadows.end()) return;
+    RtImage& sh = it->second;
+    UpscalerImage ui;
+    ui.image = sh.image;
+    ui.format = sh.format;
+    ui.width = sh.width;
+    ui.height = sh.height;
+    ui.used_w = g_pw.rw;
+    ui.used_h = g_pw.rh;
+    ensure_initialised(*real);
+    const bool ok = fsr3_scale_pass_locked(real, g_pw.out, &ui);
+    if (!ok) {
+        ++g_post_stats.fsr_failed;
+        g_post_dead = true;
+        copy_layers_locked(sh, *real);  // a quarter of the picture, once: never a black frame
+        host_log("post-at-render: off for this session: the upscaler did not run at the chain's end (%s); the scale pass upscales again", why);
+    } else {
+        ++g_post_stats.frames;
+    }
+    rt_written(*real);
+    if (std::strcmp(g_post_stats.last_end, why) != 0) {
+        g_post_stats.last_end = why;
+        host_log("post-at-render: the chain at render size ends at %s (flip %llu); FSR upscales 0x%llx there",
+                 why, static_cast<unsigned long long>(hle_video_flip_count()), static_cast<unsigned long long>(g_pw.last));
+    }
+    if (g_post_stats.frames % 3600 == 1)
+        host_log("post-at-render: %llu frames, %llu draws at render size, %llu frames as before (last: %s), %llu upscaler failures",
+                 static_cast<unsigned long long>(g_post_stats.frames), static_cast<unsigned long long>(g_post_stats.redirected),
+                 static_cast<unsigned long long>(g_post_stats.fallbacks), *g_post_stats.last_fallback ? g_post_stats.last_fallback : "-",
+                 static_cast<unsigned long long>(g_post_stats.fsr_failed));
+}
+
+// Work outside the chain's draws that touches a target with a stand-in: the
+// window closes first, so it sees the real (upscaled) target.
+void post_touch_locked(std::uint64_t base, const char* what) {
+    if (g_pw.open && post_resolve_locked(base)) post_end_window_locked(what);
 }
 
 RtImage* rt_image(std::uint64_t base, VkFormat format, std::uint32_t width, std::uint32_t height, bool depth,
@@ -6672,6 +6895,7 @@ std::size_t rt_bytes_per_pixel(const RtImage& r) { return format_bytes_per_pixel
 // width*height*bpp of the unpadded image, so there is no size check here.
 void clear_image_locked(RtImage& r, const float rgba[4], std::uint32_t first_layer = 0, std::uint32_t layer_count = ~0u) {
     mb_skip_other_work_locked();  // test8
+    post_touch_locked(r.base, "a clear");  // test10
     if (r.base == g_order_target && hle_video_flip_count() >= 2000 && g_order_logs.load() < 120) {
         g_order_logs.fetch_add(1);
         host_log("order: CLEAR 0x%llx rgba=%.3f %.3f %.3f %.3f", static_cast<unsigned long long>(r.base), rgba[0], rgba[1], rgba[2],
@@ -7348,6 +7572,8 @@ bool render_copy_target_locked(std::uint64_t src_base, std::uint64_t dst_base, s
     mb_skip_other_work_locked();  // test8
     mb_skip_touched(src_base);
     mb_skip_touched(dst_base);
+    post_touch_locked(src_base, "a copy");  // test10
+    post_touch_locked(dst_base, "a copy");
     // BBHOST_WATCH_COPY_DST=0x<base>: every whole-target copy into that
     // address, with the flip. A frame can go wrong without any draw being
     // different - the engine also moves whole surfaces around, and a copy from
@@ -7658,6 +7884,17 @@ void note_scale_pass(const std::string& pipeline) {
 void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t* stage_user, StageImages& out,
                            const GxStageRecords* gx, const KeyStage* resolved) {
     mb_skip_other_work_locked();  // test8: a draw or dispatch while the motion blur's draw 1 is held
+    struct PostReads {  // test10: a dispatch reading a target with a stand-in closes the window
+        StageImages& out;
+        ~PostReads() {
+            if (!g_pw.open || t_in_draw) return;
+            for (const StageImages::Image& im : out.images)
+                if (im.resolved && post_resolve_locked(tsharp_base(im.w))) {
+                    post_end_window_locked("a dispatch");
+                    return;
+                }
+        }
+    } post_reads{out};
     struct MbReads {  // ... and whether it reads the scratch target the skip watches
         StageImages& out;
         ~MbReads() {
@@ -7759,6 +7996,10 @@ void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre,
                 view = VK_NULL_HANDLE;
                 shape_ok = false;
             }
+            // test10: a target drawn at render size this frame is read there.
+            // Only RGBA16F reads (dfmt 16_16_16_16, nfmt float), the stand-in's own format.
+            if (view && g_pw.open && !b.storage && ((w[1] >> 20) & 0x3f) == 12 && ((w[1] >> 26) & 0xf) == 7)
+                if (const RtImage* sh = post_resolve_locked(tsharp_base(w))) view = sh->view;
             if (yebis && view && w[0] != 0xffffffffu) {
                 if (mblur || tlog.fetch_add(1) < 24) {  // test8: test7c's motion blur lines lost to the shared 24
                     const std::uint64_t tbase = tsharp_base(w);
@@ -11795,6 +12036,11 @@ static bool draw_impl(const GpuDraw& d) {
         explicit MbExempt(bool on) : was(t_mb_exempt) { t_mb_exempt = on; }
         ~MbExempt() { t_mb_exempt = was; }
     } mb_exempt(mb_draw);
+    struct InDraw {  // test10: prefetches from here on are a draw's, not a dispatch's
+        bool was;
+        InDraw() : was(t_in_draw) { t_in_draw = true; }
+        ~InDraw() { t_in_draw = was; }
+    } in_draw;
     bool fsr3_replaced = false;  // bbhost-vk Phase 3: FSR 3.1 wrote this scale pass's target
     {
         GpuPhaseTimer t(kPhasePrefetch, phase_weight);
@@ -11852,7 +12098,9 @@ static bool draw_impl(const GpuDraw& d) {
             // where BBHOST_SKIP_PASS drops one.
             if (upscaler_scene_pass() == ScenePass::Fsr31 && s.color[0]) {
                 ensure_initialised(*s.color[0]);
-                fsr3_replaced = fsr3_scale_pass_locked(s.color[0], out_rect);
+                // test10: the scene goes to A's render-size stand-in; FSR
+                // runs where the moved post chain ends (post_end_window_locked).
+                fsr3_replaced = post_begin_locked(s.color[0], scene, out_rect) || fsr3_scale_pass_locked(s.color[0], out_rect);
             }
         }
         t_resolve_site = kSiteBuffers;
@@ -12128,19 +12376,19 @@ static bool draw_impl(const GpuDraw& d) {
                      t.width, t.height, static_cast<int>(t.format));
         }
     }
-    // test8, BBHOST_AB_SECONDS=<s>: every s seconds the motion blur skip goes
-    // off or on again, and each half's frame times (scale pass to scale pass)
+    // test8/test10, BBHOST_AB_SECONDS=<s>: every s seconds post-at-render
+    // (BBHOST_POST_AT_RENDER) goes off or on again, and each half's frame times (scale pass to scale pass)
     // are logged as `ab:` lines - both numbers from one run, same spot.
     if (pl.scale_pass == 1) {
         static const long ab_s = [] {
             const char* e = std::getenv("BBHOST_AB_SECONDS");
             return e ? std::strtol(e, nullptr, 10) : 0L;
         }();
-        static std::uint64_t last_ns = 0, phase_start_ns = 0, frames = 0, over8 = 0, over12 = 0;
+        static std::uint64_t last_ns = 0, phase_start_ns = 0, frames = 0, over8 = 0, over833 = 0, over12 = 0;
         static double sum_ms = 0, max_ms = 0;
         static std::uint64_t last_flip = ~0ull;
         const std::uint64_t flip = hle_video_flip_count();
-        if (ab_s > 0 && g_mb_skip_mode && flip != last_flip) {
+        if (ab_s > 0 && g_post_mode && flip != last_flip) {
             last_flip = flip;
             const std::uint64_t now = host_clock_monotonic_ns();
             if (!phase_start_ns) phase_start_ns = now;
@@ -12150,20 +12398,20 @@ static bool draw_impl(const GpuDraw& d) {
                 sum_ms += ms;
                 max_ms = std::max(max_ms, ms);
                 over8 += ms > 8.42;
+                over833 += ms > 8.333;
                 over12 += ms > 12.0;
             }
             last_ns = now;
             if (now - phase_start_ns >= static_cast<std::uint64_t>(ab_s) * 1000000000ull) {
                 if (frames)
-                    host_log("ab: motion blur skip %s for %.0f s: %llu frames, %.1f fps, %.2f ms average, max %.1f ms, %llu over 8.42 ms, %llu over 12 ms; %llu pairs skipped so far",
-                             g_mb_skip_on ? "on" : "off", static_cast<double>(now - phase_start_ns) / 1e9, static_cast<unsigned long long>(frames),
+                    host_log("ab: post at render %s for %.0f s: %llu frames, %.1f fps, %.2f ms average, max %.1f ms, %llu over 8.33 ms, %llu over 8.42 ms, %llu over 12 ms; %llu pairs skipped so far",
+                             g_post_on ? "on" : "off", static_cast<double>(now - phase_start_ns) / 1e9, static_cast<unsigned long long>(frames),
                              1000.0 * static_cast<double>(frames) / sum_ms, sum_ms / static_cast<double>(frames), max_ms,
-                             static_cast<unsigned long long>(over8), static_cast<unsigned long long>(over12),
+                             static_cast<unsigned long long>(over833), static_cast<unsigned long long>(over8), static_cast<unsigned long long>(over12),
                              static_cast<unsigned long long>(g_mb_skip.pairs_skipped()));
-                mb_skip_other_work_locked();  // a held draw 1 is done before the skip goes off
-                g_mb_skip_on = !g_mb_skip_on;
+                g_post_on = !g_post_on;  // test10: from the next scale pass
                 phase_start_ns = now;
-                frames = over8 = over12 = 0;
+                frames = over8 = over833 = over12 = 0;
                 sum_ms = max_ms = 0;
             }
         }
@@ -12233,6 +12481,43 @@ static bool draw_impl(const GpuDraw& d) {
             }
         }
     }
+    // test10, BBHOST_POST_AT_RENDER: inside the window, the moved programs draw
+    // into their output-size targets' render-size stand-ins; any other
+    // program closes it (FSR upscales the last stand-in first).
+    if (g_pw.open && pl.scale_pass != 1) {
+        if (g_pw.flip != hle_video_flip_count()) {
+            post_end_window_locked("the next frame");
+        } else if (!post_moved_ps(pl.orb_ps)) {
+            post_end_window_locked(pl.name.c_str());
+        } else if (s.color[0]) {
+            RtImage& t = *s.color[0];
+            bool mrt = false;
+            for (int c = 1; c < 8; ++c) mrt |= s.color[c] != nullptr;
+            if (t.width == g_pw.ow && t.height == g_pw.oh && t.format == VK_FORMAT_R16G16B16A16_SFLOAT && t.layers == 1 && !mrt && !s.depth) {
+                if (RtImage* sh = post_shadow_locked(t)) {
+                    if (std::find(g_pw.bases.begin(), g_pw.bases.end(), t.base) == g_pw.bases.end()) g_pw.bases.push_back(t.base);
+                    g_pw.last = t.base;
+                    s.color[0] = sh;
+                    rt_written(*sh);
+                    const float rx = static_cast<float>(g_pw.rw) / static_cast<float>(g_pw.ow);
+                    const float ry = static_cast<float>(g_pw.rh) / static_cast<float>(g_pw.oh);
+                    s.vport[0] *= rx;
+                    s.vport[1] *= rx;
+                    s.vport[2] *= ry;
+                    s.vport[3] *= ry;
+                    const auto sx0 = static_cast<std::int32_t>(std::floor(static_cast<float>(s.scissor.offset.x) * rx));
+                    const auto sy0 = static_cast<std::int32_t>(std::floor(static_cast<float>(s.scissor.offset.y) * ry));
+                    const auto sx1 = static_cast<std::int32_t>(std::ceil(static_cast<float>(s.scissor.offset.x + static_cast<std::int32_t>(s.scissor.extent.width)) * rx));
+                    const auto sy1 = static_cast<std::int32_t>(std::ceil(static_cast<float>(s.scissor.offset.y + static_cast<std::int32_t>(s.scissor.extent.height)) * ry));
+                    s.scissor.offset = {sx0, sy0};
+                    s.scissor.extent = {static_cast<std::uint32_t>(std::max(sx1 - sx0, 0)), static_cast<std::uint32_t>(std::max(sy1 - sy0, 0))};
+                    ++g_post_stats.redirected;
+                } else {
+                    post_end_window_locked("no memory for a stand-in");
+                }
+            }
+        }
+    }
     // test8, BBHOST_MOTION_BLUR_SKIP=1: with motion blur off, its two draws
     // copy A to B and back (host/temporal/mblur_skip.h); once that is proven
     // for 120 frames in a row, both are left out.
@@ -12250,6 +12535,7 @@ static bool draw_impl(const GpuDraw& d) {
             if (!im.resolved) continue;
             const std::uint64_t base = tsharp_base(im.w);
             const RtImage* r = base && base != t.base ? find_render_target(base) : nullptr;
+            if (const RtImage* sh = post_resolve_locked(base)) r = sh;  // test10: compared at render size
             if (r && !r->depth && r->width == t.width && r->height == t.height && r->format == t.format && r->layers == 1 && base != src) {
                 src = base;
                 ++inputs;
@@ -12282,6 +12568,7 @@ static bool draw_impl(const GpuDraw& d) {
         if (act == temporal::MotionBlurSkip::Action::SkipCopy) {
             // Draw 2 into D: the blur-off result is draw 1's input S, as is.
             RtImage* from = find_render_target(g_mb_skip.a());
+            if (RtImage* sh = post_resolve_locked(g_mb_skip.a())) from = sh;  // test10
             if (from && from != &t) copy_layers_locked(*from, t);
         }
         if (act == temporal::MotionBlurSkip::Action::Skip || act == temporal::MotionBlurSkip::Action::SkipCopy) {
