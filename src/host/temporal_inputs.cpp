@@ -28,12 +28,14 @@
 #include "host/options.h"
 #include "host/settings.h"
 #include "host/shaders/motion.spv.h"
+#include "host/shaders/reactive.spv.h"
 #include "host/temporal/halton.h"
 #include "host/temporal/motion_classify.h"
 #include "host/upscaler_presets.h"
 #include "log.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -50,7 +52,7 @@ bool env_off(const char* name) {
 struct Config {
     std::uint64_t flip = ~0ull;
     bool split = false, temporal = false, debug_view = false;
-    bool watching = false, jitter = false, object_motion = true, opaque = true;
+    bool watching = false, jitter = false, object_motion = true, opaque = true, reactive = true;
     std::uint32_t render_w = 0, render_h = 0, output_w = 0, output_h = 0;
     int upscaler = 0;
 };
@@ -159,32 +161,33 @@ struct MotionPush {
 };
 static_assert(sizeof(MotionPush) <= 128, "push constants");
 
-VkDescriptorSetLayout g_set_layout = VK_NULL_HANDLE;
-VkPipelineLayout g_layout = VK_NULL_HANDLE;
-VkPipeline g_pipeline = VK_NULL_HANDLE;
-bool g_tried = false;
+// A compute pipeline of the module's: its set layout (the bindings' types
+// in order), layout and pipeline.
+struct Compute {
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    bool tried = false;
+};
 
-bool make_pipeline_locked() {
-    const VkDescriptorSetLayoutBinding binds[4] = {
-        {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
+bool make_compute(Compute& c, const std::uint32_t* words, std::size_t bytes, const VkDescriptorType* types, std::uint32_t count,
+                  std::uint32_t push_bytes) {
+    VkDescriptorSetLayoutBinding binds[8] = {};
+    for (std::uint32_t k = 0; k < count && k < 8; ++k) binds[k] = {k, types[k], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo sli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sli.bindingCount = 4;
+    sli.bindingCount = count;
     sli.pBindings = binds;
-    if (vkCreateDescriptorSetLayout(g.device, &sli, nullptr, &g_set_layout) != VK_SUCCESS) return false;
-    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(MotionPush)};
+    if (vkCreateDescriptorSetLayout(g.device, &sli, nullptr, &c.set_layout) != VK_SUCCESS) return false;
+    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
-    pli.pSetLayouts = &g_set_layout;
+    pli.pSetLayouts = &c.set_layout;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &range;
-    if (vkCreatePipelineLayout(g.device, &pli, nullptr, &g_layout) != VK_SUCCESS) return false;
+    if (vkCreatePipelineLayout(g.device, &pli, nullptr, &c.layout) != VK_SUCCESS) return false;
     VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    smi.codeSize = sizeof(k_motion_spv);
-    smi.pCode = k_motion_spv;
+    smi.codeSize = bytes;
+    smi.pCode = words;
     VkShaderModule module = VK_NULL_HANDLE;
     if (vkCreateShaderModule(g.device, &smi, nullptr, &module) != VK_SUCCESS) return false;
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
@@ -192,19 +195,72 @@ bool make_pipeline_locked() {
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     ci.stage.module = module;
     ci.stage.pName = "main";
-    ci.layout = g_layout;
-    const bool ok = vkCreateComputePipelines(g.device, g.cache, 1, &ci, nullptr, &g_pipeline) == VK_SUCCESS;
+    ci.layout = c.layout;
+    const bool ok = vkCreateComputePipelines(g.device, g.cache, 1, &ci, nullptr, &c.pipeline) == VK_SUCCESS;
     vkDestroyShaderModule(g.device, module, nullptr);
+    if (!ok) c.pipeline = VK_NULL_HANDLE;
     return ok;
 }
 
-bool motion_pipeline_locked() {
-    if (!g_tried) {
-        g_tried = true;
-        if (!make_pipeline_locked()) g_pipeline = VK_NULL_HANDLE;
-        host_log("motion: the motion-vector pass %s", g_pipeline ? "is ready" : "could not be made (pipeline creation failed); no motion vectors");
+// Writes `count` image descriptors (binding k = infos[k], types[k]).
+void write_set(VkDescriptorSet set, const VkDescriptorImageInfo* infos, const VkDescriptorType* types, std::uint32_t count) {
+    VkWriteDescriptorSet w[8] = {};
+    for (std::uint32_t k = 0; k < count && k < 8; ++k) {
+        w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[k].dstSet = set;
+        w[k].dstBinding = k;
+        w[k].descriptorCount = 1;
+        w[k].descriptorType = types[k];
+        w[k].pImageInfo = &infos[k];
     }
-    return g_pipeline != VK_NULL_HANDLE;
+    vkUpdateDescriptorSets(g.device, count, w, 0, nullptr);
+}
+
+constexpr VkDescriptorType kMotionTypes[5] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+constexpr VkDescriptorType kReactiveTypes[4] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+Compute g_motion_pass, g_reactive_pass;
+
+bool motion_pipeline_locked() {
+    if (!g_motion_pass.tried) {
+        g_motion_pass.tried = true;
+        make_compute(g_motion_pass, k_motion_spv, sizeof(k_motion_spv), kMotionTypes, 5, sizeof(MotionPush));
+        host_log("motion: the motion-vector pass %s",
+                 g_motion_pass.pipeline ? "is ready" : "could not be made (pipeline creation failed); no motion vectors");
+    }
+    return g_motion_pass.pipeline != VK_NULL_HANDLE;
+}
+
+// ---- the reactive pass ----
+struct ReactivePush {
+    std::uint32_t extent[2];
+    float scale, threshold, binary_value;
+    std::uint32_t pad[3];
+};
+
+bool reactive_pipeline_locked() {
+    if (!g_reactive_pass.tried) {
+        g_reactive_pass.tried = true;
+        // Its R8 storage image needs shaderStorageImageExtendedFormats (gpu.cpp enables it where there is one).
+        VkPhysicalDeviceFeatures f{};
+        vkGetPhysicalDeviceFeatures(g.phys, &f);
+        if (!f.shaderStorageImageExtendedFormats) {
+            host_log("motion: no reactive mask: the GPU lacks shaderStorageImageExtendedFormats");
+            return false;
+        }
+        make_compute(g_reactive_pass, k_reactive_spv, sizeof(k_reactive_spv), kReactiveTypes, 4, sizeof(ReactivePush));
+        host_log("motion: the reactive-mask pass %s", g_reactive_pass.pipeline ? "is ready" : "could not be made; no reactive mask");
+    }
+    return g_reactive_pass.pipeline != VK_NULL_HANDLE;
+}
+
+float env_float(const char* name, float fallback) {
+    const char* e = std::getenv(name);
+    if (!e || !*e) return fallback;
+    char* end = nullptr;
+    const float v = std::strtof(e, &end);
+    return end != e && std::isfinite(v) ? v : fallback;
 }
 
 // ---- per-frame state ----
@@ -225,7 +281,7 @@ float g_velocity_scale[2] = {};
 bool g_velocity_scale_ok = false;
 bool g_velocity_this_frame = false;
 bool g_opaque_taken = false;
-Owned g_motion, g_opaque;
+Owned g_motion, g_opaque, g_depth_copy, g_reactive;
 std::uint64_t g_motion_flip = 0;  // the flip the motion image was last written at
 bool g_motion_has = false;
 
@@ -236,7 +292,7 @@ struct Stats {
     std::uint64_t frames = 0, motion_passes = 0, jittered = 0, scene_blocks = 0, blocks_rejected = 0, cameras_multi = 0;
     std::uint64_t velocity_draws = 0, velocity_after_scale = 0, opaque_snapshots = 0, blended_scene = 0;
     std::uint64_t skeleton_draws = 0, small_moving = 0, small_static = 0, skeleton_moving = 0, skeleton_static = 0;
-    std::uint64_t no_depth = 0, cuts = 0;
+    std::uint64_t no_depth = 0, cuts = 0, reactive_passes = 0;
 };
 Stats g_stats, g_window;  // the run, and since the last summary
 temporal::Cut g_last_cut_logged = temporal::Cut::None;
@@ -258,7 +314,8 @@ void temporal_frame_locked(std::uint64_t flip) {
     if (flip == g_cfg.flip) return;
     g_cfg.flip = flip;
     static const bool no_motion = env_off("BBHOST_MOTION_VECTORS"), no_jitter = env_off("BBHOST_JITTER"),
-                      no_objects = env_off("BBHOST_OBJECT_MOTION"), no_opaque = env_off("BBHOST_OPAQUE_SNAPSHOT");
+                      no_objects = env_off("BBHOST_OBJECT_MOTION"), no_opaque = env_off("BBHOST_OPAQUE_SNAPSHOT"),
+                      no_reactive = env_off("BBHOST_REACTIVE");
     // The settings are a copy under a lock: once a flip, and only when they moved.
     static std::uint64_t serial = ~0ull;
     static HostSettings hs;
@@ -275,6 +332,7 @@ void temporal_frame_locked(std::uint64_t flip) {
     g_cfg.jitter = g_cfg.watching && g_cfg.temporal && !no_jitter;
     g_cfg.object_motion = !no_objects;
     g_cfg.opaque = !no_opaque && g_cfg.temporal;
+    g_cfg.reactive = g_cfg.opaque && hs.upscale_reactive && !no_reactive;
     scene_split_render_size(&g_cfg.render_w, &g_cfg.render_h);
     g_cfg.output_w = static_cast<std::uint32_t>(hs.res_width);
     g_cfg.output_h = static_cast<std::uint32_t>(hs.res_height);
@@ -478,14 +536,16 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
         // Drawn after the scale pass, if at all: the last frame's target is what there is.
         if (g_velocity_base) ++g_window.velocity_after_scale;
     }
-    // The motion pass.
+    // The motion pass (and the depth copy).
     if (in.depth.image && rw && rh && motion_pipeline_locked() &&
-        make_owned(g_motion, VK_FORMAT_R16G16B16A16_SFLOAT, rw, rh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, flip)) {
+        make_owned(g_motion, VK_FORMAT_R16G16B16A16_SFLOAT, rw, rh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, flip) &&
+        make_owned(g_depth_copy, VK_FORMAT_R32_SFLOAT, rw, rh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, flip)) {
         RtImage* velocity = g_cfg.object_motion && g_velocity_base && g_velocity_scale_ok ? find_render_target(g_velocity_base) : nullptr;
         if (velocity && velocity->depth) velocity = nullptr;
         begin_recording_locked();
         render_end_pass_locked();
         to_general(g_motion);
+        to_general(g_depth_copy);
         memory_barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
         VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -494,32 +554,23 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
         vci.format = depth->format;
         vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
         VkImageView depth_view = VK_NULL_HANDLE, velocity_view = VK_NULL_HANDLE;
-        const VkDescriptorSet set = vkCreateImageView(g.device, &vci, nullptr, &depth_view) == VK_SUCCESS ? alloc_set_locked(g_set_layout) : VK_NULL_HANDLE;
+        const VkDescriptorSet set =
+            vkCreateImageView(g.device, &vci, nullptr, &depth_view) == VK_SUCCESS ? alloc_set_locked(g_motion_pass.set_layout) : VK_NULL_HANDLE;
         if (velocity) {
             vci.image = velocity->image;
             vci.format = velocity->format;
             vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             if (vkCreateImageView(g.device, &vci, nullptr, &velocity_view) != VK_SUCCESS) velocity_view = VK_NULL_HANDLE;
         }
-        if (set && g_motion.view) {
-            const VkDescriptorImageInfo infos[4] = {
+        if (set && g_motion.view && g_depth_copy.view) {
+            const VkDescriptorImageInfo infos[5] = {
                 {VK_NULL_HANDLE, depth_view, VK_IMAGE_LAYOUT_GENERAL},
                 {g.dummy_sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED},
                 {VK_NULL_HANDLE, velocity_view ? velocity_view : g.dummy_view, VK_IMAGE_LAYOUT_GENERAL},
                 {VK_NULL_HANDLE, g_motion.view, VK_IMAGE_LAYOUT_GENERAL},
+                {VK_NULL_HANDLE, g_depth_copy.view, VK_IMAGE_LAYOUT_GENERAL},
             };
-            const VkDescriptorType types[4] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-            VkWriteDescriptorSet w[4] = {};
-            for (int k = 0; k < 4; ++k) {
-                w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                w[k].dstSet = set;
-                w[k].dstBinding = static_cast<std::uint32_t>(k);
-                w[k].descriptorCount = 1;
-                w[k].descriptorType = types[k];
-                w[k].pImageInfo = &infos[k];
-            }
-            vkUpdateDescriptorSets(g.device, 4, w, 0, nullptr);
+            write_set(set, infos, kMotionTypes, 5);
             MotionPush push{};
             const bool camera = g_history.usable();
             if (camera) {
@@ -536,13 +587,14 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
             push.extent[1] = rh;
             push.flags = (camera ? 1u : 0u) | (velocity_view ? 2u : 0u);
             VkCommandBuffer cmd = g_cmd();
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_layout, 0, 1, &set, 0, nullptr);
-            vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_motion_pass.pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_motion_pass.layout, 0, 1, &set, 0, nullptr);
+            vkCmdPushConstants(cmd, g_motion_pass.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
             vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);
             memory_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
             in.motion = {g_motion.image, g_motion.format, g_motion.w, g_motion.h, rw, rh};
+            in.depth_copy = {g_depth_copy.image, g_depth_copy.format, g_depth_copy.w, g_depth_copy.h, rw, rh};
             g_motion_flip = flip;
             g_motion_has = true;
             ++g_window.motion_passes;
@@ -556,6 +608,59 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
         }
         if (depth_view) defer_destroy_private_view(depth_view);
         if (velocity_view) defer_destroy_private_view(velocity_view);
+    }
+    // The reactive mask: where the finished scene differs from the opaque snapshot.
+    if (g_cfg.reactive && in.opaque_color.image && scene_color && !scene_color->depth && scene_color->view && rw && rh &&
+        scene_color->width >= rw && scene_color->height >= rh && g_opaque.w >= rw && g_opaque.h >= rh && g_opaque.view &&
+        reactive_pipeline_locked() &&
+        make_owned(g_reactive, VK_FORMAT_R8_UNORM, rw, rh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, flip)) {
+        const VkDescriptorSet set = alloc_set_locked(g_reactive_pass.set_layout);
+        if (set && g_reactive.view) {
+            begin_recording_locked();
+            render_end_pass_locked();
+            to_general(g_reactive);
+            memory_barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+            const VkDescriptorImageInfo infos[4] = {
+                {VK_NULL_HANDLE, g_opaque.view, VK_IMAGE_LAYOUT_GENERAL},
+                {g.dummy_sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED},
+                {VK_NULL_HANDLE, scene_color->view, VK_IMAGE_LAYOUT_GENERAL},
+                {VK_NULL_HANDLE, g_reactive.view, VK_IMAGE_LAYOUT_GENERAL},
+            };
+            write_set(set, infos, kReactiveTypes, 4);
+            // AMD's sample values (scale 1, threshold 0.2, binary 0.9); tunable for the test sessions.
+            static const float scale = env_float("BBHOST_REACTIVE_SCALE", 1.0f), threshold = env_float("BBHOST_REACTIVE_THRESHOLD", 0.2f),
+                               value = env_float("BBHOST_REACTIVE_VALUE", 0.9f);
+            ReactivePush push{};
+            push.extent[0] = rw;
+            push.extent[1] = rh;
+            push.scale = scale;
+            push.threshold = threshold;
+            push.binary_value = value;
+            VkCommandBuffer cmd = g_cmd();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_reactive_pass.pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_reactive_pass.layout, 0, 1, &set, 0, nullptr);
+            vkCmdPushConstants(cmd, g_reactive_pass.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);
+            memory_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+            in.reactive = {g_reactive.image, g_reactive.format, g_reactive.w, g_reactive.h, rw, rh};
+            ++g_window.reactive_passes;
+            static bool said = false;
+            if (!said) {
+                said = true;
+                host_log("motion: first reactive mask at flip %llu (%ux%u; scale %g, threshold %g, value %g)", static_cast<unsigned long long>(flip), rw, rh,
+                         static_cast<double>(scale), static_cast<double>(threshold), static_cast<double>(value));
+            }
+        }
+    }
+    // The frame time (FSR's history weights), from the wall clock between scale passes.
+    {
+        static std::chrono::steady_clock::time_point last{};
+        const auto now = std::chrono::steady_clock::now();
+        const double ms = last.time_since_epoch().count() ? std::chrono::duration<double, std::milli>(now - last).count() : 0.0;
+        last = now;
+        in.frame_ms = ms > 0.5 && ms < 250.0 ? static_cast<float>(ms) : 16.7f;
     }
     in.valid = in.color.image && in.depth.image;
     g_inputs = in;
@@ -588,17 +693,17 @@ const UpscalerInputs& temporal_inputs_locked() { return g_inputs; }
 std::string temporal_report_locked() {
     const Stats& w = g_window;
     const double f = w.frames ? static_cast<double>(w.frames) : 1.0;
-    char buf[640];
+    char buf[768];
     std::snprintf(buf, sizeof(buf),
                   "motion: %llu frames: %llu motion passes (%llu without a scene depth), %.0f jittered draws a frame (phase %u of %u, %+.3f %+.3f), "
                   "%llu cuts, %.1f scene blocks a frame (%llu rejected, %llu frames with 2+ cameras), velocity draws %.1f a frame (%llu frames "
-                  "after the scale pass, scale %g %g), opaque snapshots %llu, blended scene draws %.1f a frame; palettes (every 30th frame): "
+                  "after the scale pass, scale %g %g), opaque snapshots %llu, reactive masks %llu, blended scene draws %.1f a frame; palettes (every 30th frame): "
                   "skeletons %llu moving / %llu still, small %llu moving / %llu still",
                   static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.motion_passes),
                   static_cast<unsigned long long>(w.no_depth), w.jittered / f, g_jitter.phase, g_jitter.phases, g_jitter.x, g_jitter.y,
                   static_cast<unsigned long long>(w.cuts), w.scene_blocks / f, static_cast<unsigned long long>(w.blocks_rejected),
                   static_cast<unsigned long long>(w.cameras_multi), w.velocity_draws / f, static_cast<unsigned long long>(w.velocity_after_scale),
-                  g_velocity_scale[0], g_velocity_scale[1], static_cast<unsigned long long>(w.opaque_snapshots), w.blended_scene / f,
+                  g_velocity_scale[0], g_velocity_scale[1], static_cast<unsigned long long>(w.opaque_snapshots), static_cast<unsigned long long>(w.reactive_passes), w.blended_scene / f,
                   static_cast<unsigned long long>(w.skeleton_moving), static_cast<unsigned long long>(w.skeleton_static),
                   static_cast<unsigned long long>(w.small_moving), static_cast<unsigned long long>(w.small_static));
     return buf;

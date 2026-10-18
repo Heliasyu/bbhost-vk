@@ -177,16 +177,17 @@ int main() {
         ai.memoryTypeIndex = memory_type(pd, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         return vkAllocateMemory(dev, &ai, nullptr, mem) == VK_SUCCESS && vkBindImageMemory(dev, *img, *mem, 0) == VK_SUCCESS;
     };
-    VkImage dimg, vimg, mimg;
-    VkDeviceMemory dmem, vmem, mmem;
+    VkImage dimg, vimg, mimg, cimg;
+    VkDeviceMemory dmem, vmem, mmem, cmem;
     if (!make_image(VK_FORMAT_D32_SFLOAT, W, H, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &dimg, &dmem) ||
         !make_image(VK_FORMAT_R8G8B8A8_UNORM, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT, &vimg, &vmem) ||
-        !make_image(VK_FORMAT_R16G16B16A16_SFLOAT, W, H, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mimg, &mmem)) {
+        !make_image(VK_FORMAT_R16G16B16A16_SFLOAT, W, H, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mimg, &mmem) ||
+        !make_image(VK_FORMAT_R32_SFLOAT, W, H, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &cimg, &cmem)) {
         std::fprintf(stderr, "image creation failed\n");
         return 1;
     }
     // A host buffer for the depth upload and the motion readback.
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(W) * H * 8;
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(W) * H * 12;  // motion (8 bytes a pixel), then the depth copy (4)
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = bytes;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -217,19 +218,21 @@ int main() {
     const VkImageView dview = view_of(dimg, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT);
     const VkImageView vview = view_of(vimg, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
     const VkImageView mview = view_of(mimg, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
+    const VkImageView cview = view_of(cimg, VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT);
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     VkSampler smp;
     VK(vkCreateSampler(dev, &sci, nullptr, &smp));
 
     // The pipeline, as host/temporal_inputs.cpp makes it.
-    const VkDescriptorSetLayoutBinding binds[4] = {
+    const VkDescriptorSetLayoutBinding binds[5] = {
         {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo sli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sli.bindingCount = 4;
+    sli.bindingCount = 5;
     sli.pBindings = binds;
     VkDescriptorSetLayout dsl;
     VK(vkCreateDescriptorSetLayout(dev, &sli, nullptr, &dsl));
@@ -254,7 +257,7 @@ int main() {
     cpi.layout = layout;
     VkPipeline pipe;
     VK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipe));
-    const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
+    const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2}};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1;
     dpci.poolSizeCount = 3;
@@ -267,14 +270,15 @@ int main() {
     dsai.pSetLayouts = &dsl;
     VkDescriptorSet set;
     VK(vkAllocateDescriptorSets(dev, &dsai, &set));
-    const VkDescriptorImageInfo infos[4] = {{VK_NULL_HANDLE, dview, VK_IMAGE_LAYOUT_GENERAL},
+    const VkDescriptorImageInfo infos[5] = {{VK_NULL_HANDLE, dview, VK_IMAGE_LAYOUT_GENERAL},
                                             {smp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED},
                                             {VK_NULL_HANDLE, vview, VK_IMAGE_LAYOUT_GENERAL},
-                                            {VK_NULL_HANDLE, mview, VK_IMAGE_LAYOUT_GENERAL}};
-    const VkDescriptorType types[4] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-    VkWriteDescriptorSet wr[4] = {};
-    for (int k = 0; k < 4; ++k) {
+                                            {VK_NULL_HANDLE, mview, VK_IMAGE_LAYOUT_GENERAL},
+                                            {VK_NULL_HANDLE, cview, VK_IMAGE_LAYOUT_GENERAL}};
+    const VkDescriptorType types[5] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    VkWriteDescriptorSet wr[5] = {};
+    for (int k = 0; k < 5; ++k) {
         wr[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wr[k].dstSet = set;
         wr[k].dstBinding = static_cast<std::uint32_t>(k);
@@ -282,7 +286,7 @@ int main() {
         wr[k].descriptorType = types[k];
         wr[k].pImageInfo = &infos[k];
     }
-    vkUpdateDescriptorSets(dev, 4, wr, 0, nullptr);
+    vkUpdateDescriptorSets(dev, 5, wr, 0, nullptr);
 
     VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     cpci.queueFamilyIndex = family;
@@ -315,6 +319,7 @@ int main() {
     to_layout(dimg, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     to_layout(vimg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     to_layout(mimg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    to_layout(cimg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     const Reprojection r = make_reprojection(prev, cur);
     Push push{};
     std::memcpy(push.reproject, r.reproject, sizeof(push.reproject));
@@ -334,6 +339,9 @@ int main() {
     down.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     down.imageExtent = {W, H, 1};
     vkCmdCopyImageToBuffer(cmd, mimg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &down);
+    to_layout(cimg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    down.bufferOffset = static_cast<VkDeviceSize>(W) * H * 8;
+    vkCmdCopyImageToBuffer(cmd, cimg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &down);
     VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -365,6 +373,11 @@ int main() {
             if (e > tol && bad++ < 5) std::fprintf(stderr, "pixel %u,%u: GPU (%g, %g), CPU (%g, %g)\n", x, y, gx, gy, dx, dy);
         }
     CHECK(bad == 0);
+    // The depth copy (binding 4): the depth, bit for bit.
+    const auto* copy = reinterpret_cast<const float*>(static_cast<const std::uint8_t*>(map) + static_cast<std::size_t>(W) * H * 8);
+    std::uint32_t copy_bad = 0;
+    for (std::uint32_t k = 0; k < W * H; ++k) copy_bad += copy[k] != depth[k];
+    CHECK(copy_bad == 0);
     CHECK(invalid == 0);
     CHECK(sky > 0 && sky < W * H);  // the test scene has both
     CHECK(sum / (W * H) > 0.5);      // and moves

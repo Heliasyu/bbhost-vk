@@ -12,7 +12,7 @@
 // (shadPS4-Bloodborne-DLSS-FSR, GPL-2.0-or-later; portions Copyright 2026
 // IFreemz).
 //
-// Out: RGBA16F, rg = current-to-previous motion in render pixels (+y down),
+// Out: the depth copy (R32F, binding 4) and RGBA16F, rg = current-to-previous motion in render pixels (+y down),
 // b = 1 where the motion is an object's, a = 1 where the camera's was valid.
 // Compiled offline (tools/build_shaders.sh) into motion.spv.h.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -21,6 +21,9 @@ layout(set = 0, binding = 0) uniform texture2D scene_depth;
 layout(set = 0, binding = 1) uniform sampler point_sampler;
 layout(set = 0, binding = 2) uniform texture2D velocity;  // the game's 160x90 RGBA8 target, or a dummy
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D motion;
+// Phase 3: the scene depth as a colour image (R32F), what the upscalers
+// sample (FSR-Vulkan imports colour images only).
+layout(set = 0, binding = 4, r32f) uniform writeonly image2D depth_copy;
 
 layout(push_constant) uniform Params {
     vec4 reproject[3];  // previous view x inverse current view, 3x4 rows
@@ -43,8 +46,9 @@ void main() {
     const vec2 uv = (vec2(xy) + 0.5 - pc.jitter) / size;
     vec2 delta = vec2(0.0);
     float camera_ok = 0.0;
+    const float d = texelFetch(sampler2D(scene_depth, point_sampler), xy, 0).r;
+    imageStore(depth_copy, xy, vec4(d));
     if ((pc.flags & 1u) != 0u) {
-        const float d = texelFetch(sampler2D(scene_depth, point_sampler), xy, 0).r;
         const bool sky = d >= 1.0;
         const float z = sky ? 1.0 : pc.proj.w / min(d - pc.proj.z, -1e-8);
         const vec2 ndc = vec2(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y);

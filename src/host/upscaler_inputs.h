@@ -36,6 +36,9 @@ struct UpscalerInputs {
     // The scene depth (D32S8, or D16 with a performance patch). D3D 0..1,
     // not reversed: near 0, far 1.
     UpscalerImage depth;
+    // Phase 3: the same depth as a colour image (R32F, written by the motion
+    // pass), for backends that sample depth as colour (FSR-Vulkan).
+    UpscalerImage depth_copy;
     // RGBA16F: rg = current-to-previous motion in render pixels, +x right, +y
     // down; b = 1 where it is an object's (the game's velocity), a = 1 where
     // the camera motion was valid. Jitter already removed.
@@ -44,8 +47,9 @@ struct UpscalerInputs {
     // fog, glass): with `color` it is what FSR's reactive-mask generation and
     // DLSS/XeSS's auto-reactive take. Null when it was not taken.
     UpscalerImage opaque_color;
-    // A reactive / transparency mask of its own (R8): none yet; the backends
-    // generate one from opaque_color and color.
+    // Phase 3: the reactive mask (R8, 0..1), made from opaque_color and color
+    // (shaders/reactive.comp, AMD's generate-reactive rule). Null when there
+    // was no snapshot this frame or the setting (upscale_reactive) is off.
     UpscalerImage reactive;
     // Exposure: none - every backend runs its own auto-exposure on the HDR
     // input (FSR 3.1 / 4 ENABLE_AUTO_EXPOSURE, DLSS AutoExposure, XeSS
@@ -64,5 +68,5 @@ struct UpscalerInputs {
     // The camera, for backends that want it (FSR's depth linearisation).
     float near_plane = 0.05f, far_plane = 3000.0f;
     float fov_y = 0.0f;  // radians
-    float frame_ms = 0.0f;
+    float frame_ms = 0.0f;  // since the last scale pass (wall clock), 16.7 when unknown
 };

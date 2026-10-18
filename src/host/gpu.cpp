@@ -2026,6 +2026,10 @@ bool init_locked() {
     {
         VkPhysicalDeviceFeatures sp{};
         vkGetPhysicalDeviceFeatures(g.phys, &sp);
+        // bbhost-vk Phase 3: FSR 3.1's shaders and the reactive mask (R8)
+        // write storage images of the extended formats. Enabling a feature
+        // changes no other draw.
+        f2.features.shaderStorageImageExtendedFormats = sp.shaderStorageImageExtendedFormats;
         g.dmabuf_sparse = g.can_dmabuf && g.has_sparse && sp.sparseBinding;  // a queue with SPARSE_BINDING so far
         g.has_sparse = g.has_sparse && sp.sparseBinding && sp.sparseResidencyBuffer;
         // Only where they have been run: an AMD Radeon 8060S on AMD's Windows
