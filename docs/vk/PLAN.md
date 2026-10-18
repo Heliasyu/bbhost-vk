@@ -2,6 +2,8 @@
 
 Target: **bbhost-vk**, a GPLv3 fork of droogie's bbhost (based on v0.2.18 + the 120 fps patch) with temporal FSR 4.1.1 (FP8 on RDNA4, INT8 fallback) and FSR 3.1 fallback, a sharp native-resolution UI, and quality and performance matching or beating bbport on an RX 9070 XT at 4K.
 
+**End goal:** the game rendering at 1920x1080 and upscaled to 3840x2160 with FSR 4.1.1 Performance (50% scale), holding a steady 120 fps on a 165 Hz VRR monitor.
+
 Mockup of the new Upscaling page: [mock/upscaling-tabs.png](mock/upscaling-tabs.png).
 
 References: Supermedo's Windows bbport launcher (visual style only), bbport (deadinside28, GPL-2.0+), IFreemz shadPS4 fork (GPL-2.0+), FireBurn/FSR-Vulkan (MIT). Their methods carry over; their code has to be adapted, because bbhost has its own renderer.
@@ -98,7 +100,7 @@ Repository: [Heliasyu/bbhost-vk](https://github.com/Heliasyu/bbhost-vk) (private
 - Async compute for motion vectors; avoid extra copies (write FSR output straight into the post-processing input).
 - Cut CPU-side cost: bbport hit a CPU limit from guest memory copies, so profile bbhost's equivalent.
 - Measure GPU time per pass and whole-frame time at 4K Quality/Balanced/Performance with the 120 cap; target under 3 ms for FSR4 at 4K on the 9070 XT.
-- **Milestone:** a steady 120 fps at 4K with FSR 4.1.1 Quality or Balanced, in the heaviest areas you pick (e.g. Yahar'gul, Forbidden Woods).
+- **Milestone:** a steady 120 fps at 4K output from a 1080p render (FSR 4.1.1 Performance), with Quality/Balanced as stretch goals, in the heaviest areas you pick (e.g. Yahar'gul, Forbidden Woods).
 - **Your test (20 min, repeated after each optimization pass):** `bbtest start p5`. Run the same route in Yahar'gul and the Forbidden Woods at 4K with FSR 4.1.1 Quality and Balanced, capped at 120.
 - **What I watch:** MangoHud frame times (average, 1% lows, spikes), bbhost's per-pass GPU timestamps, and CPU use per thread, compared against the previous build. Pass if both areas hold 120 fps with no new stutter.
 
