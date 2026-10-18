@@ -1,6 +1,15 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test9 (fix: the motion blur skip now fires):**
+  - test8 never skipped (t10: 0 pairs). The game's two draws are not a ping-pong: draw 1
+    copies the DoF output S (0x165e30000) into B (0x169e00000), and draw 2 copies B into the
+    chain's colour D (0x161e60000). Also, draw 1's own bind of B counted as "something else
+    wrote B". With motion blur off, both draws now become one copy of S into D, after the
+    same 120-frame proof. A `motion blur skip learning ...` line says why, whenever it is not
+    skipping.
+  - Moving post-processing to render size (`BBHOST_POST_AT_RENDER`) is **not** in this
+    build; see DEVLOG.
 - **test8 (motion blur skip; one-run A/B; post-chain data):**
   - With motion blur off, its two 4K draws a frame (~0.29-0.33 ms) are left out. The skip
     only starts once it has seen, for 120 frames in a row, that the two draws copy A into B

@@ -93,6 +93,22 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test9 checks (one run, ~5 min)
+
+Same as test8 (keep test8's `bbhost.bin` as `bbhost.bin.test8`): FSR 4.1.1 Performance,
+4K, 120, sharpness 5/10, AA Auto, motion blur off, at the Cathedral lamp with the camera
+still.
+
+1. `BBHOST_AB_SECONDS=30 ./bbtest start --capture t11-lamp-ab`. Stay 3 minutes, and run
+   `./bbtest mark "lamp"` about every 30 s.
+2. Turn motion blur on for 30 s and move the camera: `./bbtest mark "blur on"`. It must blur.
+   Turn it off again.
+3. `./bbtest stop`, then send session.txt and bbhost.log. In the log:
+   - `motion blur skip on: its two draws copy ... now one copy` should appear about a second
+     into the world;
+   - the `ab:` lines should show pairs skipped going up;
+   - if a `motion blur skip learning ...` line appears instead, it says why.
+
 ## test8 checks (one run, ~6 min)
 
 Install test8 (keep test7c's `bbhost.bin` as `bbhost.bin.test7c`) and `cd` into the folder.

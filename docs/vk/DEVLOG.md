@@ -1393,3 +1393,67 @@ policy (`temporal/mblur_skip.h`, `tests/mblur_skip_test.cpp`) proves it at run t
 - **Next build:** with those lines, test9 can implement `BBHOST_POST_AT_RENDER` (DoF, then
   glare/bloom, then the colour/LUT pass, each with its own switch), with no extra trip to
   the hardware for data.
+
+## t10 / test9: the motion blur skip fixed; post-processing at render size planned, not built
+
+**t10 (test8, Cathedral lamp, FSR 4.1.1 Performance):**
+- 116.1 fps, 1% low 101.3, 8.62 ± 0.53 ms; 306 of 324 s under 120.
+- The skip never fired (0 pairs), for two reasons:
+  - the draws are S->B, B->D, not A->B->A;
+  - binding B as draw 1's target marked it written before the draw was known to be the
+    motion blur's.
+- test9 handles both:
+  - S->B->D becomes one copy S->D;
+  - a bind of B is judged at the draw's prefetch.
+- **Expected gain:** two 4K draws (~0.29 ms) become one 4K copy (~0.12-0.15 ms). That is
+  ~0.15 ms, about +1-2 fps at 116. It is not enough for 120 on its own.
+
+**The post chain at the lamp (t10 `post-chain:`, 54 draws):**
+
+| # | Pass | What it does |
+|---|---|---|
+| 0 | scale pass (FSR) | 1080p scene -> A 0x161e60000 (4K RGBA16F) |
+| 1 | 7d668276+fbe7c4b6 | onto A at 4K (depth, last frame's 1256x1060 bloom, LUT) |
+| 2-3 | 1baf9590 / 7e956bc3 | A -> 2352x882 DoF buffers |
+| 4 | DoF composite d3ca03f3+111fce32 | A + DoF -> C 0x165e30000 (4K) |
+| 5 | 4c37ae6d+bf368417 | onto C at 4K |
+| 6 | | the motion blur's 1080p velocity |
+| 7-8 | motion blur | C -> B -> A (4K) |
+| 9-41 | bloom pyramid | from A: 1080p, then 628x530 down to 10x9 (B10G11R11), composited to 1256x1060 |
+| 42 | 1ea5a07e+ccb08339 | A + bloom + exposure -> 0x1533b0000 4K BGRA8 (the tonemap; LDR from here) |
+| 43-53 | 0b0acf50 chain | a 16x16 noise texture into the final image (grain/dither), and a 1080p/4K blur chain blended into it |
+| 54 | | the first UI draw |
+
+**Design for `BBHOST_POST_AT_RENDER` (test10):**
+- Run #1-#9 at render size, then FSR 4.1.1 just before #42, on A' (still linear HDR).
+- Bloom (#9 on) then starts from a 1080p A. The tonemap (#42), the grain (#43) and the blur
+  chain stay at 4K after FSR. FSR's input stays HDR, so no HDR or exposure mode changes.
+
+**What it takes:**
+1. Render-size shadow images for A, C and B.
+2. Viewport and scissor scaling for draws into them (the game sets them as scale/offset:
+   `vp -1080x1080+1920+1920`).
+3. Sampling those bases through the shadows inside the window.
+4. FSR's colour input moved from #0 to #42, with the reactive mask from #4's DoF factor
+   and #6's velocity.
+5. A whole-frame fallback: today's order whenever the frame's chain signature (pipelines
+   and targets #0-#9) differs from the learned one, decided at #0, before anything is
+   redirected.
+6. Every pixel-size constant in #1, #2, #4 and #5 found and scaled. These are known only for
+   e0305cef, where they are UV-normalised.
+
+**Why it is not in test9:**
+- Item 6, and whether the translated shaders read the T#'s size, can only be checked in the
+  game. One wrong constant is a shifted or half-size DoF or fog in the user's only run.
+- A per-frame self-check can catch a changed chain, but not a wrong picture.
+
+**Expected gain when done:**
+- #1 0.30 + #4 0.42 + #5 ~0.2 + #2/#9 reading 4K ~0.1 ms, at about a quarter of the cost:
+  ~0.7-0.8 ms saved.
+- The motion blur is then already at 1080p: another ~0.1 over the test9 copy.
+- In all ~0.8-0.9 ms. From 8.6 ms that is ~7.7-7.8 ms, about 128-130 fps average. It is near
+  the 7.5 ms target, not certainly under it.
+
+**What makes the next build safe:** one in-game step that dumps those passes' constants and
+shader size queries (`BBHOST_POST_CHAIN_LOG` extended to their C# and the translator's
+`image_get_resinfo` use). That is cheap to add, and it can ride along with any run.
