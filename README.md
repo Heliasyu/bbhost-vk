@@ -3,6 +3,9 @@
 **bbhost-vk** is a GPLv3 fork of [droogie's bbhost](https://github.com/droogie/bbhost), the native Linux host for Bloodborne (CUSA03173, game version 1.09). All of bbhost's work is theirs; this fork adds on top of it:
 
 - a **120 fps** frame-rate cap (done, `v0.2.18-vk.0`)
+- **even frame pacing** and **post-processing at render size**, with FSR upscaling after it
+  (`v0.2.18-vk.1`; both switchable in the launcher). See
+  [the release notes](docs/vk/RELEASE-v0.2.18-vk.1.md).
 - temporal upscaling with **AMD FSR 3.1** and **FSR 4.1.1** (FSR 4.1.1 built once on your own PC from your own `amd_fidelityfx_upscaler_dx12.dll`; never distributed)
 - an overhauled launcher with tabs, dropdowns and a dedicated Upscaling tab
 - a KDE/Wayland wrapper (`packaging/vk/bbhost`) that sizes the launcher correctly on monitors with or without display scaling

@@ -1,6 +1,27 @@
 # Changelog (bbhost-vk)
 
-## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+## v0.2.18-vk.1 (2026-10-18): the first release since vk.0
+
+Release notes: docs/vk/RELEASE-v0.2.18-vk.1.md.
+
+- **New switches** in the options and launcher: **Even frame pacing** (`present_pace`) and
+  **Post-processing at render size** (`post_at_render`). Both are on; the environment
+  variables still win.
+- **No pacing while a loading screen shows, and for 2 s after.** That is what made t13's
+  first half rough.
+- **Graphics defaults stay the game's own** for a new or missing options file: all effects
+  on and AA Auto. An existing options file is never rewritten at start.
+- **`BBHOST_SUBMIT_BATCH`** stays off. It was rejected on hardware (t9).
+- **Hardware results** (t13, 4K/120, FSR 4.1.1 Performance):
+
+  | | pacing on | pacing off |
+  |---|---|---|
+  | 1% low | 119.4-120.0 | 88-100 |
+  | Frames over 8.5 ms per 30 s | 15-34 | ~930-1350 |
+
+  The pacing's average wait was ~2.7-4.3 ms.
+
+## Test builds before vk.1 (branch `phase-5-test-release`)
 - **test11 (even present pacing; the motion blur skip with post at render):**
   - **Present pacing (`BBHOST_PRESENT_PACE`, on; `=0` off).** At the game's fixed pace
     (30/60/90/120), every present goes out on an even grid of that period.

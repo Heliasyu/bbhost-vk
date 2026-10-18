@@ -93,6 +93,28 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## v0.2.18-vk.1 defaults check (~3 min)
+
+1. Move `bbhost-options.toml` aside:
+   `mv bbhost-options.toml bbhost-options.toml.mine`.
+2. Run `./bbhost --setup`.
+   - The Graphics defaults: AA Auto.
+   - Even frame pacing and Post-processing at render size are both ticked.
+   - Pick FSR 4.1.1, Performance, 120 fps, and play.
+3. Run `./bbtest start --capture vk1-defaults`. In F10 > GRAPHICS everything should be On,
+   with bloom and fog at 10.
+4. At the Cathedral lamp for 1 minute, with motion blur ON:
+   - Turn the camera. It should blur, without doubling or a quarter-size picture.
+   - Depth of field and fog should be in place.
+   - Chromatic aberration should show at the edges.
+   - The FPS stays at 120.
+5. Go through one loading screen (lamp travel) and back.
+6. Run `./bbtest stop`, then put your file back:
+   `mv bbhost-options.toml.mine bbhost-options.toml`.
+7. Send session.txt and bbhost.log.
+   - The `120 LOCK:` line.
+   - The log should say `post-at-render: on (the options' ...)` and `present: pacing on`.
+
 ## test11 checks (one run, ~5 min)
 
 Keep test10's `bbhost.bin` as `bbhost.bin.test10`. Use the same settings as test10: FSR

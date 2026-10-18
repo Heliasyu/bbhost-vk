@@ -75,6 +75,7 @@ chmod +x "$dir/build-fsr4.sh"
 [ -f docs/vk/TESTING.md ] && cp docs/vk/TESTING.md "$dir/docs/TESTING.md"
 [ -f docs/vk/KNOWN_ISSUES.md ] && cp docs/vk/KNOWN_ISSUES.md "$dir/docs/KNOWN_ISSUES.md"
 [ -f CHANGELOG.md ] && cp CHANGELOG.md "$dir/docs/CHANGELOG.md"
+for f in docs/vk/RELEASE-*.md; do [ -f "$f" ] && cp "$f" "$dir/docs/"; done
 # The README's "Testing bbhost-vk" section, as plain text beside the binary.
 if [ -f README.md ]; then
     awk '/^## Testing bbhost-vk/{on=1} on && /^## / && !/^## Testing bbhost-vk/{exit} on' README.md > "$dir/README-TESTING.txt"

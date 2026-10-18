@@ -1566,3 +1566,50 @@ shader size queries (`BBHOST_POST_CHAIN_LOG` extended to their C# and the transl
 - Frames over 8.5 ms: t12 did not count them (39% were over 8.42). Expected under 2-5% paced, if the spread is the present timing as read.
 - **1% low:** ~102 -> 112-118 in the paced halves. The rest are the game's own hitches
   (loads, streaming) and GPU spikes past 8.33 ms in heavy views (~84-93% busy).
+
+## t13 (test11) and v0.2.18-vk.1 (2026-10-18)
+
+**t13-pace-ab** (`BBHOST_AB_SECONDS=30` flipping the present pacing; post at render and the
+blur skip on throughout):
+
+| Half | on, 1st (load) | on, steady (5 halves) | off (6 halves) |
+|---|---|---|---|
+| fps | 117.4 | 119.8-120.0 | 119.9-120.0 |
+| 1% low | 67.1 | 119.4-120.0 | 88.5-100.1 |
+| 0.1% low | 25.3 | 87.9-110.5 | 75.4-90.1 |
+| Frames over 8.5 ms | 80 | 15-32 | 931-1354 |
+| Frames over 9 ms | 70 | 4-20 | 212-547 |
+| Frames over 12 ms | 50 | 0-3 | 1-17 |
+| Pacing's average wait | 3966 µs | 2725-4343 µs | - |
+
+- The user marked "good frame time" at 14:10:35.
+- The grid sits ~3 ms after the typical arrival. Each late frame restarts it on that late
+  arrival, and the creep (20 µs a frame, only when a 120-frame window's earliest arrival
+  is >150 µs ahead) rarely brings it back.
+- So the pacing costs ~3 ms of latency, in exchange for this frame-time consistency. A
+  faster creep could trade some of it back. That is left for after the release, measured.
+- The first half's roughness was the load. vk.1 doesn't pace while a loading screen
+  shows, nor for 2 s after (`hle_video_loading()`).
+
+**Today's run, in short:**
+- **t10 (test8):** the blur skip never fired; the post-chain was logged.
+- **t11 (test9):** the skip worked, about +1 fps.
+- **t12 (test10):** post at render gave 120 held with ~1 ms GPU headroom. The skip was
+  ineligible under it (fixed in test11). 39% of frames were over 8.42 ms, from the present
+  timing.
+- **t13 (test11):** pacing, results above.
+
+**vk.1:**
+- Two option rows, `present_pace` and `post_at_render` (both On), shown in F10 and the
+  launcher.
+- `post_mode()` and `pace_mode()` are read at the first draw or present, after
+  host_options_load. The environment variables win.
+- The graphics defaults were already the game's own (each effect's default index is On),
+  and host_options_load only reads, so an existing file isn't rewritten.
+- **Motion blur ON under post at render:** both draws run at 1080p, on the stand-ins of C,
+  B and A.
+  - The 1080p velocity (d3c8bb21) has always been 1080p, so the blur's taps, in that
+    buffer's units, match the 1080p target.
+  - The skip stays out (blur on is not eligible), as it should.
+  - test9/t11 looked fine with blur on at 4K. vk.1's defaults check looks at it under post
+    at render.
