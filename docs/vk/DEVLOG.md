@@ -134,3 +134,145 @@ Base: `main` = upstream bbhost v0.2.18 (c421ea0) + the 120 fps option
   `571c7ebcc82271cc04b47676e40db6800f0b17db9fc405711bc03cf22e1dc5b8`
   (on the build box at /workspace/bbhost-vk-builds/phase0/; not released).
 - Player's PC test: pending (checklist in TESTING.md, "Phase 0 test").
+
+---
+
+## 2026-10-18 (Sun), Phase 1: Scene/UI resolution split (branch `phase-1-scene-ui-split`)
+
+Base: `phase-0-groundwork` (PR #1, unmerged); this branch's PR is stacked on
+it. Work done on the build box; there is no game dump here, so nothing below
+ran against the game yet.
+
+- **Plan change (2026-10-18):** `main` f813313 added Phase 7 (FSR 4 INT8 for
+  Steam Deck/RDNA2-3, DLSS, XeSS) and Phase 8 (Windows release) to PLAN.md at
+  the player's request; Phase 1 keeps the upscaler interface
+  backend-agnostic (`ScenePass` in host/upscaler.h) so they plug in later.
+
+### Findings
+- **The scale pass** is the fullscreen draw with pixel shader `ccbf44a6`
+  (IFreemz's `HdrSceneCopy`): it copies the HDR scene (image slot 0) into the
+  target the game's post-processing runs on. With the scene and the output at
+  one size it is a 1:1 copy; with the decoupled-UI patches it is the
+  game's own upscale. In bbhost it is a pipeline `VS+ccbf44a6` in
+  host/render.cpp.
+- **What sizes the scene** is Kyo's "Decoupled UI" patch set for 1.09
+  (shadps4-emu/ps4_cheats `PATCHES/Bloodborne.xml`, 640x360 to 2560x1440).
+  Decoded, its 24 sites are (Binary Ninja addresses, 0x400000 base):
+  - 0x2697aea/af0: the graphics manager's scene context (G-buffer, depth,
+    HDR lighting) at construction;
+  - 0x26f8ce1/ce7, 0x26f93d8/3df, 0x26f99db/9e2: the contexts made on demand
+    (the scene's helper targets);
+  - 0x26c6624/662e, 0x26c6760/676a and the two branches 0x26c65f6, 0x26c6735:
+    the resize slot sub_26c6540, so a resize re-makes them at the scene's size;
+  - 0x269c7d5: the resize listener stores the render size (a jump to a cave);
+  - 0x26c3af3: Initialize's colour is always DefRenderTarget;
+  - 0x25d818d: YEBIS's viewport from the output entry (+0x80/+0x84);
+  - 0x125b1a3/1aa/1d6/1de and 0x26c3de4/df0: the half- and quarter-size
+    targets from the scene's size, not the output's;
+  - 0x1258f2c: the output-size query returns the output entry (a cave call).
+  Everything else - post-processing after the scale pass, Scaleform, the
+  display buffers, DefDepthStencil - stays at the output size, which is what
+  live_resolution already sizes.
+- Kyo's bytes are the same at every size except the immediates (width,
+  height) - `tests/scene_split_test.cpp` checks our encoder byte for byte
+  against all four of his sizes.
+
+### Done
+- `src/engine/scene_split_sites.h`: the sites as a table with the render size
+  as its parameter (no dependencies, unit-tested); `render_size()` = output /
+  preset ratio, rounded down to a multiple of 8, at least 64, never above the
+  output; the bilinear S# rewrite.
+- `src/engine/scene_split.cpp`: keeps the load-time bytes of every site, logs
+  them, checks the branch sites are short Jccs and 0x26c3af3 is the game's
+  `74 36` or bbhost's `75 11`, refuses otherwise; the two cave targets are
+  host stubs within rel32 reach (`engine_alloc_exec_near`), not eboot data.
+  `BBHOST_SCENE_SPLIT=0` never splits.
+- `live_resolution` sizes two things at its quiet point: the output (as
+  before) and the scene. A scene change writes the sites before the GX
+  resize broadcast; the on-demand contexts move from the old scene size to
+  the new; the graphics manager's scene size is read back and logged; an
+  unfit change is rolled back. The start applies the scene's size at load,
+  before the graphics manager is built. Changing Upscaler or Upscaling
+  quality (F10, System, setup window) asks for the scene alone after the
+  usual 1.5 s menu-settle delay.
+- The scale pass is drawn as a plain bilinear, clamped, no-mip, no-aniso copy
+  while split (the S# is rewritten before the sampler is made). FSR 3.1
+  replaces it in Phase 3.
+- Logging for the test session: `scene-split: render size WxH for an output of WxH`,
+  `scene-split: scale pass ... drawn` (once per size, then every 3000 flips),
+  `heap: render-target heap ...` before and after each change,
+  `yebis: restart N ...` for each YEBIS shutdown/restart and its dropped
+  frees, and each site's original bytes at load.
+- Help texts (setup window, F10, System) say what the options now do.
+
+### Decisions and why
+1. **Output = the Resolution setting; render = output / preset ratio.**
+   Output-size work (post, UI, display) is what Resolution always meant, and
+   the preset is the one control that should cost or save GPU time.
+2. **Split only when Upscaler is not Off and the preset is not Native AA.**
+   Otherwise every site has its load-time bytes and the scale pass is
+   untouched - the same code bytes and the same draws as stock, so Off and
+   Native 100% are bit-identical to stock by construction (nothing is
+   written, `code_write` skips equal bytes).
+3. **Host stubs instead of Kyo's caves.** His caves overwrite eboot rodata
+   at 0x4d3bad4/0x4d3baf0; bbhost's code pages are its own, and a stub near
+   the code avoids guessing whether that rodata is unused.
+4. **0x26c3af3 gets `EB 36`, not only `EB`.** bbhost's both-sides patch
+   rewrites the same branch to `75 11`, so the displacement has to go back
+   to the game's too.
+5. **Bilinear by S# rewrite, not a new shader.** The game's own pass stays;
+   only its filter changes, so HDR, the colour format and post are as they
+   were. No HDR, motion-blur or online changes; nothing touches the
+   presenter, so goverlay/MangoHud see the same swapchain as before.
+6. **Rescale-only requests reuse the resolution path** (same quiet point,
+   same settle delay) instead of a second mechanism.
+
+### What the other projects taught (no code copied)
+- **IFreemz** (shadPS4-Bloodborne-DLSS-FSR, GPL-2.0): the name and hash of
+  the scale pass (`HdrSceneCopy`, `ccbf44a6`) and the idea that the game's
+  own decoupled-UI path is the place to hook an upscaler.
+- **Kyo** (patches in shadps4-emu/ps4_cheats): the site list itself;
+  bbhost-vk re-encodes it from the render size (facts about the 1.09 eboot,
+  not code).
+- **bbport** (deadinside28/bloodborne_pc, GPL-2.0): a host-side approach -
+  keep guest allocations at 1920x1080, render the scene into host proxies at
+  output / scale, reconstruct at the first Scaleform pass, resolve proxies
+  back for guest compute, align sizes (it hit a 1916x1080 alignment bug).
+  We took the alignment lesson (render sizes are multiples of 8) and the
+  "resolve/settle at a display-pass boundary" idea; we chose the game's own
+  decoupled path over proxies because bbhost runs the game's code natively
+  and already resizes the real targets.
+- **Supermedo** (Supermedo/bloodborne_pc, GPL-2.0): the Windows build of
+  bbport; same scene handling (identical `ui_composition.h` /
+  `vk_temporal_upscaler.cpp` approach). Useful as a reference for Phase 8.
+- **Awakenchan** (BloodBorneButPc, GPL-2.0, from DarkIzuku's bbport fork):
+  memory budgeting - only a scene above 1080p grows the guest heaps; an
+  output-only increase does not. Phase 1 never renders the scene above the
+  output, so splitting can only shrink the scene's heap use; the `heap:`
+  lines confirm it on the first test. Its notes on point-sampled reduced
+  proxies (blocky post) are why the open risks list includes post passes
+  that read render-size targets.
+
+### Open risks (only the hardware test can answer)
+- The sites' original bytes are unverified (no dump here, and no CRC table
+  covers them). The 1.09 SHA gate and the branch checks guard it; the first
+  log prints every site's bytes.
+- Whether the graphics manager re-makes its scene context when only the
+  scene size changes (logged: `scene-split: the graphics manager's scene is
+  WxH`, or `..., not the WxH asked for`). If not,
+  a live Native<->67% toggle needs a resolution change or a restart.
+- The scene's colour is DefRenderTarget at the max display size; with YEBIS
+  reading its viewport from the output entry, the old black/grey band issue
+  could come back at some sizes.
+- Post passes that read render-size depth or half-size targets with point
+  sampling could look blocky; item icons and Scaleform's offscreen targets
+  could be sized from the wrong entry.
+- Whether `ccbf44a6` samples with `image_sample` (the S# rewrite) - logged.
+- Sites are written at the quiet point while other guest threads may run.
+
+### Test results (build box)
+- `packaging/vk/build.sh`: configure, build and ctest pass: 44 tests, 0
+  failures (16 skip without game files). `scene_split_test`: "24 sites
+  match Kyo's Decoupled UI patches at 4 sizes; render sizes and the bilinear
+  S# ok".
+- Player's PC test: pending (TESTING.md, "Pending combined test session").
