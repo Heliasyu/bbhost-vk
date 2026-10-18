@@ -1,0 +1,74 @@
+#version 460
+// bbhost-vk Phase 2: the scene's motion vectors (host/temporal_inputs.cpp),
+// one invocation per render pixel. Camera motion from the scene depth and
+// the camera of this frame and the last (host/temporal/camera.h is the same
+// math in double, and tests/temporal_test.cpp checks it); where the game's
+// own object-velocity target covers the pixel, the object's motion instead.
+//
+// The view-space reprojection - D3D depth = zs + zo / z, the cleared depth a
+// direction rotated without translation, the previous view times the
+// inverse current view built in double on the CPU - and the velocity
+// target's decoding follow IFreemz's bb_dlss_motion.comp
+// (shadPS4-Bloodborne-DLSS-FSR, GPL-2.0-or-later).
+//
+// Out: RGBA16F, rg = current-to-previous motion in render pixels (+y down),
+// b = 1 where the motion is an object's, a = 1 where the camera's was valid.
+// Compiled offline (tools/build_shaders.sh) into motion.spv.h.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D scene_depth;
+layout(set = 0, binding = 1) uniform sampler point_sampler;
+layout(set = 0, binding = 2) uniform texture2D velocity;  // the game's 160x90 RGBA8 target, or a dummy
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D motion;
+
+layout(push_constant) uniform Params {
+    vec4 reproject[3];  // previous view x inverse current view, 3x4 rows
+    vec4 proj;          // current: x scale, y scale, z scale, z offset
+    vec4 prev_proj;
+    vec2 jitter;        // this frame's viewport shift of the scene draws, render pixels, +y down
+    vec2 velocity_scale;  // the velocity draws' packing scale (their constant buffer)
+    uvec2 extent;       // the render size (the depth may be larger: padding)
+    uint flags;         // 1 camera usable, 2 velocity usable
+    uint pad;
+} pc;
+
+bool finite2(vec2 v) { return !any(isnan(v)) && !any(isinf(v)); }
+
+void main() {
+    const ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= int(pc.extent.x) || xy.y >= int(pc.extent.y)) return;
+    const vec2 size = vec2(pc.extent);
+    // The surface this jittered pixel shows lies at its unjittered position.
+    const vec2 uv = (vec2(xy) + 0.5 - pc.jitter) / size;
+    vec2 delta = vec2(0.0);
+    float camera_ok = 0.0;
+    if ((pc.flags & 1u) != 0u) {
+        const float d = texelFetch(sampler2D(scene_depth, point_sampler), xy, 0).r;
+        const bool sky = d >= 1.0;
+        const float z = sky ? 1.0 : pc.proj.w / min(d - pc.proj.z, -1e-8);
+        const vec2 ndc = vec2(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y);
+        const vec4 view = vec4(ndc.x * z / pc.proj.x, ndc.y * z / pc.proj.y, z, sky ? 0.0 : 1.0);
+        const vec3 pv = vec3(dot(pc.reproject[0], view), dot(pc.reproject[1], view), dot(pc.reproject[2], view));
+        const vec2 pndc = vec2(pv.x * pc.prev_proj.x, pv.y * pc.prev_proj.y) / max(pv.z, 1e-4);
+        const vec2 puv = vec2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5);
+        delta = (puv - uv) * size;
+        camera_ok = 1.0;
+    }
+    float object = 0.0;
+    if ((pc.flags & 2u) != 0u) {
+        const ivec2 vsize = textureSize(sampler2D(velocity, point_sampler), 0);
+        const ivec2 vxy = clamp(ivec2(uv * vec2(vsize)), ivec2(0), vsize - 1);
+        const vec4 m = texelFetch(sampler2D(velocity, point_sampler), vxy, 0);
+        const vec2 s = pc.velocity_scale;
+        if (m.a > 0.5 && abs(s.x) > 1e-6 && abs(s.y) > 1e-6 && finite2(s)) {
+            delta = (m.rg - 0.5) * vec2(-size.x / s.x, size.y / s.y);
+            object = 1.0;
+        }
+    }
+    if (!finite2(delta) || any(greaterThan(abs(delta), size))) {
+        delta = vec2(0.0);
+        camera_ok = 0.0;
+        object = 0.0;
+    }
+    imageStore(motion, xy, vec4(delta, object, camera_ok));
+}
