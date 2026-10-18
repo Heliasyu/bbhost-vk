@@ -14,6 +14,7 @@
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
 #include "host/upscaler.h"
+#include "host/fsr3_pass.h"
 #include "host/temporal_inputs.h"
 #include "host/temporal/motion_classify.h"
 
@@ -11701,6 +11702,7 @@ static bool draw_impl(const GpuDraw& d) {
     // the bind below writes the same views (it used to resolve and look up
     // every texture again, and hash hot ones twice).
     static thread_local StageImages stage_images[2];
+    bool fsr3_replaced = false;  // bbhost-vk Phase 3: FSR 3.1 wrote this scale pass's target
     {
         GpuPhaseTimer t(kPhasePrefetch, phase_weight);
         if (!pl.paths_checked) {
@@ -11736,7 +11738,8 @@ static bool draw_impl(const GpuDraw& d) {
             pl.orb_ps = plus != std::string::npos && pl.name.size() >= plus + 9 ? temporal::parse_hash(pl.name.c_str() + plus + 1) : 0;
         }
         temporal_frame_locked(hle_video_flip_count());
-        t_bilinear_samplers = pl.scale_pass == 1 && upscaler_scene_pass() == ScenePass::Bilinear;
+        // FSR 3.1's fallback frames draw the bilinear copy too.
+        t_bilinear_samplers = pl.scale_pass == 1 && (upscaler_scene_pass() == ScenePass::Bilinear || upscaler_scene_pass() == ScenePass::Fsr31);
         if (t_bilinear_samplers) note_scale_pass(pl.name);
         prefetch_stage_images(pl.ps.meta(), s.ps_user, stage_images[1], gx_stage[1], pl.paths_match[1] ? &key_stages[1] : nullptr);
         t_bilinear_samplers = false;
@@ -11747,6 +11750,13 @@ static bool draw_impl(const GpuDraw& d) {
             if (!stage_images[1].images.empty() && stage_images[1].images[0].resolved)
                 scene = find_render_target(tsharp_base(stage_images[1].images[0].w));
             temporal_scale_pass_locked(scene, s.color[0] ? s.color[0]->width : 0, s.color[0] ? s.color[0]->height : 0);
+            // bbhost-vk Phase 3: FSR 3.1 writes the pass's target instead of
+            // the game's draw (host/fsr3_pass.h); the draw is dropped below,
+            // where BBHOST_SKIP_PASS drops one.
+            if (upscaler_scene_pass() == ScenePass::Fsr31 && s.color[0]) {
+                ensure_initialised(*s.color[0]);
+                fsr3_replaced = fsr3_scale_pass_locked(s.color[0]);
+            }
         }
         t_resolve_site = kSiteBuffers;
     }
@@ -12014,6 +12024,13 @@ static bool draw_impl(const GpuDraw& d) {
     // cost a broken render pass and this driver will not take many of those,
     // so the safe way to ask "is it this pass?" is to remove it and look at
     // the screen. No copies, no pass breaks, no risk to the run.
+    if (fsr3_replaced) {
+        RtImage& t = *s.color[0];
+        rt_written(t);
+        t.fill_last = false;
+        if (g_pending_clears.erase(t.base)) ++g_pending_gen;
+        return true;
+    }
     static const char* skip_pass = std::getenv("BBHOST_SKIP_PASS");
     if (skip_pass) {
         static const std::vector<std::string> names = [] {

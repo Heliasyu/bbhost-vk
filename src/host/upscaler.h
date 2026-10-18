@@ -38,8 +38,11 @@ void upscaler_note_settings();
 enum class ScenePass : int {
     Game = 0,      // the game's own pass as it is: the scene is not split (stock)
     Bilinear = 1,  // Phase 1: the same pass with a bilinear, clamped sampler
+    Fsr31 = 2,     // Phase 3: FSR 3.1 writes the pass's target (host/fsr3_pass.h); its
+                   // fallback, when FSR 3.1 cannot run a frame, is Bilinear's draw
 };
-// Any thread; cheap (one atomic load).
+// Any thread; cheap (atomic loads). The upscaler choice is the one the
+// presenter last saw (upscaler_note_settings).
 ScenePass upscaler_scene_pass();
 const char* upscaler_scene_pass_name(ScenePass p);
 
