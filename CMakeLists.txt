@@ -310,6 +310,11 @@ if(SDL3_FOUND AND Vulkan_FOUND)
 else()
   message(STATUS "bbhost: SDL3/Vulkan not found; headless only")
 endif()
+# bbhost-vk: AMD FidelityFX FSR 3.1 for Vulkan (FireBurn/FSR-Vulkan, MIT,
+# third_party/FSR-Vulkan), compiled and linked but not yet called (Phase 0).
+if(Vulkan_FOUND)
+  include(cmake/fsr_vulkan.cmake)
+endif()
 
 # The game's functions as ours (src/decomp, docs/decomp.md), one folder per
 # engine area. A leaf runs on the game's thread state, where FS may be the

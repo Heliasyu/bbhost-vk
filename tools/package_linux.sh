@@ -32,6 +32,14 @@ mkdir -p "$dir/data" "$dir/logs" "$dir/plugins" "$dir/build"
 cp -r patches "$dir/patches"
 cp include/bbhost_plugin.h "$dir/plugins/"
 cp LICENSE "$dir/LICENSE"
+# bbhost-vk: the MIT notices of FSR-Vulkan and the FidelityFX SDK it carries,
+# both linked into the binary (THIRD_PARTY_NOTICES.md).
+if [ -f third_party/FSR-Vulkan/LICENSE.txt ]; then
+    mkdir -p "$dir/licenses/FSR-Vulkan"
+    cp THIRD_PARTY_NOTICES.md "$dir/licenses/"
+    cp third_party/FSR-Vulkan/LICENSE.txt third_party/FSR-Vulkan/NOTICE.md "$dir/licenses/FSR-Vulkan/"
+    cp third_party/FSR-Vulkan/upstream/ffx-1.1.4/sdk/LICENSE.txt "$dir/licenses/FSR-Vulkan/FidelityFX-SDK-LICENSE.txt"
+fi
 tools/package_plugins.sh "$(dirname "$bin")/plugins" "$dir/plugins"
 objcopy --strip-debug "$bin" "$dir/bbhost" 2>/dev/null || llvm-objcopy --strip-debug "$bin" "$dir/bbhost"
 chmod +x "$dir/bbhost"

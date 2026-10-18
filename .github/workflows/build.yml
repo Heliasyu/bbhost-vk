@@ -19,6 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # cmake/version.cmake names the revision
+          submodules: recursive   # third_party/FSR-Vulkan (bbhost-vk)
       - uses: actions/cache@v4
         with:
           path: build-ci/prefix
