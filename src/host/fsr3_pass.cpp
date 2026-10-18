@@ -275,7 +275,7 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
         VkCommandBuffer cmd4 = g_cmd();
         if (in.frame == g_last_frame4 && g_last_out4) {
             ++g_window.repeats;
-            copy_output(cmd4, g_last_out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target, out);
+            if (g_last_out4 != target->image) copy_output(cmd4, g_last_out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target, out);
             return true;
         }
         barrier(cmd4, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -292,6 +292,13 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
         p4.sharpness = sh4.sharpness;
         p4.ultra_performance = hs.upscale_quality >= 4;
         const bool dump4 = dump_begin_locked(in, *target, out, "FSR 4.1.1", p4.reset);
+        // test5: as FSR 3.1 since test4, straight into the target when it took STORAGE (test4: copy 0.26 ms).
+        const bool direct4 = target->view && temporal::direct_output_ok(target->upscaler_storage, static_cast<int>(target->format), target->width,
+                                                                        target->height, out, out.w, out.h, dump4);
+        if (direct4) {
+            p4.direct_image = target->image;
+            p4.direct_view = target->view;
+        }
         const std::int32_t slot4 = pass_timer_begin_locked(cmd4, TimedPass::Upscale);
         VkImage out4 = VK_NULL_HANDLE;
         bool fatal = false;
@@ -300,9 +307,21 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
         pass_timer_end_locked(cmd4, slot4);
         if (ok4) {
             if (p4.reset) ++g_window.resets;
-            const std::int32_t copy4 = pass_timer_begin_locked(cmd4, TimedPass::Copy);
-            copy_output(cmd4, out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target, out);
-            pass_timer_end_locked(cmd4, copy4);
+            if (direct4) {
+                barrier(cmd4, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+                ++g_window.direct;
+                static bool said = false;
+                if (!said) {
+                    said = true;
+                    host_log("fsr4: FSR 4.1.1 writes the scale pass's %ux%u target directly (no copy; BBHOST_FSR_DIRECT_TARGET=0: the copy)",
+                             target->width, target->height);
+                }
+            } else {
+                const std::int32_t copy4 = pass_timer_begin_locked(cmd4, TimedPass::Copy);
+                copy_output(cmd4, out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target, out);
+                pass_timer_end_locked(cmd4, copy4);
+            }
             ++g_upscaled;
             dump_end_locked(dump4, in.frame, out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target);
             g_last_frame4 = in.frame;

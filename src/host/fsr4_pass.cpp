@@ -258,7 +258,8 @@ bool fsr4_record_locked(VkCommandBuffer cmd, const UpscalerInputs& in, std::uint
         f.color = {in.color.image, cv, in.color.width, in.color.height};
         f.depth = {in.depth_copy.image, dv, in.depth_copy.width, in.depth_copy.height};
         f.motion = {in.motion.image, mv, in.motion.width, in.motion.height};
-        f.output = {g_out.image, g_out.view, g_out.w, g_out.h};
+        const bool direct = p.direct_image && p.direct_view;
+        f.output = direct ? Fsr411::Image{p.direct_image, p.direct_view, output_w, output_h} : Fsr411::Image{g_out.image, g_out.view, g_out.w, g_out.h};
         f.render_width = in.render_w;
         f.render_height = in.render_h;
         f.ultra_performance = p.ultra_performance;
@@ -281,7 +282,7 @@ bool fsr4_record_locked(VkCommandBuffer cmd, const UpscalerInputs& in, std::uint
     } else {
         *why = "could not make the inputs' views";
     }
-    if (ok) *out = g_out.image;
+    if (ok) *out = p.direct_image && p.direct_view ? p.direct_image : g_out.image;
     return ok;
 }
 

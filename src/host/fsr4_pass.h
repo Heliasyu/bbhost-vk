@@ -35,6 +35,10 @@ struct Fsr4Params {
     bool reset = false, sharpen = false;
     float sharpness = 0.0f;
     bool ultra_performance = false;  // the quality preset is Ultra Performance (the second model)
+    // test5: write here instead (the scale pass's target with STORAGE, RGBA16F, General,
+    // exactly the output's size: fsr3_pass's direct_output_ok); *out is then this image.
+    VkImage direct_image = VK_NULL_HANDLE;
+    VkImageView direct_view = VK_NULL_HANDLE;
 };
 
 // Under g.mu, recording, outside a render pass, the inputs' writes ordered
