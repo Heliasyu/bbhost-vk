@@ -1,6 +1,21 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test7c (submit batching, experimental; motion blur data):**
+  - `BBHOST_SUBMIT_BATCH=1` (off by default): bb-submit puts the game's jobs that are already
+    waiting into one vkQueueSubmit (one VkSubmitInfo, all their command buffers). It holds
+    a new job only while the GPU still has two of our submissions to finish, so the GPU
+    never runs dry because of it, and never for more than 2 ms. Labels and CPU waits are not
+    held back: every job is still ended and handed over at once (unlike
+    `BBHOST_SUBMIT_EVERY_JOB=0`). The last job's fence covers the merged jobs' slots. The
+    `gpu idle:` line adds `batched N jobs/s into M submits/s, held ...`; the stream
+    self-test reports what it merged.
+  - `fsr4_sharpen_test` also checks that the mean brightness of the sharpened output stays
+    within 1% of the input (HDR lamps at 30 included) at sharpness 0 and 0.5. The test7
+    shader fails it by far.
+  - The log names the motion blur's (e0305cef) draw targets and textures, so the next build
+    can skip its two draws while motion blur is off, once that is shown to give the same
+    picture.
 - **test7b (fix: white haze with FSR 4.1.1 sharpening):**
   - test7's sharpening pass treated the replay's postpass output as colour. That output is
     log-encoded and exposed for RCAS: v = log2(1 + 150 c * exposure / pre-exposure) /

@@ -1182,3 +1182,154 @@ Deferred, with the reason:
   hardware.
 - **Pipeline and descriptor churn:** no hitch in t7 points at them. Watch the "over 12 ms"
   count.
+
+## test7c: submit batching, and the plan for post-processing at render size (2026-10-18)
+
+test7b fixed the haze (the sharpened output is now decoded as the replay's RCAS decodes it).
+At the lamp, AMD's sharpening ran at 116.6 fps, and ours should be about the same or a little
+faster. Holding 120 there still needs about 0.4 ms.
+
+**Where the idle time goes (t8, `gpu_gaps.py --idle`):**
+- Queued gaps total ~56 ms/s over ~1180 gaps/s (~0.46 ms a frame at ~10 submissions a frame):
+  - <25 us: 7.4 ms/s;
+  - 25-250 us: 24.6 ms/s;
+  - >250 us: 23.6 ms/s.
+- The small and middle gaps (~0.27 ms a frame) are what one kernel submission per job costs:
+  the scheduler, the fence, the cache flush and wait at the submission's end.
+- The gaps over 250 us between jobs that were already queued are not that. They are more
+  likely the semaphore waits of the jobs that carry one.
+
+**BBHOST_SUBMIT_BATCH=1 (bb-submit):**
+- **Policy:** take a game job (no foreign id, no semaphore to signal). If the GPU still has
+  two of our submissions unfinished (one running and one queued behind it), hold the job,
+  waiting 0.1 ms at a time on the oldest, for at most 2 ms. Then take the game jobs queued
+  behind it that have no semaphore to wait on: up to 12 jobs or 32 command buffers.
+- **Submit:** one VkSubmitInfo, with the first job's wait and the last job's fence. RADV
+  chains the command buffers of one VkSubmitInfo into one kernel job.
+- **Why it cannot starve the GPU:** a held job could not have started earlier anyway, with
+  two submissions ahead of it.
+- **Why it does not repeat EVERY_JOB=0's failure:** labels and CPU-visible sync are not held
+  back. The command processor still ends every job and hands it over at once. Only bb-submit
+  waits, and its published "submitted" serial covers the merged jobs.
+- **Fences:** the merged jobs' slots never had their own fences submitted. `g_fence_owner`
+  names the covering serial. It is reset at hand-over and set before `g_stream_submitted` is
+  published. `slot_fence()` gives the slot's own fence, the covering slot's fence, or none
+  when that slot has already retired (slots retire in order). Every slot-fence wait and
+  status check now goes through it:
+  - the retire;
+  - `wait_submission_locked`;
+  - `host_gpu_submissions_completed`;
+  - the two in glitch.cpp.
+- **Pruning:** `g_completed_atomic` lets bb-submit drop a finished entry without reading a
+  fence the CP may already have reset and reused.
+- **Default: off.** It changes fence ownership and adds a wait on the submit thread. The box
+  can only run it on lavapipe, so it needs the hardware A/B (TESTING, test7c) before it can
+  become the default.
+- **Expected gain:** 0.15-0.3 ms a frame, if the <250 us queued gaps mostly go away. That is
+  most of the ~0.4 ms, but not certain to be all of it. RADV still flushes caches at each
+  command buffer's end inside a submission.
+- **On the box (lavapipe):**
+  - `--stream-selftest=20` with it on, twice: 0 differences. It merged 212 and 215 jobs into
+    82 and 86 submissions, with ~130 holds per run.
+  - With `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`: the same 10 SYNC-HAZARD
+    WRITE_AFTER_WRITE reports (the self-test's own back-to-back vkCmdFillBuffer) with it on
+    and off. Batching adds none.
+
+**b57af00c+b9bb200e (the Cathedral fog, 0.86 ms where it draws):**
+- It is not a post pass. It draws ~7.0M vertices, the same order as the scene passes
+  3deaa573 and b10c4f55, at render size (5.4M fragments, about 2.6x 1080p of overdraw).
+- So moving post-processing to render size does not touch it. A cheaper variant means
+  changing a game shader: fewer layers, or a cheaper fragment program.
+- That needs the program disassembled and an A/B in the fog area, so it is not something to
+  contain in a toggle this round. Deferred until the t9 profile in the Cathedral shows
+  whether it is fragment-bound (it would then be worth a reduced-quality patch) or
+  vertex-bound.
+
+**Motion blur while it is off (e0305cef, 2 draws a frame, ~0.29-0.33 ms, 4K):**
+- The patch makes the blur compare always false. Each pixel then still reads the velocity
+  and the centre sample and writes it through.
+- Skipping both draws gives the same picture only if they ping-pong back into the image the
+  next pass reads, or if their output can be aliased to their input.
+- Copying instead saves almost nothing at 4K RGBA16F: ~133 MB, about the cost of the draw.
+- The log did not say which images the draws use (the YEBIS texture log stopped at 24
+  lines). test7c logs its targets and textures: `render: motion blur ... draws into`.
+- The skip (`BBHOST_MOTION_BLUR_SKIP`, test8) will be written against that data. It will be
+  verified by bit-comparing presented-frame captures with the skip on and off before it
+  becomes the default.
+
+### Next: post-processing at render size, before FSR 4.1.1 (design)
+
+**Today's order:**
+1. Scene at 1920x1080.
+2. The game's scale pass ccbf44a6, which FSR 3.1/4.1.1 replaces, at 3840x2160.
+3. The YEBIS chain on the 4K output (sites 0x26c3af3, 0x25d818d).
+4. UI.
+
+**The 4K passes in t8 (per frame):**
+
+| Pass | ms | Draws | Fragments |
+|---|---|---|---|
+| d3ca03f3+111fce32 (DoF composite) | 0.42 | 1 | 16.6M (2x 4K) |
+| 8747a367+d92266b9 (glare/bloom composite) | 0.39-0.44 | 1 | 6.2-7.1M |
+| 7d668276+fbe7c4b6 (colour/LUT pass, LUT 2048x2) | 0.30 | | 8.3M |
+| 7d668276+e0305cef (motion blur) | 0.29 | 2 | 8.3M |
+| b28f5a56+765450df | 0.26 | | 10-14M |
+| 7e956bc3+e80526cc (small: the glare chain's downsamples) | 0.22 | 15 | |
+| 0b0acf50 (glow) | ~0.22 | | |
+
+About 1.9-2.1 ms in all, against the 7.5 ms target.
+
+**Target order, as AMD's guidance and the user's research have it:**
+1. Scene.
+2. At 1920x1080: DoF, bloom/glare/lens flares, motion blur (SSR and SSAO are already at
+   render size, in the scene).
+3. FSR 4.1.1 to 4K.
+4. At 4K: the sharpening, anything grain- or aberration-like the chain has, and the UI.
+
+**Mechanism (host side, `BBHOST_POST_AT_RENDER=1`, off by default):**
+1. At ccbf44a6, do not upscale. Hand the YEBIS chain the 1080p scene colour under the 4K
+   target's address: a render-size alias of the output RtImage.
+2. While the chain runs, its 4K targets are made at render size. Their viewports and scissors
+   are scaled by render/output, and so are the constants that hold pixel sizes. Most YEBIS
+   constants are UV-normalised: e0305cef's tap offsets, and the threshold at 1/1080. These
+   are logged per pass (`yebis:` lines) and checked one by one.
+3. Run FSR 4.1.1 where the chain's last output meets the first UI draw. That point is already
+   classified (motion_classify.h has the Scaleform UI VS hashes). FSR writes the real 4K
+   image, and the UI draws on it.
+
+**FSR inputs:**
+- **Colour:** post-DoF, post-bloom and post-motion-blur colour, which the user accepts.
+- **Depth, motion and jitter:** unchanged. They are at render size and match.
+- **Format:** if the colour/LUT pass fbe7c4b6 runs before the last post pass, FSR gets
+  display-referred colour. It is then given as non-HDR input, with exposure 1. That is our
+  upscaler's input mode, not the game's HDR setting, which stays untouched.
+- **Reactive mask:** motion-blurred and DoF-blurred areas should get a reactive value so FSR
+  does not smear them with history. The mask is built from the same CoC/velocity terms (DoF
+  blend factor t, |v|).
+- **Motion blur on:** it runs at 1080p on 1080p velocity, which is its native space (the
+  1/1080 threshold). So it should look as intended, and the reactive mask keeps FSR from
+  ghosting it.
+- **Jitter:** with post at render size, the jitter is in the image the post passes blur.
+  DoF and motion blur are filters, so they carry it through. Bloom thresholds may shimmer
+  slightly.
+
+**Expected saving:** the fragment-bound 4K passes drop to about a quarter. That is ~1.2-1.5 ms
+of the ~2 ms, minus fixed costs (the downsample chain is already small). It is more than the
+remaining gap to 7.5 ms on its own.
+
+**Risks:**
+- The chain's targets are allocated by the game at output size. Every alias and rescale has
+  to be exact, or edges and borders break. A mismatched constant shows as a half-size or
+  offset effect. The answer is one pass at a time, behind the toggle, with captures.
+- FSR sees blurred and bloomed colour. Bokeh edges, bright bloom halos and motion-blur
+  streaks can ghost or flicker, and the reactive mask is the mitigation. Some upscaler
+  documentation prefers DoF and motion blur at output size for quality, so the A/B decides.
+- The glare is at 1080p and the composite is upscaled. Thin lens-flare streaks lose
+  sharpness at 4K.
+- Getting it wrong for one frame (cuts, menus, the Dream) falls back to today's order.
+  The decision is per frame, with history reset on a switch.
+
+**Order of work:**
+1. A pass-order log of one frame (targets, sizes, formats), from a test build.
+2. Motion-blur skip while off.
+3. Then DoF, then glare/bloom, each behind the toggle with a capture comparison.

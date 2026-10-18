@@ -82,6 +82,9 @@ if a.idle:
         m = re.search(r'flush_locked\) ([0-9.]+)/s, ([0-9.]+) ms/s; splits ([0-9.]+)/s', line)
         if m:
             kinds['waits'].append(tuple(float(x) for x in m.groups()))
+        m = re.search(r'batched ([0-9.]+) jobs/s into ([0-9.]+) submits/s, held ([0-9.]+)/s for ([0-9.]+) ms/s', line)
+        if m:  # test7c, BBHOST_SUBMIT_BATCH
+            kinds['batch'].append(tuple(float(x) for x in m.groups()))
     if not lines:
         raise SystemExit('no "gpu idle:" lines (a build from test7 on, with the GPU busy meter on)')
     mean = lambda v: sum(v) / len(v) if v else 0.0
@@ -98,6 +101,9 @@ if a.idle:
     if kinds['waits']:
         v = kinds['waits']
         print('  cpu waits for the GPU %.0f/s, %.2f ms/s; splits %.0f/s' % tuple(mean([x[i] for x in v]) for i in range(3)))
+    if kinds['batch']:
+        v = kinds['batch']
+        print('  batched %.0f jobs/s into %.0f submits/s; held %.0f/s for %.2f ms/s' % tuple(mean([x[i] for x in v]) for i in range(4)))
     if late_lines:
         names = name_sites(sorted(s for s in late if s != 'present'), a.exe, a.windows)
         print('late gaps by what ended the command buffer before them (mean over %d reports):' % late_lines)

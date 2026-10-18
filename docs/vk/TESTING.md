@@ -93,6 +93,32 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test7c checks (~20 min)
+
+Install test7c the same way as test7b (keep the test7b `bbhost.bin` as a backup, for example
+`bbhost.bin.test7b`), then `cd` into the folder. Use the same settings as test7: FSR 4.1.1
+Performance, 3840x2160, 120, sharpness 5/10, Anti-aliasing Auto, **Show upscaler GPU time**
+on, motion blur off. Stand at the spawn lamp with the lamp and the fog in view and the
+camera still. Do not use `--record`.
+
+A. **Batching off (the baseline):** `./bbtest start t9-lamp` for 60 s,
+   `./bbtest mark "lamp batch off"`, `./bbtest stop`.
+   - In the log: `gpu: submit batching off`, and `render: motion blur 7d668276+e0305cef
+     draws into ...` (two or more lines) plus `texture: 7d668276+e0305cef b..` lines. These
+     are only data for the next build.
+B. **Batching on, same spot:** `BBHOST_SUBMIT_BATCH=1 ./bbtest start t9-lamp-batch` for
+   60 s, `./bbtest mark "lamp batch on"`, `./bbtest stop`.
+   - In the log: `gpu: submit batching on`.
+   - Watch for flashing, black or stale frames, or stutter. Stop at once if you see any
+     (`./bbtest mark "flash"` first).
+C. **Compare A and B:**
+   - session.txt: average fps, 1% and 0.1% lows, `N of M seconds under 120`.
+   - The idle split of each, with gpu_gaps.py:
+     `for s in t9-lamp t9-lamp-batch; do python3 gpu_gaps.py --idle "$(ls -d ~/.local/share/bbtest/sessions/*-$s | tail -1)/bbhost.log"; done`.
+     The `queued` ms/s should fall with batching on (test7: ~60 ms/s). The `gpu idle:`
+     line's `batched N jobs/s into M submits/s` shows how much was merged.
+   - Also walk once through the Cathedral fog with batching on and look at the fps there.
+
 ## test7 checks (~30 min)
 
 Install test7 (the tarball and the `bbtest` beside it), then `cd` into the folder. Use FSR
