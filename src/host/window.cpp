@@ -17,6 +17,7 @@
 #include "host/ingame_menu.h"
 #include "host/audio.h"
 #include "host/foreign_hooks.h"
+#include "host/fsr3_pass.h"
 #include "host/gpu.h"
 #include "host/temporal_inputs.h"
 #include "host/upscaler.h"
@@ -1973,6 +1974,9 @@ bool host_window_pump() {
     if (host_settings().debug_upscaler_time) {
         std::string line = g_pass_timer.ready() ? g_pass_timer.summary() : std::string();
         line = "GPU " + (line.empty() ? std::string("timing...") : line);
+        // The renderer's FSR 3.1 dispatch (host/fsr3_pass.h), when it runs.
+        const std::string fsr = host_gpu_upscale_timing();
+        if (!fsr.empty()) line += "  " + fsr;
         float dw = 0.0f;
         {
             std::lock_guard<std::mutex> ml(g_mouse_mu);
