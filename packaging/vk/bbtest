@@ -346,12 +346,12 @@ finish() {
         # test8: the one number for a locked 120, on its own line.
         echo "120 LOCK: $(printf '%s' "$fs" | grep -oE '[0-9]+ of [0-9]+ seconds under 120' || echo 'no MangoHud CSV')"
         # test8/test10: BBHOST_AB_SECONDS halves (post at render on/off) (bbhost's `ab:` lines), averaged per side.
-        echo "a/b (BBHOST_AB_SECONDS): $(awk '/ab: (motion blur skip|post at render) (on|off) for/ {
-                side = ($0 ~ /(skip|render) on/) ? "on" : "off"
-                for (i = 1; i <= NF; i++) { if ($i == "over" && $(i + 1) == "8.33") o833[side] += $(i - 1); if ($i == "frames,") fr[side] += $(i - 1); if ($i == "fps,") fps[side] += $(i - 1); if ($i == "max") mx[side] = ($(i + 1) + 0 > mx[side]) ? $(i + 1) + 0 : mx[side]; if ($i == "over" && $(i + 1) == "12") o12[side] += $(i - 1) }
+        echo "a/b (BBHOST_AB_SECONDS): $(awk '/ab: (motion blur skip|post at render|present pace) (on|off) for/ {
+                side = ($0 ~ /(skip|render|pace) on/) ? "on" : "off"
+                for (i = 1; i <= NF; i++) { if ($i == "over" && $(i + 1) == "8.33") o833[side] += $(i - 1); if ($i == "over" && $(i + 1) == "8.5") o85[side] += $(i - 1); if ($i == "over" && $(i + 1) == "9") o9[side] += $(i - 1); if ($i == "1%" && $(i + 1) == "low") { lo[side] += $(i + 2); nlo[side]++ } if ($i == "frames,") fr[side] += $(i - 1); if ($i == "fps,") fps[side] += $(i - 1); if ($i == "max") mx[side] = ($(i + 1) + 0 > mx[side]) ? $(i + 1) + 0 : mx[side]; if ($i == "over" && $(i + 1) == "12") o12[side] += $(i - 1) }
                 n[side]++ }
             END { if (!n["on"] && !n["off"]) { printf "none"; exit }
-                  for (k in n) printf "%s: %.1f fps over %d halves, %d of %d frames over 8.33 ms, max %.1f ms, %d over 12 ms; ", k, fps[k] / n[k], n[k], o833[k], fr[k], mx[k], o12[k] }' "$s/bbhost.log" 2> /dev/null)"
+                  for (k in n) printf "%s: %.1f fps over %d halves, 1%% low %.1f, %d of %d frames over 8.33 ms, %d over 8.5 ms, %d over 9 ms, max %.1f ms, %d over 12 ms; ", k, fps[k] / n[k], n[k], nlo[k] ? lo[k] / nlo[k] : 0, o833[k], fr[k], o85[k], o9[k], mx[k], o12[k] }' "$s/bbhost.log" 2> /dev/null)"
         echo "marks:    $(grep -c ' MARK ' "$s/marks.log" 2> /dev/null || true)"
         echo "shots:    $(find "$s/shots" -type f 2> /dev/null | wc -l)"
         echo "clips:    $(find "$s/clips" -type f -name '*.mp4' 2> /dev/null | wc -l)"
@@ -384,14 +384,14 @@ frame_stats() {
     secs=$(awk '{ t += $2; f++; if (t >= 1000) { w++; if (f < 119.5) low++; t -= 1000; f = 0 } }
         END { printf "%d of %d seconds under 120", low, w }' "$tmp")
     awk '{ print $2 }' "$tmp" | sort -g | awk -v secs="$secs" '
-        { v[NR] = $1; s += $1; q += $1 * $1; if ($1 > 8.333) o833++; if ($1 > 8.42) slow++; if ($1 > 12) hitch++ }
+        { v[NR] = $1; s += $1; q += $1 * $1; if ($1 > 8.333) o833++; if ($1 > 8.5) o85++; if ($1 > 9) o9++; if ($1 > 8.42) slow++; if ($1 > 12) hitch++ }
         END {
             n = NR
             if (n < 10) { printf "too few frames (%d)", n; exit }
             mean = s / n; sd = sqrt(q / n - mean * mean)
             p99 = v[int(n * 0.99)]; p999 = v[int(n * 0.999)]
-            printf "%d frames, avg %.1f fps, 1%% low %.1f, 0.1%% low %.1f, frame time %.2f ms +- %.2f (max %.1f); over 8.33 ms %d (%.1f%%), over 8.42 ms %d (%.1f%%), over 12 ms %d; %s",
-                n, 1000 / mean, 1000 / p99, 1000 / p999, mean, sd, v[n], o833, 100 * o833 / n, slow, 100 * slow / n, hitch, secs
+            printf "%d frames, avg %.1f fps, 1%% low %.1f, 0.1%% low %.1f, frame time %.2f ms +- %.2f (max %.1f); over 8.33 ms %d (%.1f%%), over 8.42 ms %d (%.1f%%), over 8.5 ms %d (%.1f%%), over 9 ms %d (%.1f%%), over 12 ms %d; %s",
+                n, 1000 / mean, 1000 / p99, 1000 / p999, mean, sd, v[n], o833, 100 * o833 / n, slow, 100 * slow / n, o85, 100 * o85 / n, o9, 100 * o9 / n, hitch, secs
         }'
     rm -f "$tmp"
 }
