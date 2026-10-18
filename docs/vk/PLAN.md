@@ -8,6 +8,14 @@ Mockup of the new Upscaling page: [mock/upscaling-tabs.png](mock/upscaling-tabs.
 
 References: Supermedo's Windows bbport launcher (visual style only), bbport (deadinside28, GPL-2.0+), IFreemz shadPS4 fork (GPL-2.0+), FireBurn/FSR-Vulkan (MIT). Their methods carry over; their code has to be adapted, because bbhost has its own renderer.
 
+## Hard rule: online play (paramount)
+Online play must work exactly as in upstream bbhost. bbhost uses thehuntersdream.com (partnered with bbhost), and bbhost-vk uses the same servers, the same auth server, the same account/sign-in flow (Discord, recovery code, website code) and the same networking code, unchanged.
+- No phase may modify `src/net/`, the HLE network/HTTP/NP code, the account flow, or the server defaults (`online.host`, `auth_server`, STUN), except by merging upstream bbhost changes.
+- The client keeps upstream's user agent format (`bbhost/<version>`); bbhost-vk versions keep the upstream base version first (e.g. `v0.2.18-vk.N`) so any server-side version handling sees the same bbhost release.
+- When upstream bbhost updates its online code or server requirements, bbhost-vk merges that before anything else (see Git project and maintenance).
+- Every test session checks sign-in and an online action (messages/bloodstains visible, summon sign or bell) before the session passes.
+- All rendering, upscaling, launcher and extras work is client-side only.
+
 ## Work order (quickest first, within dependencies)
 1. Phase 0: Groundwork (1-2 days)
 2. Phase 1: Scene/UI split (3-5 days)
