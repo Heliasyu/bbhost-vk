@@ -158,7 +158,8 @@ struct MotionPush {
     float jitter[2];
     float velocity_scale[2];
     std::uint32_t extent[2];
-    std::uint32_t flags, pad;
+    std::uint32_t flags;
+    float object_min;  // test5: object motion only where it differs from the camera's by this many render pixels
 };
 static_assert(sizeof(MotionPush) <= 128, "push constants");
 
@@ -291,7 +292,7 @@ UpscalerInputs g_inputs;
 // Counters for the logs.
 struct Stats {
     std::uint64_t frames = 0, motion_passes = 0, jittered = 0, scene_blocks = 0, blocks_rejected = 0, cameras_multi = 0;
-    std::uint64_t velocity_draws = 0, velocity_after_scale = 0, opaque_snapshots = 0, blended_scene = 0;
+    std::uint64_t velocity_draws = 0, velocity_after_scale = 0, opaque_snapshots = 0, blended_scene = 0, velocity_scale_rejected = 0;
     std::uint64_t skeleton_draws = 0, small_moving = 0, small_static = 0, skeleton_moving = 0, skeleton_static = 0;
     std::uint64_t no_depth = 0, cuts = 0, reactive_passes = 0;
     // test3: where the scene constants came from, and what the draws bound.
@@ -418,8 +419,25 @@ void temporal_observe_buffer_locked(int stage, std::uint32_t orb_vs, std::uint32
         ++g_window.blocks_unsized;
     }
     if (stage == 1 && !pointer && index == temporal::velocity_scale_buffer(orb_ps) && bytes >= 8) {
-        std::memcpy(g_velocity_scale, p, 8);
-        g_velocity_scale_ok = std::isfinite(g_velocity_scale[0]) && std::isfinite(g_velocity_scale[1]);
+        // test5: only a plausible scale is kept (motion_classify.h); test4 read (1, 1) for
+        // two windows and decoded every character's motion with it.
+        float sc[2];
+        std::memcpy(sc, p, 8);
+        const float aspect = g_cfg.render_h ? static_cast<float>(g_cfg.render_w) / static_cast<float>(g_cfg.render_h) : 16.0f / 9.0f;
+        if (temporal::velocity_scale_plausible(sc[0], sc[1], aspect)) {
+            g_velocity_scale[0] = sc[0];
+            g_velocity_scale[1] = sc[1];
+            g_velocity_scale_ok = true;
+        } else {
+            ++g_window.velocity_scale_rejected;
+            static int said = 0;
+            if (said < 4) {
+                ++said;
+                host_log("motion: velocity draw PS %08x buffer %d holds (%g, %g), not a packing scale for a %.3f:1 target: kept %s", orb_ps, index,
+                         static_cast<double>(sc[0]), static_cast<double>(sc[1]), static_cast<double>(aspect),
+                         g_velocity_scale_ok ? "the last good one" : "none (no object motion yet)");
+            }
+        }
     }
     ++g_window.buffers_seen;
     if (probe_lines()) probe_buffer(stage, orb_vs, orb_ps, index, base, bytes, pointer, p);
@@ -709,6 +727,8 @@ void temporal_scale_pass_locked(RtImage* scene_color, std::uint32_t output_w, st
             push.extent[0] = rw;
             push.extent[1] = rh;
             push.flags = (camera ? 1u : 0u) | (velocity_view ? 2u : 0u);
+            static const float object_min = env_float("BBHOST_OBJECT_MOTION_MIN", 1.5f);
+            push.object_min = object_min;
             VkCommandBuffer cmd = g_cmd();
             const std::int32_t timed = pass_timer_begin_locked(cmd, TimedPass::Motion);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_motion_pass.pipeline);
@@ -837,13 +857,14 @@ std::string temporal_report_locked() {
     std::snprintf(buf, sizeof(buf),
                   "motion: %llu frames: %llu motion passes (%llu without a scene depth), %.0f jittered draws a frame (phase %u of %u, %+.3f %+.3f), "
                   "%llu cuts, %.1f scene blocks a frame (%llu rejected, %llu frames with 2+ cameras), velocity draws %.1f a frame (%llu frames "
-                  "after the scale pass, scale %g %g), opaque snapshots %llu, reactive masks %llu, blended scene draws %.1f a frame; palettes (every 30th frame): "
+                  "after the scale pass, scale %g %g, %llu reads not a scale), opaque snapshots %llu, reactive masks %llu, blended scene draws %.1f a frame; palettes (every 30th frame): "
                   "skeletons %llu moving / %llu still, small %llu moving / %llu still",
                   static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.motion_passes),
                   static_cast<unsigned long long>(w.no_depth), w.jittered / f, g_jitter.phase, g_jitter.phases, g_jitter.x, g_jitter.y,
                   static_cast<unsigned long long>(w.cuts), w.scene_blocks / f, static_cast<unsigned long long>(w.blocks_rejected),
                   static_cast<unsigned long long>(w.cameras_multi), w.velocity_draws / f, static_cast<unsigned long long>(w.velocity_after_scale),
-                  g_velocity_scale[0], g_velocity_scale[1], static_cast<unsigned long long>(w.opaque_snapshots), static_cast<unsigned long long>(w.reactive_passes), w.blended_scene / f,
+                  g_velocity_scale[0], g_velocity_scale[1], static_cast<unsigned long long>(w.velocity_scale_rejected),
+                  static_cast<unsigned long long>(w.opaque_snapshots), static_cast<unsigned long long>(w.reactive_passes), w.blended_scene / f,
                   static_cast<unsigned long long>(w.skeleton_moving), static_cast<unsigned long long>(w.skeleton_static),
                   static_cast<unsigned long long>(w.small_moving), static_cast<unsigned long long>(w.small_static));
     return buf;

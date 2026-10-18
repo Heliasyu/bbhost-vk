@@ -13,7 +13,7 @@
 // IFreemz).
 //
 // Out: the depth copy (R32F, binding 4) and RGBA16F, rg = current-to-previous motion in render pixels (+y down),
-// b = 1 where the motion is an object's, a = 1 where the camera's was valid.
+// b = 1 where the motion is an object's (0.35: the velocity target covers it, the camera's kept), a = 1 where the camera's was valid.
 // Compiled offline (tools/build_shaders.sh) into motion.spv.h.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -33,7 +33,7 @@ layout(push_constant) uniform Params {
     vec2 velocity_scale;  // the velocity draws' packing scale (their constant buffer)
     uvec2 extent;       // the render size (the depth may be larger: padding)
     uint flags;         // 1 camera usable, 2 velocity usable
-    uint pad;
+    float object_min;   // test5: object motion only where it differs from the camera's by this (render pixels)
 } pc;
 
 bool finite2(vec2 v) { return !any(isnan(v)) && !any(isinf(v)); }
@@ -61,13 +61,32 @@ void main() {
     }
     float object = 0.0;
     if ((pc.flags & 2u) != 0u) {
+        // test5 (test4's shimmer on characters): the game's target is 160x90 RGBA8 - a
+        // texel covers 16x16 render pixels at 1440p and a step of its 8 bits is ~1.1
+        // pixels. So (1) only texels whose 2x2 neighbourhood is all object are taken:
+        // at an object's edge the camera's motion stays and FSR's own depth dilation
+        // carries the object's onto it; (2) only where the decoded motion differs from
+        // the camera's by more than object_min - a still object's quantised velocity
+        // (128/255 is not 0.5) is not put over the exact camera motion.
         const ivec2 vsize = textureSize(sampler2D(velocity, point_sampler), 0);
+        const vec2 vp = uv * vec2(vsize) - 0.5;
+        const ivec2 v0 = clamp(ivec2(floor(vp)), ivec2(0), vsize - 1);
+        const ivec2 v1 = clamp(v0 + 1, ivec2(0), vsize - 1);
+        const float inside = min(min(texelFetch(sampler2D(velocity, point_sampler), v0, 0).a,
+                                     texelFetch(sampler2D(velocity, point_sampler), ivec2(v1.x, v0.y), 0).a),
+                                 min(texelFetch(sampler2D(velocity, point_sampler), ivec2(v0.x, v1.y), 0).a,
+                                     texelFetch(sampler2D(velocity, point_sampler), v1, 0).a));
         const ivec2 vxy = clamp(ivec2(uv * vec2(vsize)), ivec2(0), vsize - 1);
         const vec4 m = texelFetch(sampler2D(velocity, point_sampler), vxy, 0);
         const vec2 s = pc.velocity_scale;
         if (m.a > 0.5 && abs(s.x) > 1e-6 && abs(s.y) > 1e-6 && finite2(s)) {
-            delta = (m.rg - 0.5) * vec2(-size.x / s.x, size.y / s.y);
-            object = 1.0;
+            const vec2 od = (m.rg - 0.5) * vec2(-size.x / s.x, size.y / s.y);
+            if (inside > 0.5 && (camera_ok < 0.5 || length(od - delta) > pc.object_min)) {
+                delta = od;
+                object = 1.0;
+            } else {
+                object = 0.35;  // covered by the target, the camera's motion kept (the motion-vector view's dim blue)
+            }
         }
     }
     if (!finite2(delta) || any(greaterThan(abs(delta), size))) {

@@ -37,6 +37,19 @@ constexpr std::uint32_t kScenePassPs = 0xccbf44a6u;       // the scale pass (Pha
 inline bool is_velocity_ps(std::uint32_t h) { return h == kOpaqueVelocityPs || h == kAlphaVelocityPsA || h == kAlphaVelocityPsB; }
 // The constant buffer that carries the velocity's packing scale (two floats).
 inline int velocity_scale_buffer(std::uint32_t h) { return h == kOpaqueVelocityPs ? 0 : is_velocity_ps(h) ? 1 : -1; }
+// test5: whether two floats read there are a packing scale. test4's third
+// window read (8.88889, -5): the 160x90 target's size / 18, its y negative,
+// which decodes to at most +-144 render pixels. The first two read (1, 1),
+// which decodes a static object's 128/255 to a 5-pixel motion and anything
+// else to hundreds - the shimmer on characters. A scale's sides keep the
+// target's (and the scene's) aspect and are not tiny.
+inline bool velocity_scale_plausible(float sx, float sy, float aspect) {
+    if (!(sx == sx) || !(sy == sy) || !(aspect > 0.0f)) return false;
+    const float ax = sx < 0 ? -sx : sx, ay = sy < 0 ? -sy : sy;
+    if (ax < 1.5f || ay < 1.5f || ax > 1e4f || ay > 1e4f) return false;
+    const float r = (ax / ay) / aspect;
+    return r > 0.9f && r < 1.1f;
+}
 
 inline bool is_ui_vs(std::uint32_t h) {
     return h == 0x34e8a281u || h == 0x81d336ceu || h == 0x09957251u || h == 0x24042a9bu || h == 0xa400228bu;

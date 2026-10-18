@@ -2,8 +2,10 @@
 // bbhost-vk Phase 2: the motion-vector view (Show Motion Vectors), drawn by
 // the presenter over the picture (host/present_pass.cpp). Red is the
 // horizontal motion, green the vertical, both by size (8 render pixels a
-// frame is full); blue marks the game's object velocity; where the camera
-// motion was not valid the picture shows through darkened.
+// frame is full); blue marks the game's object velocity (bright: used,
+// dim - test5 - covered by the game's 160x90 velocity target but the camera's
+// motion kept); where the camera motion was not valid the picture shows
+// through darkened.
 layout(set = 0, binding = 0) uniform sampler2D motion;
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_colour;

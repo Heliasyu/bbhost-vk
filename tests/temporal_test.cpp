@@ -443,7 +443,19 @@ void test_test4() {
     CHECK(!direct_output_ok(true, 97, 3840, 2160, out, 2560, 1440, false));
 }
 
+// test5: which packing scales the velocity decode takes.
+void test_test5() {
+    const float a = 2560.0f / 1440.0f;
+    CHECK(velocity_scale_plausible(8.88889f, -5.0f, a));  // test4's third window: 160x90 / 18
+    CHECK(!velocity_scale_plausible(1.0f, 1.0f, a));      // the first two: the shimmer
+    CHECK(!velocity_scale_plausible(8.88889f, -8.88889f, a));
+    CHECK(!velocity_scale_plausible(0.0f, 0.0f, a));
+    CHECK(!velocity_scale_plausible(std::nanf(""), 5.0f, a));
+    CHECK(velocity_scale_plausible(-17.7778f, 10.0f, a));
+}
+
 int main() {
+    test_test5();
     test_test4();
     test_halton();
     test_parse();
