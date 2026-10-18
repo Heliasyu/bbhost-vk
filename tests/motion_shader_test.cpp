@@ -383,6 +383,22 @@ int main() {
     CHECK(sum / (W * H) > 0.5);      // and moves
     std::printf("motion_shader_test: %s: %ux%u pixels match the CPU math (worst %.4f px, mean |motion| %.2f px, %u sky)\n", props.deviceName, W, H,
                 worst, sum / (W * H), sky);
+    // Everything back before the device goes (clean under VK_LAYER_KHRONOS_validation).
+    vkDeviceWaitIdle(dev);
+    vkFreeCommandBuffers(dev, cpool, 1, &cmd);
+    vkDestroyCommandPool(dev, cpool, nullptr);
+    vkDestroyDescriptorPool(dev, pool, nullptr);
+    vkDestroyPipeline(dev, pipe, nullptr);
+    vkDestroyShaderModule(dev, module, nullptr);
+    vkDestroyPipelineLayout(dev, layout, nullptr);
+    vkDestroyDescriptorSetLayout(dev, dsl, nullptr);
+    vkDestroySampler(dev, smp, nullptr);
+    for (VkImageView v : {dview, vview, mview, cview}) vkDestroyImageView(dev, v, nullptr);
+    for (VkImage i : {dimg, vimg, mimg, cimg}) vkDestroyImage(dev, i, nullptr);
+    for (VkDeviceMemory m : {dmem, vmem, mmem, cmem}) vkFreeMemory(dev, m, nullptr);
+    vkUnmapMemory(dev, bmem);
+    vkDestroyBuffer(dev, buf, nullptr);
+    vkFreeMemory(dev, bmem, nullptr);
     vkDestroyDevice(dev, nullptr);
     vkDestroyInstance(inst, nullptr);
     return g_fail ? 1 : 0;
