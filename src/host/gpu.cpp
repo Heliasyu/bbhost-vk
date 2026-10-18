@@ -287,7 +287,9 @@ void submit_batch_now(const std::vector<SubmitJob>& jobs) {
     g_stream_submitted.store(last.serial + 1, std::memory_order_release);
 }
 
-// BBHOST_SUBMIT_BATCH (test7c; off by default until measured on hardware):
+// BBHOST_SUBMIT_BATCH (test7c): off, and stays off - rejected on hardware (t9,
+// 2026-10-18: 1% low 99.6 -> 77.1, 521 frames over 12 ms; docs/vk/DEVLOG.md).
+// Kept for measurement only; nothing turns it on but the variable.
 // 1 merges the game's jobs that are waiting together, and holds a new one
 // back while the GPU already has two of our submissions it has not finished
 // - one running and one queued behind it, so it never runs dry - letting the
