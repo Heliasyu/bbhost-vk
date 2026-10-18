@@ -129,4 +129,8 @@ Base: `main` = upstream bbhost v0.2.18 (c421ea0) + the 120 fps option
 - `bbtest` dry run with a stand-in `./bbhost`: start (foreground and
   `--detach`), status, mark (log line, `capture.request`), clip without
   `--record` (says so), stop, bundle with session.txt / marks.log.
+- Phase 0 binary: built by `packaging/vk/build.sh` from ba5082a
+  (`v0.2.18-vk.0-9-gba5082a`), stripped, needs GLIBC_2.38, SHA-256
+  `571c7ebcc82271cc04b47676e40db6800f0b17db9fc405711bc03cf22e1dc5b8`
+  (on the build box at /workspace/bbhost-vk-builds/phase0/; not released).
 - Player's PC test: pending (checklist in TESTING.md, "Phase 0 test").
