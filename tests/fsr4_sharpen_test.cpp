@@ -137,6 +137,7 @@ int main() {
     const std::uint32_t W = 53, H = 37;
     std::vector<std::uint16_t> in(W * H * 4);
     std::vector<float> src(W * H * 4);
+    std::vector<double> lin_luma(W * H);  // the linear input's, for the brightness check
     std::mt19937 rng(7);
     std::uniform_real_distribution<float> noise(0.0f, 0.3f);
     for (std::uint32_t y = 0; y < H; ++y)
@@ -147,6 +148,7 @@ int main() {
             p[1] = 0.5f * base + 0.02f * x;
             p[2] = 0.3f + 0.03f * y + noise(rng);
             if ((x == 20 && y == 17) || (x == 47 && y == 15) || (x == 16 && y == 32)) p[0] = p[1] = p[2] = 30.0f;  // a lamp
+            lin_luma[y * W + x] = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
             for (int c = 0; c < 3; ++c) p[c] = static_cast<float>(encode(p[c]));  // as the postpass leaves it
             p[3] = 0.25f + (x % 3) * 0.25f;
             for (int c = 0; c < 4; ++c) {
@@ -288,7 +290,7 @@ int main() {
     VK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
 
     int failures = 0;
-    for (const float sharpness : {0.5f, 1.0f}) {
+    for (const float sharpness : {0.0f, 0.5f, 1.0f}) {
         std::memcpy(map, in.data(), bytes);
         VkCommandBufferBeginInfo cbbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         VK(vkBeginCommandBuffer(cmd, &cbbi));
@@ -350,7 +352,7 @@ int main() {
         // The output back in the encoded domain, to compare there (where RCAS ran).
         const double inv = static_cast<double>(kPreExposure) / kExposure;
         auto reencode = [&](float c) { return encode(c / inv); };
-        double worst = 0, moved = 0;
+        double worst = 0, moved = 0, in_sum = 0, out_sum = 0;
         int bad = 0;
         for (int y = 0; y < static_cast<int>(H); ++y)
             for (int x = 0; x < static_cast<int>(W); ++x) {
@@ -361,6 +363,9 @@ int main() {
                 const double err = std::max({std::fabs(got.r - want.r), std::fabs(got.g - want.g), std::fabs(got.b - want.b)});
                 worst = std::max(worst, err);
                 moved = std::max(moved, std::max({std::fabs(got.r - e.r), std::fabs(got.g - e.g), std::fabs(got.b - e.b)}));
+                // Linear, as the next pass sees it (scaled back by the exposure the decode applied).
+                out_sum += (0.2126 * half_to_float(o[0]) + 0.7152 * half_to_float(o[1]) + 0.0722 * half_to_float(o[2])) / inv;
+                in_sum += lin_luma[y * W + x];
                 const bool alpha_ok = o[3] == o[0];  // alpha is red, as the replay's RCAS writes it
                 // Half floats and the shader's approximate reciprocals.
                 if ((err > 0.01 || !alpha_ok) && bad++ < 5)
@@ -368,12 +373,20 @@ int main() {
                                  got.b, want.r, want.g, want.b, alpha_ok ? "" : ", alpha differs");
             }
         if (bad) ++failures;
-        if (moved < 0.02) {  // it must sharpen at all
+        // test7b's haze: the mean brightness must survive the pass (HDR lamps
+        // included), within 1% where the user plays (sharpness 0 to 0.5).
+        const double ratio = out_sum / in_sum;
+        if (sharpness <= 0.5f && std::fabs(ratio - 1.0) > 0.01) {
+            std::fprintf(stderr, "sharpness %.1f: mean luma %.4f out of %.4f in (%.2f%%)\n", sharpness, out_sum / (W * H), in_sum / (W * H),
+                         (ratio - 1.0) * 100.0);
+            ++failures;
+        }
+        if (sharpness >= 0.5f && moved < 0.02) {  // it must sharpen at all
             std::fprintf(stderr, "sharpness %.1f: the output is the input\n", sharpness);
             ++failures;
         }
-        std::printf("fsr4_sharpen_test: %s: sharpness %.1f, %ux%u pixels match RCAS (worst %.4f, largest change %.3f)\n", props.deviceName,
-                    sharpness, W, H, worst, moved);
+        std::printf("fsr4_sharpen_test: %s: sharpness %.1f, %ux%u pixels match RCAS (worst %.4f, largest change %.3f, mean luma %+.2f%%)\n",
+                    props.deviceName, sharpness, W, H, worst, moved, (ratio - 1.0) * 100.0);
         VK(vkResetCommandBuffer(cmd, 0));
     }
 
