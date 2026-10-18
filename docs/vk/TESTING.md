@@ -93,6 +93,26 @@ show a short notification when `notify-send` exists.
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
 
+## test8 checks (one run, ~6 min)
+
+Install test8 (keep test7c's `bbhost.bin` as `bbhost.bin.test7c`) and `cd` into the folder.
+Use the same settings as t9: FSR 4.1.1 Performance, 4K, 120, sharpness 5/10, AA Auto,
+**motion blur off**. Stand at the spawn lamp with the lamp and the fog in view, and keep the
+camera still.
+
+1. `BBHOST_AB_SECONDS=30 ./bbtest start --capture t10-lamp-ab`. Stay 3 minutes (6 halves).
+   About every 30 s, run `./bbtest mark "lamp"`: it takes a presented-frame capture.
+2. Turn motion blur **on** in the game's settings for 30 s, moving the camera, then
+   `./bbtest mark "blur on"`. It must blur as in test7c. Turn it off again.
+3. `./bbtest stop`. Send:
+   - session.txt (`120 LOCK:`, `a/b (BBHOST_AB_SECONDS): skip on ... skip off ...`);
+   - the `render: motion blur skip ...` and `post-chain:` lines from bbhost.log, or the
+     whole log.
+   - Compare the captures from the on and off halves. They must look identical apart from
+     the fog's movement. `ab:` lines in the log say which half each capture fell in.
+
+If anything looks wrong, `BBHOST_MOTION_BLUR_SKIP=0` brings back test7c's behaviour.
+
 ## test7c checks (~20 min)
 
 Install test7c the same way as test7b (keep the test7b `bbhost.bin` as a backup, for example

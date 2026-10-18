@@ -1333,3 +1333,63 @@ remaining gap to 7.5 ms on its own.
 1. A pass-order log of one frame (targets, sizes, formats), from a test build.
 2. Motion-blur skip while off.
 3. Then DoF, then glare/bloom, each behind the toggle with a capture comparison.
+
+## t9 on hardware: submit batching rejected (2026-10-18)
+
+- **Batch off** (t9-lamp): 116.9 fps, 1% low 99.6, 0.1% 88.5, 8.55 ± 0.57 ms, 2 frames over
+  12 ms.
+- **Batch on** (t9-lamp-batch): 116.8 fps, 1% low 77.1, 0.1% 71.4, 8.56 ± 2.29 ms, 521 over
+  12 ms, max 41 ms.
+- **What batching did:** it merged 1049 jobs/s into 214 submits/s, but held 227 jobs/s for
+  495 ms/s. The time to vkQueueSubmit rose to 1810 us.
+- **Gaps:** queued gaps fell only from 66.5 to 53.3 ms/s, while gaps before the present rose
+  from 8.3 to 22.1 ms/s.
+- **Why:** holding a job until the GPU had fewer than two submissions left kept bb-submit
+  waiting on fences for half of each second. Jobs the presenter's frame depended on queued
+  behind the hold, so frame pacing broke. The queued gaps are mostly not a per-submission
+  cost, which is what the plan assumed.
+- `BBHOST_SUBMIT_BATCH` stays in the code, off. No more time is going into it.
+
+## test8: the motion blur skip, and the data for post-processing at render size
+
+**Motion blur's targets (t9 log):** e0305cef draws into 0x169e00000, then 0x161e60000, both
+3840x2160 RGBA16F (format 97), every frame. That is the ping-pong the skip needs. The skip's
+policy (`temporal/mblur_skip.h`, `tests/mblur_skip_test.cpp`) proves it at run time:
+- **Learning:** a frame counts only if:
+  - its two draws are exactly A->B then B->A;
+  - neither draw blends;
+  - the colour input is found as the one sampled render target of the target's size and
+    format;
+  - nothing else sampled, wrote, copied or cleared B. The hooks are prefetch_stage_images
+    (draws and dispatches), rt_written, render_copy_target_locked and clear_image_locked.
+- **Armed** after 120 frames like that: draw 1 is held back and draw 2 is checked against
+  the pattern. Any other work in between, or a mismatch, does draw 1 after all as a copy of
+  A into B, which is what the patched shader writes, and disarms.
+- **Why it is exact:** with motion blur off, the shader patch makes every pixel take the
+  unblurred path, so the pair is an identity copy, and B is a scratch target nobody else
+  reads.
+- **Motion blur on:** the draws are not eligible, so nothing is skipped and the blur is
+  unchanged.
+- **Expected saving:** ~0.29-0.33 ms a frame.
+- **Not covered:** a CPU read of B's memory. There is no such path for render targets in
+  YEBIS's chain, and the off/on capture comparison in TESTING checks it.
+- **Default on,** with `BBHOST_MOTION_BLUR_SKIP=0` as the fallback, and
+  `BBHOST_AB_SECONDS=30` for the A/B in one run.
+
+**Post-processing at render size: not in test8, and why.**
+- **What the design needs** (test7c section), one pass at a time:
+  - which draws are the DoF, glare and colour passes;
+  - the order of their targets;
+  - which constants are in pixels;
+  - whether any compute dispatch sits in the chain.
+- **What we have:** none of that is in any log yet. The F12 dump and the YEBIS texture lines
+  stop after 24 entries.
+- **The risk of building it blind:** half-size or offset effects, or a broken frame, in the
+  user's only run. Defaulting it on that way is not something the box can verify, because
+  the box cannot run the game.
+- **So test8 collects that data in the same run:** `BBHOST_POST_CHAIN_LOG` (on, one frame
+  every 3600 flips) logs each draw from the scale pass to the first UI draw, with its
+  target, size, format, viewport, blending and the images it samples.
+- **Next build:** with those lines, test9 can implement `BBHOST_POST_AT_RENDER` (DoF, then
+  glare/bloom, then the colour/LUT pass, each with its own switch), with no extra trip to
+  the hardware for data.

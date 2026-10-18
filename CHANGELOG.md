@@ -1,6 +1,22 @@
 # Changelog (bbhost-vk)
 
 ## Unreleased (Phase 5 and the first test build, branch `phase-5-test-release`)
+- **test8 (motion blur skip; one-run A/B; post-chain data):**
+  - With motion blur off, its two 4K draws a frame (~0.29-0.33 ms) are left out. The skip
+    only starts once it has seen, for 120 frames in a row, that the two draws copy A into B
+    and back, without blending, and that nothing else reads or writes B. It goes back to
+    drawing at the first sign of anything else: draw 1 is done after all (a copy of A into
+    B), and it learns again. With motion blur on it skips nothing. It is on by default;
+    `BBHOST_MOTION_BLUR_SKIP=0` turns it off.
+  - `BBHOST_AB_SECONDS=<s>` turns the skip off and on every s seconds in one run, and logs
+    each half's frame times (`ab:` lines). bbtest's session.txt averages them per side.
+  - session.txt has a `120 LOCK: N of M seconds under 120` line of its own.
+  - `BBHOST_POST_CHAIN_LOG=<flips>` (default 3600; 0 turns it off) logs one frame's draws
+    from the scale pass to the first UI draw: targets, sizes, formats, viewports, blending
+    and the images each draw samples. Moving post-processing to render size is built on it.
+  - The motion blur's texture lines now print; test7c's were lost to a shared limit.
+  - test7c's `BBHOST_SUBMIT_BATCH=1` was rejected on hardware (t9: 1% low 99.6 -> 77.1, 521
+    frames over 12 ms). It stays off.
 - **test7c (submit batching, experimental; motion blur data):**
   - `BBHOST_SUBMIT_BATCH=1` (off by default): bb-submit puts the game's jobs that are already
     waiting into one vkQueueSubmit (one VkSubmitInfo, all their command buffers). It holds
