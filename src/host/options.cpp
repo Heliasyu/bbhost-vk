@@ -97,6 +97,9 @@ enum SettingId {
     kUpscaleJitter,
     kDebugMotionVectors,
     kDebugUpscalerTime,
+    // v0.2.18-vk.1: the test10/test11 frame-time features, as fallback switches.
+    kPresentPace,
+    kPostAtRender,
     kSettingCount,
 };
 
@@ -280,6 +283,14 @@ Setting g_set[kSettingCount] = {
     {"debug_upscaler_time", "Show upscaler GPU time", {"Off", "On"}, 0,
      "Debug: the GPU time of FSR 3.1's dispatch and of the presenter's passes (the upscale, the whole present) under the FPS counter, and in the log.",
      false},
+    // host/temporal/present_pacer.h (BBHOST_PRESENT_PACE wins when set).
+    {"present_pace", "Even frame pacing", {"On", "Off"}, 0,
+     "Holds each frame to an even slot at the frame rate (adds up to a few ms of latency). Off presents each frame as soon as it is ready. Applies on the next run.",
+     false},
+    // host/render.cpp's post at render (BBHOST_POST_AT_RENDER wins when set).
+    {"post_at_render", "Post-processing at render size", {"On", "Off"}, 0,
+     "FSR 3.1 / 4.1.1 below Native AA: depth of field, fog and motion blur run at the render size and FSR upscales after them (~0.7 ms at 4K). Off is the older order, if a picture looks wrong. Applies on the next run.",
+     false},
 };
 
 const Row g_rows[] = {
@@ -288,6 +299,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kVsync},
     {Row::Option, nullptr, kFrameCap},
     {Row::Option, nullptr, kFpsCounter},
+    {Row::Option, nullptr, kPresentPace},
     {Row::Option, nullptr, kFov},
     {Row::Option, nullptr, kCameraDistance},
     {Row::Option, nullptr, kCameraHeight},
@@ -320,6 +332,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kUpscaleSharpness},
     {Row::Option, nullptr, kUpscaleReactive},
     {Row::Option, nullptr, kUpscaleJitter},
+    {Row::Option, nullptr, kPostAtRender},
     {Row::Option, nullptr, kDebugMotionVectors},
     {Row::Option, nullptr, kDebugUpscalerTime},
     {Row::Header, "PC ENHANCEMENTS"},

@@ -791,6 +791,7 @@ std::string hle_video_pacing_window() {
 }
 
 void hle_video_set_loading_uncapped(bool on) { g_flip_loading.store(on, std::memory_order_relaxed); }
+bool hle_video_loading() { return g_flip_loading.load(std::memory_order_relaxed); }
 
 // The game's pace once engine/frame_rate.cpp chose it; -1 before.
 std::atomic<int> g_game_pace{-1};

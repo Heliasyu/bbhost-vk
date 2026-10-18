@@ -710,11 +710,16 @@ std::deque<std::chrono::steady_clock::time_point> g_present_times;  // the last 
 // at the game's fixed pace. BBHOST_AB_SECONDS=<s> (with BBHOST_AB_TOGGLE unset
 // or "pace") turns it off and on every s seconds and logs each half's present
 // intervals - what MangoHud times - as `ab: present pace` lines.
-const bool g_pace_mode = [] {
-    const char* e = std::getenv("BBHOST_PRESENT_PACE");
-    return !(e && e[0] == '0');
-}();
-bool g_pace_on = g_pace_mode;
+// v0.2.18-vk.1: BBHOST_PRESENT_PACE when set, else the options' "Even frame
+// pacing" (on); read at the first present, after the options load.
+bool pace_mode() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_PRESENT_PACE");
+        return e && *e ? e[0] != '0' : host_opt_get("present_pace");
+    }();
+    return on;
+}
+bool g_pace_on = true;
 temporal::PresentPacer g_pacer;
 
 std::int64_t pace_now_ns() {
@@ -730,10 +735,14 @@ std::int64_t pace_present() {
     if (!said && period) {
         said = true;
         host_log("present: pacing %s (BBHOST_PRESENT_PACE%s): presents held to an even %.3f ms grid, a late frame at once",
-                 g_pace_mode && period ? "on" : "off", g_pace_mode ? "=0 turns it off" : "=0", static_cast<double>(period) / 1e6);
+                 pace_mode() && period ? "on" : "off", pace_mode() ? "=0 turns it off" : "=0", static_cast<double>(period) / 1e6);
     }
     std::int64_t now = pace_now_ns();
-    g_pacer.set_period(g_pace_on && period ? period : 0);
+    // Not while a loading screen shows, nor for 2 s after: the frames then
+    // come unevenly and the grid would restart on each (t13's first half).
+    static std::int64_t settle_until = 0;
+    if (hle_video_loading()) settle_until = now + 2000000000ll;
+    g_pacer.set_period(pace_mode() && g_pace_on && period && now >= settle_until ? period : 0);
     const std::int64_t w = g_pacer.wait_ns(now);
     if (w > 0) {
         const std::int64_t until = now + w;
@@ -756,7 +765,7 @@ void pace_ab_note(std::int64_t t) {
         const bool pace = !w || !*w || std::strcmp(w, "pace") == 0;
         return e && pace ? std::strtol(e, nullptr, 10) : 0L;
     }();
-    if (ab_s <= 0 || !g_pace_mode) return;
+    if (ab_s <= 0 || !pace_mode()) return;
     static std::int64_t last = 0, start = 0;
     static std::vector<float> ms;
     if (!start) start = t;

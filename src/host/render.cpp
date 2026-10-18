@@ -10,6 +10,7 @@
 #include "engine/scene_split_sites.h"
 #include "engine/gx_state.h"
 #include "host/gpu_internal.h"
+#include "host/options.h"
 #include "core/host_clock.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
@@ -1331,11 +1332,18 @@ void mb_skip_materialize_locked() {
 // FSR's (menus, the Dream's other paths, loads), FSR has no inputs, or the
 // sizes are not output = target; and for good if FSR fails at the window's
 // end (the stand-in is copied in, the log says why).
-const bool g_post_mode = [] {
-    const char* e = std::getenv("BBHOST_POST_AT_RENDER");
-    return !(e && e[0] == '0');
-}();
-bool g_post_on = g_post_mode;     // BBHOST_AB_SECONDS turns it off and on
+// v0.2.18-vk.1: BBHOST_POST_AT_RENDER when set, else the options' "Post-
+// processing at render size" (on); read at the first draw, after the options load.
+bool post_mode() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_POST_AT_RENDER");
+        const bool v = e && *e ? e[0] != '0' : host_opt_get("post_at_render");
+        host_log("post-at-render: %s (%s)", v ? "on" : "off", e && *e ? "BBHOST_POST_AT_RENDER" : "the options' Post-processing at render size");
+        return v;
+    }();
+    return on;
+}
+bool g_post_on = true;            // BBHOST_AB_SECONDS=post turns it off and on
 bool g_post_dead = false;         // FSR failed at a window's end: off for the session
 thread_local bool t_in_draw = false;  // draw_impl: a dispatch's prefetch is not a draw's
 std::map<std::uint64_t, RtImage> g_post_shadows;  // by the real target's base
@@ -1440,7 +1448,7 @@ void post_fallback(const char* why) {
 // At the scale pass: open the window, the scene copied into A's stand-in.
 // False: as before (FSR at the scale pass).
 bool post_begin_locked(RtImage* target, RtImage* scene, const temporal::OutputRect& out) {
-    if (!g_post_mode || !g_post_on || g_post_dead) return false;
+    if (!post_mode() || !g_post_on || g_post_dead) return false;
     if (g_pw.open) post_end_window_locked("a second scale pass");
     const UpscalerInputs& in = temporal_inputs_locked();
     if (!target || !scene || target->depth || target->layers != 1 || target->format != VK_FORMAT_R16G16B16A16_SFLOAT) {
@@ -12392,7 +12400,7 @@ static bool draw_impl(const GpuDraw& d) {
             const char* w = std::getenv("BBHOST_AB_TOGGLE");
             return w && std::strcmp(w, "post") == 0;
         }();
-        if (ab_s > 0 && ab_post && g_post_mode && flip != last_flip) {
+        if (ab_s > 0 && ab_post && post_mode() && flip != last_flip) {
             last_flip = flip;
             const std::uint64_t now = host_clock_monotonic_ns();
             if (!phase_start_ns) phase_start_ns = now;
