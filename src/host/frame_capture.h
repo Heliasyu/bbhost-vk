@@ -30,7 +30,8 @@ bool enabled();  // BBHOST_VK_CAPTURE=1
 // supportedUsageFlags). Remembers whether it was granted.
 VkImageUsageFlags swapchain_usage(VkImageUsageFlags supported);
 
-// Asks for the next presented frame. Any thread.
+// Asks for the next presented frame. Any thread. With BBHOST_FSR_DUMP=1 it
+// also asks for the FSR stage dump (host/fsr_dump.h).
 void request(const char* why);
 
 // The window pump, every frame: the trigger file and the timer.

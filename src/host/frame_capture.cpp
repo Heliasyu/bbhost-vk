@@ -2,6 +2,7 @@
 #include "host/frame_capture.h"
 
 #include "core/image_file.h"
+#include "host/fsr_dump.h"
 #include "host/settings.h"
 #include "host/upscaler_presets.h"
 #include "log.h"
@@ -193,6 +194,7 @@ VkImageUsageFlags swapchain_usage(VkImageUsageFlags supported) {
 }
 
 void request(const char* why) {
+    host_fsr_dump_request(why);
     if (!enabled()) return;
     if (!g_usage_ok.load()) {
         host_log("capture: %s asked for a frame, but the swapchain cannot be read", why ? why : "?");

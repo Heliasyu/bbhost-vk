@@ -3,10 +3,12 @@
 // history and cuts, and the camera motion vectors (host/temporal/camera.h),
 // and the draw classification (host/temporal/motion_classify.h).
 #include "host/temporal/camera.h"
+#include "host/temporal/dump_pixels.h"
 #include "host/temporal/fsr3_policy.h"
 #include "host/temporal/halton.h"
 #include "host/temporal/motion_classify.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -351,6 +353,66 @@ void test_fsr3_output_rect() {
     CHECK(r.w * 1440 == r.h * 2560);
 }
 
+// test3: bbport's signature, a block inside a larger buffer, which sizes are taken.
+void test_signature() {
+    double p[3] = {1, 2, 3};
+    std::vector<float> f = block(p, 10);
+    CHECK(scene_constants_signature(f.data(), f.size()));
+    CHECK(!scene_constants_signature(f.data(), 100));  // not a whole block
+    std::vector<float> g = f;
+    g[1] = 0.5f;
+    CHECK(!scene_constants_signature(g.data(), g.size()));
+    g = f;
+    g[4] = 32.0f;
+    CHECK(!scene_constants_signature(g.data(), g.size()));
+    g = f;
+    g[0] = NAN;
+    CHECK(!scene_constants_signature(g.data(), g.size()));
+    // Another size (test2's filter rejected it): the signature holds.
+    std::vector<float> other = block(p, 10, 0.0, 1.0f, 5120, 2160);
+    CHECK(scene_constants_signature(other.data(), other.size()));
+    // Inside a larger buffer at a 16-byte step.
+    std::vector<float> big(1024, 0.0f);
+    std::copy(f.begin(), f.end(), big.begin() + 64);
+    CHECK(find_scene_constants(big.data(), big.size()) == 64);
+    CHECK(find_scene_constants(big.data(), 200) == kNotFound);
+    std::vector<float> none(1024, 1.0f);
+    CHECK(find_scene_constants(none.data(), none.size()) == kNotFound);
+    // Sizes taken.
+    CHECK(camera_size_accepted(2560, 1440, 2560, 1440, 3840, 2160, false));
+    CHECK(camera_size_accepted(3840, 2160, 2560, 1440, 3840, 2160, false));
+    CHECK(!camera_size_accepted(2048, 2048, 2560, 1440, 3840, 2160, false));
+    CHECK(camera_size_accepted(5120, 2160, 2560, 1440, 3840, 2160, true));
+}
+
+// test3: the FSR stage dump's pixels and numbers.
+void test_dump_pixels() {
+    CHECK(dump_half(0x3c00) == 1.0f && dump_half(0x0000) == 0.0f && dump_half(0xc000) == -2.0f);
+    CHECK(std::isinf(dump_half(0x7c00)) && std::isnan(dump_half(0x7e00)));
+    CHECK(dump_tone8(0.0f) == 0 && dump_tone8(1e9f) == 255 && dump_tone8(1.0f) > 100 && dump_tone8(1.0f) < 220);
+    // A 4x1 RGBA16F image: three texels of 1.0, the last (the right quarter) 0, one NaN.
+    std::uint16_t px[16] = {0x3c00, 0x3c00, 0x3c00, 0x3c00, 0x3c00, 0x3c00, 0x3c00, 0x3c00,
+                            0x3c00, 0x3c00, 0x3c00, 0x3c00, 0x0000, 0x0000, 0x0000, 0x0000};
+    DumpStats st = dump_stats(DumpKind::Color, reinterpret_cast<const std::uint8_t*>(px), 4, 1, 32);
+    CHECK(near(st.max, 1.0, 1e-6) && near(st.min, 0.0, 1e-6) && near(st.mean, 0.75, 1e-6));
+    CHECK(near(st.mean_left, 1.0, 1e-6) && near(st.mean_right, 0.0, 1e-6) && st.nan == 0);
+    px[0] = 0x7e00;
+    st = dump_stats(DumpKind::Color, reinterpret_cast<const std::uint8_t*>(px), 4, 1, 32);
+    CHECK(st.nan == 1);
+    // Motion: none is mid-grey; depth stretched with near bright.
+    std::uint16_t mv[4] = {0, 0, 0, 0};
+    std::uint8_t rgb[3];
+    dump_row_rgb8(DumpKind::Motion, reinterpret_cast<const std::uint8_t*>(mv), 1, 0, 0, rgb);
+    CHECK(rgb[0] == 128 && rgb[1] == 128 && rgb[2] == 0);
+    float d[2] = {0.25f, 1.0f};
+    std::uint8_t drgb[6];
+    dump_row_rgb8(DumpKind::Depth, reinterpret_cast<const std::uint8_t*>(d), 2, 0.25, 1.0, drgb);
+    CHECK(drgb[0] == 255 && drgb[3] == 0);
+    std::uint8_t mask[2] = {0, 255};
+    dump_row_rgb8(DumpKind::Mask, mask, 2, 0, 0, drgb);
+    CHECK(drgb[0] == 0 && drgb[3] == 255);
+}
+
 int main() {
     test_halton();
     test_parse();
@@ -359,6 +421,8 @@ int main() {
     test_classify();
     test_fsr3_policy();
     test_fsr3_output_rect();
+    test_signature();
+    test_dump_pixels();
     if (g_fail) {
         std::fprintf(stderr, "temporal_test: %d failures\n", g_fail);
         return 1;

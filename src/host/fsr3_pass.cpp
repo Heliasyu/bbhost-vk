@@ -23,6 +23,7 @@
 #include "hle/modules.h"
 #include "host/fsr3_upscaler.h"
 #include "host/fsr4_pass.h"
+#include "host/fsr_dump.h"
 #include "host/pass_timer.h"
 #include "host/gpu_internal.h"
 #include "host/options.h"
@@ -169,6 +170,39 @@ int env_sign(const char* name, int axis) {
     return std::strchr(e, axis == 0 ? 'x' : 'y') ? -1 : 1;
 }
 
+// ---- the stage dump (host/fsr_dump.h, BBHOST_FSR_DUMP=1) ----
+std::uint64_t g_upscaled = 0;  // frames upscaled this run (the dump's automatic one)
+
+// The inputs and the target as it is before the copy; true when this frame dumps.
+bool dump_begin_locked(const UpscalerInputs& in, const RtImage& target, const temporal::OutputRect& out, const char* which, bool reset) {
+    if (!fsr_dump_wanted_locked(in.frame, g_upscaled)) return false;
+    char line[400];
+    std::snprintf(line, sizeof(line),
+                  "%s at flip %llu: scene %ux%u -> output %ux%u at %u,%u in the scale pass's %ux%u target (format %d); jitter %.3f, %.3f "
+                  "(phase %u of %u); history reset %s; cut %s; near %g far %g fov %g",
+                  which, static_cast<unsigned long long>(in.frame), in.render_w, in.render_h, out.w, out.h, out.x, out.y, target.width, target.height,
+                  static_cast<int>(target.format), static_cast<double>(in.jitter_x), static_cast<double>(in.jitter_y), in.jitter_phase,
+                  in.jitter_phases, reset ? "yes" : "no", temporal::cut_name(in.cut), static_cast<double>(in.near_plane),
+                  static_cast<double>(in.far_plane), static_cast<double>(in.fov_y));
+    fsr_dump_note_locked(line);
+    fsr_dump_add_locked("1-scene-colour", in.color.image, in.color.format, in.color.width, in.color.height, temporal::DumpKind::Color);
+    fsr_dump_add_locked("2-depth-copy", in.depth_copy.image, in.depth_copy.format, in.depth_copy.width, in.depth_copy.height, temporal::DumpKind::Depth);
+    fsr_dump_add_locked("3-motion", in.motion.image, in.motion.format, in.motion.width, in.motion.height, temporal::DumpKind::Motion);
+    fsr_dump_add_locked("4-reactive", in.reactive.image, in.reactive.format, in.reactive.width, in.reactive.height, temporal::DumpKind::Mask);
+    fsr_dump_add_locked("5-opaque-colour", in.opaque_color.image, in.opaque_color.format, in.opaque_color.width, in.opaque_color.height,
+                        temporal::DumpKind::Color);
+    fsr_dump_add_locked("7-target-before", target.image, target.format, target.width, target.height, temporal::DumpKind::Color);
+    return true;
+}
+
+// The upscaler's own output and the target after the copy; then the files.
+void dump_end_locked(bool on, std::uint64_t flip, VkImage output, VkFormat format, std::uint32_t w, std::uint32_t h, const RtImage& target) {
+    if (!on) return;
+    fsr_dump_add_locked("6-upscaler-output", output, format, w, h, temporal::DumpKind::Color);
+    fsr_dump_add_locked("8-target-after", target.image, target.format, target.width, target.height, temporal::DumpKind::Color);
+    fsr_dump_finish_locked(flip);
+}
+
 }  // namespace
 
 temporal::OutputRect fsr3_output_rect_locked(const RtImage* target, const float* vport) {
@@ -254,6 +288,7 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
         p4.sharpen = sh4.enable;
         p4.sharpness = sh4.sharpness;
         p4.ultra_performance = hs.upscale_quality >= 4;
+        const bool dump4 = dump_begin_locked(in, *target, out, "FSR 4.1.1", p4.reset);
         const std::int32_t slot4 = pass_timer_begin_locked(cmd4, TimedPass::Upscale);
         VkImage out4 = VK_NULL_HANDLE;
         bool fatal = false;
@@ -265,6 +300,8 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
             const std::int32_t copy4 = pass_timer_begin_locked(cmd4, TimedPass::Copy);
             copy_output(cmd4, out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target, out);
             pass_timer_end_locked(cmd4, copy4);
+            ++g_upscaled;
+            dump_end_locked(dump4, in.frame, out4, VK_FORMAT_R16G16B16A16_SFLOAT, out.w, out.h, *target);
             g_last_frame4 = in.frame;
             g_last_out4 = out4;
             ++g_window.dispatches;
@@ -277,6 +314,7 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
             g_last_fallback = Fallback::None;
             return true;
         }
+        if (dump4) fsr_dump_finish_locked(in.frame);  // the inputs at least
         g_history4 = {};
         if (fatal) {
             g_fsr4_off = true;
@@ -364,11 +402,13 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
     // Every input was written by commands before this point.
     barrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+    const bool dump = dump_begin_locked(in, *target, out, "FSR 3.1", fr.reset);
     const std::int32_t slot = pass_timer_begin_locked(cmd, TimedPass::Upscale);
     std::string why;
     const bool ok = g_fsr->record(fr, &why);
     pass_timer_end_locked(cmd, slot);
     if (!ok) {
+        if (dump) fsr_dump_finish_locked(in.frame);
         static int said = 0;
         if (said++ < 8) host_log("fsr3: %s", why.c_str());
         g_history = {};  // the next dispatch starts over
@@ -378,15 +418,24 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out) {
     copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target, out);
     pass_timer_end_locked(cmd, copy_slot);
     pass_timer_upscaler_is_fsr4(false);
+    ++g_upscaled;
+    dump_end_locked(dump, in.frame, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
     g_last_frame = in.frame;
     ++g_window.dispatches;
     if (g_last_fallback != Fallback::None) {
         if (g_last_fallback != Fallback::kCount) host_log("fsr3: upscaling again at flip %llu", static_cast<unsigned long long>(in.frame));
         else
         {
-            host_log("fsr3: first FSR 3.1 frame at flip %llu: scene %ux%u -> %ux%u at %u,%u in a %ux%u target, jitter %u phases, reactive mask %s, sharpening %s %.1f",
+            // test2's "jitter 1 phases" was this first frame's: drawn before the
+            // phases were set (the jitter starts on the next frame).
+            char jitter[96];
+            if (in.jitter_phases > 1)
+                std::snprintf(jitter, sizeof(jitter), "jitter phase %u of %u", in.jitter_phase, in.jitter_phases);
+            else
+                std::snprintf(jitter, sizeof(jitter), "no jitter on this first frame (it starts with the next)");
+            host_log("fsr3: first FSR 3.1 frame at flip %llu: scene %ux%u -> %ux%u at %u,%u in a %ux%u target, %s, reactive mask %s, sharpening %s %.1f",
                      static_cast<unsigned long long>(in.frame), in.render_w, in.render_h, out.w, out.h, out.x, out.y, target->width, target->height,
-                     in.jitter_phases, fr.reactive.image ? "on" : hs.upscale_reactive ? "on (none this frame)" : "off", fr.sharpen ? "on" : "off",
+                     jitter, fr.reactive.image ? "on" : hs.upscale_reactive ? "on (none this frame)" : "off", fr.sharpen ? "on" : "off",
                      static_cast<double>(fr.sharpness));
             host_log("fsr3:   inputs (image, the region read): colour %ux%u (%ux%u), depth copy %ux%u (%ux%u), motion %ux%u (%ux%u), reactive %ux%u",
                      in.color.width, in.color.height, in.color.used_w, in.color.used_h, in.depth_copy.width, in.depth_copy.height,
