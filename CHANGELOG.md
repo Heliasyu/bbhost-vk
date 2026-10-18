@@ -1,5 +1,19 @@
 # Changelog (bbhost-vk)
 
+## Unreleased (Phase 4 groundwork and test-build prep, branch `phase-4-fsr411`)
+- **FSR 4.1.1** replays AMD's 4.1.1 upscaler on Vulkan (ported from
+  bbport) from assets you build once from your own
+  `amd_fidelityfx_upscaler_dx12.dll` (`tools/fsr4cap/build_assets.sh`, under
+  Proton; for example the DLL in an OptiScaler release). It uses FP8 on
+  RDNA4 and INT8 elsewhere. Without the assets, or on a GPU that lacks the
+  features, it is FSR 3.1, and the log says why.
+- Setup window: the FSR 4.1.1 DLL path and asset status, and **Upscaler
+  jitter** (also in F10).
+- The update check looks at bbhost-vk's own releases; versions like
+  `v0.2.18-vk.1` are ordered.
+- docs/vk/KNOWN_ISSUES.md: the resolution question in the game's own
+  Settings menu (upstream issue).
+
 ## Unreleased (Phase 3: FSR 3.1 temporal, branch `phase-3-fsr31`)
 With Upscaler Off or FSR 1, or Upscaling quality at Native AA, nothing
 changes. Online play (servers, sign-in, networking), HDR and motion blur are

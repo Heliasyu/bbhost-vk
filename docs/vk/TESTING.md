@@ -112,7 +112,7 @@ Pass: every option is in `options-after.toml` with the value last set; the
 log has `upscaler:` lines for each change and no new errors; the picture looks
 identical to stock (Phase 0 changes nothing on screen).
 
-## Pending combined test session (Phase 0 to Phase 3, online and FaceGen, ~70 min)
+## Pending combined test session (Phase 0 to Phase 3, online, FaceGen, resolution menu, ~75 min)
 The Phase 0, 1, 2 and 3 checks and the online check in one sitting, with
 the Phase 3 binary (`/workspace/bbhost-vk-builds/phase3/bbhost.bin` on the
 build box; check its SHA-256 against `bbhost.bin.sha256`). The Phase 2
@@ -257,3 +257,22 @@ Optional: start with `BBHOST_GLITCH=1`.
 
 Pass: no exploded or stretched vertices, no spikes, and no "veil" over
 faces (yours or NPCs') in the editor, after the death or at the lamp.
+
+### G. Resolution change in the game's own Settings menu (5 min)
+A known issue (docs/vk/KNOWN_ISSUES.md), also seen on upstream bbhost. This is
+Bloodborne's own menu (System > PC Graphics > Resolution), not F10.
+1. In the game: System > PC Graphics > Resolution, pick another size,
+   confirm it. When the "keep this resolution?" question appears, try the
+   keyboard (arrows, Enter), the pad, and a mouse click; `bbtest mark
+   resolution-question`.
+2. If the menus stop responding, wait 15 s without touching anything: does
+   the question close by itself (the size goes back) and do the menus respond
+   again? Note which.
+3. Quit, start again with `BBHOST_SCENE_SPLIT=0`, and repeat steps 1-2.
+4. Repeat once with **Upscaler Off**, and once picking the size *slowly*
+   (wait 3 s on the pick list before confirming).
+
+Pass/notes: whether input works on the question, whether it recovers after
+~13 s, and whether `BBHOST_SCENE_SPLIT=0` or Upscaler Off changes anything.
+The log's `resolution:` lines (asking, answered, no answer in 10 s) and
+`yebis: restart` show how far it got.

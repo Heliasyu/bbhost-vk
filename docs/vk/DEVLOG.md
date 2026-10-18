@@ -636,3 +636,58 @@ reactive passes read and write only bbhost's own images and the game's
 render targets. They do not touch guest buffers, the buffer shadow or
 the readback paths. Part F checks it on the PC: the mirror's appearance
 editor, a death and a lamp rest.
+
+## 2026-10-18 (Sun), Phase 4 groundwork and test-build prep (branch `phase-4-fsr411`)
+
+Base: `phase-L-launcher`. The user moved every effort to a first test release.
+
+### FSR 4.1.1
+- **OptiScaler:** v0.9.4, the latest release, was downloaded to
+  /workspace/upscaler-files/ (outside the repo, never committed). Its
+  `amd_fidelityfx_upscaler_dx12.dll` is version 4.1.1.2740 (SHA-256
+  d0dcccc7...b46), with the `v07_fp8_no_scale` model. It exports the
+  FidelityFX API itself (ffxCreateContext, ffxConfigure, ffxQuery,
+  ffxDispatch, ffxDestroyContext), so no loader is needed. bbport's
+  `dll_info.py` accepts it.
+- **Port from bbport (GPL-2.0-or-later, credited in the files):**
+  - `src/host/fsr411/` replays the DLL's 29 passes on plain Vulkan: INT8
+    dot products, or FP8 cooperative matrices on RDNA4.
+  - `tools/fsr4cap/` builds the asset set once from the user's own DLL under
+    Proton, into ~/.local/share/bbhost/fsr4_411 (`BBHOST_FSR411_DIR`).
+- **`src/host/fsr4_pass.cpp`:**
+  - The device gets FSR 4.1.1's extensions (compute derivatives, VALVE mixed
+    float dot product, cooperative matrices, FP8) only when the assets exist,
+    so every other device is unchanged.
+  - At the scale pass, with FSR 4.1.1 chosen, the replay upscales into its
+    own image, copied into the target as FSR 3.1's is.
+  - Missing assets or features, or a failing pipeline, switch to FSR 3.1 for
+    the session, with an `fsr4:` log line.
+  - The GPU time line names whichever upscaler ran.
+- **Not testable here:** there are no assets, no Proton and no RDNA4 on the
+  box, so the replay itself is first run on the PC. The capture needs Proton
+  and the user's GPU.
+
+### Test-build launcher
+- Every bbhost-vk switch testers need is in the current setup window and
+  F10, with no redesign: the upscaler, quality, sharpness, reactive mask, a
+  new **Upscaler jitter** toggle, the debug toggles, 120 fps, and the
+  FSR 4.1.1 DLL path ([upscaler] fsr4_dll) with the asset status and a
+  "copy the build command" button.
+- The launcher redesign (Phase L Part 2: theme and tab skeleton) is deferred
+  until after the test release; the mockups wait for approval.
+
+### Updater
+The update check reads Heliasyu/bbhost-vk's latest release (a private repo
+needs update.token_file), and `-vk.N` versions are compared. The official
+plugins still come from upstream's release, signed with its key. Nothing is
+published.
+
+### Known issue recorded
+Upstream's resolution change in the game's own Settings menu (PC Graphics)
+can leave the menus unresponsive at the keep-this-resolution question.
+Reading live_resolution.cpp turned up three likely causes and no clear
+low-risk fix: a pick list still closing, Scaleform viewports reset under
+the new dialog, or the modal not taking focus. They are in
+docs/vk/KNOWN_ISSUES.md, with TESTING.md part G to reproduce with and
+without the split. The `src/core` change on this branch is only the new
+`upscaler.fsr4_dll` key; nothing online is touched.

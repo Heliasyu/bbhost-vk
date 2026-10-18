@@ -77,3 +77,12 @@ Phase 4: built on the player's own PC from their own copy).
   (GPL-2.0-or-later): the approach of running the upscaler at the
   `HdrSceneCopy` pass into its own image and copying that into the pass's
   target instead of the game's draw. No code copied.
+
+## Adapted code (Phase 4)
+- **bbport**, [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc)
+  (GPL-2.0-or-later, GPL-3.0-compatible), at 3c57da4:
+  - `src/host/fsr411/` (the FSR 4.1.1 replay), adapted;
+  - `tools/fsr4cap/` (the asset build), copied, with its vendored AMD
+    FidelityFX API headers (MIT, licence at the top of each file).
+  Nothing of AMD's 4.1.1 DLL or the assets built from it is in the repository
+  or the package.
