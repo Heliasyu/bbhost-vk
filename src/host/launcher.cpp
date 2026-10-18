@@ -16,6 +16,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -187,6 +188,13 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     bool debug_camera = host_opt_get("debug_camera");
     int frame_cap = host_opt_frame_cap();
     int resolution = host_opt_resolution_index();
+    // bbhost-vk's upscaler and its quality (host/upscaler_presets.h): stored
+    // only in Phase 0; the picture is FSR 1 at the render resolution.
+    int upscaler = std::clamp(host_opt_index("upscaler"), 0, 3);
+    int upscale_quality = std::clamp(host_opt_index("upscale_quality"), 0, 4);
+    int upscale_sharpness = std::clamp(host_opt_index("upscale_sharpness"), 0, 10);  // tenths
+    bool debug_motion_vectors = host_opt_get("debug_motion_vectors");
+    bool debug_upscaler_time = host_opt_get("debug_upscaler_time");
     static const char* const kResolutions[] = {"1280x720",         "1600x900",         "1920x1080",        "2560x1440",
                                                "3200x1800",        "3840x2160",        "2560x1080 (21:9)", "3440x1440 (21:9)",
                                                "5120x2160 (21:9)", "3840x1080 (32:9)", "5120x1440 (32:9)", "1280x800 (16:10)",
@@ -318,6 +326,11 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         host_opt_set("debug_camera", debug_camera);
         host_opt_set_frame_cap(kCaps[cap_choice]);
         host_opt_set_resolution_index(resolution);
+        host_opt_set_index("upscaler", upscaler);
+        host_opt_set_index("upscale_quality", upscale_quality);
+        host_opt_set_index("upscale_sharpness", upscale_sharpness);
+        host_opt_set("debug_motion_vectors", debug_motion_vectors);
+        host_opt_set("debug_upscaler_time", debug_upscaler_time);
         for (const Enhancement& x : enhancements) host_opt_set(x.key, x.on);
         host_options_save_now();
         saved_note = "Saved to " + file;
@@ -626,6 +639,25 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::SetTooltip("The game's own speed. 120 and Uncapped step it by the frame time: 120 at most 120 fps; Uncapped the display's refresh rate with V-Sync on, up to 240 fps off.");
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::Combo("Render resolution", &resolution, kResolutions, static_cast<int>(sizeof(kResolutions) / sizeof(kResolutions[0])));
+        ImGui::SetNextItemWidth(200 * scale);
+        static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
+        ImGui::Combo("Upscaler", &upscaler, kUpscalers, 4);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk: saved, not used yet. Every choice is still FSR 1 at the render resolution, as stock bbhost.");
+        ImGui::SetNextItemWidth(200 * scale);
+        static const char* const kQualities[] = {"Native AA (100%)", "Quality (67%)", "Balanced (58%)", "Performance (50%)",
+                                                 "Ultra Performance (33%)"};
+        ImGui::Combo("Upscaling quality", &upscale_quality, kQualities, 5);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk: the render scale the upscaler will use. Saved, not used yet: the render resolution still decides.");
+        ImGui::SetNextItemWidth(200 * scale);
+        ImGui::SliderInt("Upscaler sharpness", &upscale_sharpness, 0, 10, "%d / 10");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: saved, not used yet. 8 is stock bbhost's FSR 1 sharpening.");
+        ImGui::Checkbox("Show motion vectors", &debug_motion_vectors);
+        ImGui::SameLine(260 * scale);
+        ImGui::Checkbox("Show upscaler GPU time", &debug_upscaler_time);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk debug: the presenter's GPU time per pass under the FPS counter. Motion vectors: nothing to show yet.");
         ImGui::TextDisabled("F10 in the game has every other setting.");
 
         ImGui::SeparatorText("Updates");

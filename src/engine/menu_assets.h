@@ -26,3 +26,9 @@
 // Makes the assets if they are missing or stale and registers the directory
 // with the FS. False, with the reason logged, when the dump lacks a source.
 bool menu_assets_ensure();
+
+// bbhost-vk: whether the movie the game is served has the PC Upscaling and
+// Upscaling Quality sections (they are made after the stock eight, and left
+// out when the dump's movie does not take them; a player's own movie has
+// none). After menu_assets_ensure.
+bool menu_assets_vk_sections();
