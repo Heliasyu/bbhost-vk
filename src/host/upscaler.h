@@ -43,7 +43,7 @@ enum class ScenePass : int {
 ScenePass upscaler_scene_pass();
 const char* upscaler_scene_pass_name(ScenePass p);
 
-// The motion-vector view (settings debug_motion_vectors). A hook the
-// presenter calls each frame it is on; it draws nothing until Phase 2 makes
-// motion vectors, and logs that once.
-void upscaler_debug_motion_vectors_hook();
+// The motion-vector view (settings debug_motion_vectors). The presenter
+// calls it each frame the view is on, saying whether it drew the motion
+// image (host/temporal_inputs.h, host/present_pass.h); logs each change.
+void upscaler_debug_motion_vectors_hook(bool drawn);

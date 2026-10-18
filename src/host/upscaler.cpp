@@ -52,12 +52,17 @@ void upscaler_note_settings() {
     if (changed && !first) log_settings("changed");
 }
 
-void upscaler_debug_motion_vectors_hook() {
-    // Phase 2 draws the motion vectors here (a compute pass from depth and the
-    // two frames' matrices, shown as colour over the picture). Until then the
-    // toggle is only remembered.
-    static std::atomic<bool> said{false};
-    if (!said.exchange(true)) host_log("upscaler: the motion-vector view is on, but this build has no motion vectors yet (Phase 2)");
+void upscaler_debug_motion_vectors_hook(bool drawn) {
+    // Phase 2: the presenter drew the motion image over the picture (drawn),
+    // or there was none - the scene is not split, or no scene this frame
+    // (menus, loads), or the picture went the magnified (FSR 1) path. Each
+    // change is said once.
+    static std::atomic<int> said{-1};
+    const int now = drawn ? 1 : 0;
+    if (said.exchange(now) != now)
+        host_log(drawn ? "upscaler: the motion-vector view is drawn over the picture"
+                       : "upscaler: the motion-vector view is on, but there are no motion vectors to show (the scene is not split, no scene, "
+                         "or the picture is magnified by FSR 1)");
 }
 
 ScenePass upscaler_scene_pass() {

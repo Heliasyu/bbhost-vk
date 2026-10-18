@@ -40,5 +40,9 @@ struct PresentSource {
 // last frame's view of the source and its descriptor are reused here.
 bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, VkExtent2D extent, VkRect2D shown,
                         const PresentSource* src, const float clear[4]);
+// bbhost-vk Phase 2, Show Motion Vectors: the scene's motion image (its
+// region `x, y, w, h`) blended over `shown`, inside the open rendering,
+// before the overlay. False when there is nothing to draw it with.
+bool present_pass_motion(VkCommandBuffer cmd, VkRect2D shown, const PresentSource& motion);
 // Ends the rendering and moves `dst` to PRESENT_SRC_KHR.
 void present_pass_end(VkCommandBuffer cmd, VkImage dst);

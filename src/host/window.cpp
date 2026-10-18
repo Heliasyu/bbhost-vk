@@ -18,6 +18,7 @@
 #include "host/audio.h"
 #include "host/foreign_hooks.h"
 #include "host/gpu.h"
+#include "host/temporal_inputs.h"
 #include "host/upscaler.h"
 #include "log.h"
 #if !defined(_WIN32)
@@ -873,7 +874,8 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     // hook (debug_motion_vectors; nothing to show before a temporal upscaler).
     const bool timed = vk_pass_timer_frame_begin(g_vk.cmd);
     const int t_present = timed ? g_pass_timer.begin(g_vk.cmd, "present") : -1;
-    if (host_settings().debug_motion_vectors) upscaler_debug_motion_vectors_hook();
+    const bool motion_view = host_settings().debug_motion_vectors;
+    bool motion_drawn = false;
     // The picture's rectangle (fit_picture); what it does not cover is black.
     VkRect2D area{{0, 0}, g_vk.extent};
     if (display_w && display_h) {
@@ -944,6 +946,16 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
             const int t_pass = timed ? g_pass_timer.begin(g_vk.cmd, "one pass") : -1;
             if (present_pass_begin(g_vk.cmd, g_vk.images[idx], g_vk.views[idx], g_vk.extent, shown, have ? &src : nullptr,
                                    have ? black : none)) {
+                // Show Motion Vectors (bbhost-vk Phase 2): the scene's motion
+                // image over the picture, under the overlay.
+                if (motion_view && have) {
+                    PresentSource mv;
+                    if (host_gpu_motion_view(&mv.image, &mv.format, &mv.width, &mv.height)) {
+                        mv.w = mv.width;
+                        mv.h = mv.height;
+                        motion_drawn = present_pass_motion(g_vk.cmd, shown, mv);
+                    }
+                }
                 const std::uint32_t verts = host_overlay_record(g_vk.cmd, area, overlay_w, overlay_h);
                 // The plugin menu (F9) over everything else (host/ingame_menu.h).
                 const bool menu = ingame_menu_record_in_pass(g_vk.cmd, g_vk.extent);
@@ -957,6 +969,7 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
             }
         }
     }
+    if (motion_view) upscaler_debug_motion_vectors_hook(motion_drawn);
     if (!recorded) {
         // The renderer's writes to what the blit reads - the frame taken at its
         // flip, or the display buffer - are in earlier submissions on this queue;
