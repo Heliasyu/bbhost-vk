@@ -40,6 +40,7 @@
 #include "log.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
@@ -130,6 +131,9 @@ constexpr Way kWays[] = {
     {"inline", 1, true},
     {"threaded", 2, true},
 };
+
+// pass_view_locked giving no view, or another for the same image (temp_image).
+std::atomic<std::uint64_t> g_pass_view_faults{0};
 
 struct RoundStats {
     std::uint64_t steps = 0, submits = 0, flushes = 0, foreign = 0;
@@ -761,7 +765,13 @@ struct Arm {
     void temp_image() {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory mem = VK_NULL_HANDLE;
-        if (!make_image(image, mem, 16, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return;
+        // 16 or 32 square, as a resize would; sampled so pass_view_locked can view it.
+        const std::uint32_t size = 16u << rng.below(2);
+        if (!make_image(image, mem, size, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return;
+        // The kept views (Phase 5): the same view while the image lives, made again
+        // after it is gone (defer_destroy_image below forgets it).
+        const VkImageView kept = pass_view_locked(image, VK_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT);
+        if (!kept || pass_view_locked(image, VK_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT) != kept) ++g_pass_view_faults;
         const std::uint32_t x = rng.below(3), d = rng.below(kWords - 256 + 1), v = rng.u32();
         image_to_general(s, image);
         VkClearColorValue color{};
@@ -1135,7 +1145,9 @@ int host_gpu_stream_selftest(int rounds) {
              static_cast<unsigned long long>(total.ts_unavailable), static_cast<unsigned long long>(total.ts_backwards));
     if (g.ok && !failed_rounds) host_log("%s", benchmark(r).c_str());
     host_log("%s", recorder_report().c_str());
-    const bool pass = g.ok && !failed_rounds && !validation;
+    const std::uint64_t view_faults = g_pass_view_faults.load();
+    if (view_faults) host_log("stream selftest: pass_view_locked faults %llu", static_cast<unsigned long long>(view_faults));
+    const bool pass = g.ok && !failed_rounds && !validation && !view_faults;
     host_log("stream selftest: %s", pass ? "pass" : "FAIL");
     return pass ? 0 : 1;
 }
