@@ -1563,6 +1563,6 @@ shader size queries (`BBHOST_POST_CHAIN_LOG` extended to their C# and the transl
 
 **Expected (test11 vs test10, post at render on):**
 - fps stays at 120. The GPU gets ~0.15 ms more headroom from the skip.
-- Frames over 8.5 ms: about 20-30% -> under 2%, if the spread is the present timing as read.
+- Frames over 8.5 ms: t12 did not count them (39% were over 8.42). Expected under 2-5% paced, if the spread is the present timing as read.
 - **1% low:** ~102 -> 112-118 in the paced halves. The rest are the game's own hitches
   (loads, streaming) and GPU spikes past 8.33 ms in heavy views (~84-93% busy).
