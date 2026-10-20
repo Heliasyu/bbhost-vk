@@ -52,6 +52,9 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#endif
 
 namespace gpu {
 bool dump_rt_locked(RtImage& r, const char* path);
@@ -469,11 +472,45 @@ struct RenderCostTimer {
         g_render_cost_n[what].fetch_add(1, std::memory_order_relaxed);
     }
 };
+// rc5b: the same sections, always on but only for the draws the phase timers
+// sample (one in kPhaseSample, t_cost_sample), with the TSC instead of the
+// clock: ~23 rdtsc and plain stores per sampled draw (draw_impl holds g.mu, so
+// the counters need no locked add), ~200 ns per sampled draw, ~10-20 ns a draw
+// on average. The snapshot's
+// [cpu] `cp_split:` and the log's `cp split:` give ns per draw for each section,
+// so a PC run says where the command processor's time goes without
+// BBHOST_GX_COST. BBHOST_CP_SPLIT=0 turns it off.
+const bool g_cp_split_on = [] {
+    const char* e = std::getenv("BBHOST_CP_SPLIT");
+    return !(e && e[0] == '0');
+}();
+thread_local bool t_cost_sample = false;
+std::atomic<std::uint64_t> g_split_tsc[kRenderCosts] = {}, g_split_n[kRenderCosts] = {};
+std::atomic<std::uint64_t> g_split_draws{0};
+inline std::uint64_t split_ticks() {
+#if defined(__x86_64__)
+    return __rdtsc();
+#else
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+}
 // Consecutive sections of one function: to(k) books the time since the last
 // stamp (or construction) to cost k.
 struct RenderCostStamp {
     std::chrono::steady_clock::time_point t = g_render_cost_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    bool sample = t_cost_sample;
+    std::uint64_t tsc = sample ? split_ticks() : 0;
+    RenderCostStamp() {
+        if (sample) bump(g_split_draws);
+    }
     void to(RenderCost what) {
+        if (sample) {
+            const std::uint64_t now = split_ticks();
+            bump(g_split_tsc[what], now - tsc);
+            bump(g_split_n[what]);
+            tsc = now;
+        }
         if (!g_render_cost_enabled) return;
         const auto now = std::chrono::steady_clock::now();
         g_render_cost_ns[what].fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t).count()),
@@ -483,6 +520,7 @@ struct RenderCostStamp {
     }
     // Leaves the time since the last stamp out of every section.
     void skip() {
+        if (sample) tsc = split_ticks();
         if (g_render_cost_enabled) t = std::chrono::steady_clock::now();
     }
 };
@@ -776,6 +814,77 @@ void note_stage_params(int st, const gcn::StageParams& params, bool set_repeated
     if (in_cb && set_repeated) g_par_both.fetch_add(1, std::memory_order_relaxed);
     last[st] = h;
 }
+// rc5b: the sampled split (RenderCostStamp) as text: ns per draw for each
+// section (a section a draw skipped counts 0 for it, so they add up to the
+// draw), since `prev` (updated) or since start.
+namespace {
+const char* const kSplitNames[kRenderCosts] = {"compare", "user_data_build", "vertex_table", "registers", "targets", "programs",
+                                               "cb_check", "key", "lookup", "prefetch", "checks", "setup", "stage_user",
+                                               "buffers", "sets", "images", "update", "variant", "pass", "bind_cmds", "dynamic",
+                                               "geometry", "record"};
+struct SplitSnap {
+    std::uint64_t tsc[kRenderCosts] = {}, draws = 0, ticks = 0, ns = 0;
+};
+const std::uint64_t g_split_t0_ticks = split_ticks();
+const std::uint64_t g_split_t0_ns = static_cast<std::uint64_t>(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+SplitSnap split_now() {
+    SplitSnap n;
+    for (int k = 0; k < kRenderCosts; ++k) n.tsc[k] = g_split_tsc[k].load(std::memory_order_relaxed);
+    n.draws = g_split_draws.load(std::memory_order_relaxed);
+    n.ticks = split_ticks();
+    n.ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    return n;
+}
+std::string split_text(const SplitSnap& now, const SplitSnap* prev) {
+    // TSC ticks per ns over the whole run (the TSC is invariant on every CPU
+    // this runs on; not x86, the ticks are ns).
+    const double per_ns = now.ns > g_split_t0_ns ? static_cast<double>(now.ticks - g_split_t0_ticks) / static_cast<double>(now.ns - g_split_t0_ns) : 1.0;
+    const std::uint64_t draws = now.draws - (prev ? prev->draws : 0);
+    std::string out;
+    char b[64];
+    std::snprintf(b, sizeof(b), "sampled_draws=%llu", static_cast<unsigned long long>(draws));
+    out += b;
+    double total = 0;
+    for (int k = 0; k < kRenderCosts; ++k) {
+        // The nested sections (compare, vertex_table, user_data_build: BBHOST_GX_COST's
+        // RenderCostTimer) are inside registers, programs and stage_user here.
+        if (!g_split_n[k].load(std::memory_order_relaxed)) continue;
+        const double ns = draws && per_ns > 0 ? static_cast<double>(now.tsc[k] - (prev ? prev->tsc[k] : 0)) / per_ns / static_cast<double>(draws) : 0.0;
+        total += ns;
+        std::snprintf(b, sizeof(b), " %s=%.0f", kSplitNames[k], ns);
+        out += b;
+    }
+    std::snprintf(b, sizeof(b), " sum=%.0f", total);
+    out += b;
+    return out;
+}
+}  // namespace
+std::string cp_split_section_impl() {
+    if (!g_cp_split_on) return "cp_split: off (BBHOST_CP_SPLIT=0)";
+    static SplitSnap prev;
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    const SplitSnap now = split_now();
+    std::string out = "cp_split: " + split_text(now, &prev) + " (rc5b: ns per draw since the previous snapshot, 1 draw in 16 timed)";
+    out += "\ncp_split_total: " + split_text(now, nullptr) + " (since start)";
+    prev = now;
+    return out;
+}
+// The log's `cp split:` line, every 100,000 sampled draws (~1.6 million draws).
+void log_cp_split_maybe() {
+    static std::uint64_t next = 100000;
+    static SplitSnap prev;
+    const std::uint64_t d = g_split_draws.load(std::memory_order_relaxed);
+    if (d < next) return;
+    next = d + 100000;
+    const SplitSnap now = split_now();
+    host_log("cp split: %s (ns per draw over the last ~%llu sampled draws; BBHOST_CP_SPLIT=0 turns it off)", split_text(now, &prev).c_str(),
+             static_cast<unsigned long long>(now.draws - prev.draws));
+    prev = now;
+}
+
 // host_gpu_draw's sections in ns per draw (per stage for the stage sections):
 // every 200,000 recorded draws for the draws since the last report, so loading
 // screens' uploads stay out of in-game figures, and at exit for the whole run.
@@ -1488,6 +1597,7 @@ std::string walk_section() {
                   static_cast<unsigned long long>(g_walk_pl.soffset_bound_sites.load()));
     out += b;
     out += "\n" + page_tables_line() + " (rc5: tables in ReBAR video memory; BBHOST_TABLES_VRAM=0 puts them in system memory)";
+    out += "\n" + compute_cb_line() + " (rc5b: compute constant buffers bound; BBHOST_CS_CB=0 walks them)";
     std::lock_guard<std::mutex> lk(g_walk_pl.mu);
     for (const std::string& n : g_walk_pl.post_names) out += "\npost_vs_walks: " + n;
     return out;
@@ -8177,7 +8287,10 @@ void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre,
     static std::atomic<int> tlog{0}, mblog{0};
     // test7c: the motion blur's (e0305cef's) own few, which the 24 above never
     // reached - what its two draws a frame read, for skipping them when off.
-    const bool mblur = pipeline_name && std::strstr(pipeline_name, "+e0305cef") && mblog.fetch_add(1, std::memory_order_relaxed) < 8;
+    // rc5b (C3): the name search only while its 8 lines are still to come
+    // (it ran for every stage of every draw).
+    const bool mblur = pipeline_name && mblog.load(std::memory_order_relaxed) < 8 && std::strstr(pipeline_name, "+e0305cef") &&
+                       mblog.fetch_add(1, std::memory_order_relaxed) < 8;
     const bool yebis = pipeline_name && (mblur || (tlog.load(std::memory_order_relaxed) < 24 &&
                        (std::strncmp(pipeline_name, "7d668276", 8) == 0 || std::strncmp(pipeline_name, "d3ca03f3", 8) == 0 ||
                         std::strncmp(pipeline_name, "1ea5a07e", 8) == 0)));
@@ -11154,6 +11267,8 @@ bool tess_ls_pass_locked(const GpuDraw& d, TessDraw& t) {
     const std::uint32_t params_offset = static_cast<std::uint32_t>(ubi.offset);
     vkCmdBindDescriptorSets(g_cmd(), VK_PIPELINE_BIND_POINT_COMPUTE, g.pipe_layout, 0, 1, &set, set_cache_on() ? 1 : 0, &params_offset);
     vkCmdDispatch(g_cmd(), (t.count * (t.hull ? t.instances : 1) + 63) / 64, 1, 1);
+    gpu_write_note_locked(t.lds_address, bytes);  // rc5b: the ring it writes (compute constant buffers stay off it)
+    if (!pl.meta.store_buffers.empty() || pl.meta.untraced_stores) gpu_write_taint_locked();
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -11610,7 +11725,9 @@ static bool draw_impl(const GpuDraw& d) {
     GpuPhaseTimer timer(kPhaseLock, phase_weight);
     std::lock_guard<GpuMutex> lock(g.mu);
     timer.next(kPhaseDraw);
+    t_cost_sample = g_cp_split_on && phase_weight != 0;  // rc5b: the sampled section split (RenderCostStamp)
     RenderCostStamp draw_stamp;
+    t_cost_sample = false;
     t_token_draw = d.gx_token;
     apply_table_masks_locked();
     apply_lean_builds_locked();
@@ -13404,6 +13521,21 @@ static bool draw_impl(const GpuDraw& d) {
         }
         resolve_stage_buffers(meta, params.user_sgpr, params, buffer_infos, gx_stage[st]);
         t_temporal_stage = -1;
+        // rc5b: what a stage stores to (a few vertex shaders do), for the
+        // compute constant buffers that must not bind over it this recording.
+        if (meta.untraced_stores) gpu_write_taint_locked();
+        for (const gcn::ResourcePath& path : meta.store_buffers) {
+            if (!compute_cb_on()) break;
+            std::uint32_t v[4]{};
+            if (!resolve_resource(path, params.user_sgpr, 4, v)) {
+                gpu_write_taint_locked();
+                continue;
+            }
+            const std::uint32_t stride = (v[1] >> 16) & 0x3fff;
+            const std::uint64_t bytes = stride ? std::uint64_t{v[2]} * stride : v[2];
+            if (!bytes) gpu_write_taint_locked();
+            gpu_write_note_locked(v[0] | (static_cast<std::uint64_t>(v[1] & 0xff) << 32), bytes);
+        }
         if (!meta.buffers.empty()) {
             any_buffers = true;
             all_bound = all_bound && params.cb_valid == (1u << meta.buffers.size()) - 1;
@@ -14268,6 +14400,7 @@ static bool draw_impl(const GpuDraw& d) {
     bump(g.draws);  // the one writer, under g.mu: no locked add
     bump(g.draws_ps[draw_ps_kind(*bind_pl)]);
     draw_stamp.to(kRenderCostRecord);
+    if (draw_stamp.sample) log_cp_split_maybe();  // under g.mu
     if (g_render_cost_enabled) report_render_split(false);
     if (capture_session) {
         CaptureDynamic dyn;
@@ -15902,3 +16035,8 @@ bool host_gpu_draw_window(std::uint64_t dst, const void* data, std::uint32_t byt
     g_windows_given.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
+
+namespace gpu {
+// rc5b: the [cpu] lines (gpu_internal.h).
+std::string render_cp_split_section() { return cp_split_section_impl(); }
+}  // namespace gpu

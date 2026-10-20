@@ -92,3 +92,48 @@ roughly +3-8 fps average and a better 1% low; if the GPU is, mostly the 1% lows 
 - The translator fingerprint unchanged.
 - On the PC (TESTING.md "rc5 checks"): the new log lines, [cpu] fields, the same Old Yharnam spot as
   rc4 `010838`, and the env reverts as A/Bs.
+
+## rc5b ("build 5", on top of df31b8b): the two biggest costs
+
+Asked the same night: the two deferred costs, in order, each with a debug `BBHOST_*=0` revert, its own
+log label and F11 fields. Barrier and copy elision stay out (they need an image comparison).
+
+| # | Item | Expected saving | Risk | Effort | Evidence | Measure (log / F11) |
+|---|---|---|---|---|---|---|
+| b1 | **CP bind path, waste removal + sub-stage timers.** Code reading found little left (lock-free counters, sampler memo, set cache by content, dirty-tracked dynamic state, lazy-barrier sets off). Removed: the per-stage `strstr` of the motion-blur log in `stage_final_views` (C3b). Added: `cp_split`, RenderCostStamp's 20 sections timed with the TSC on the 1-in-16 sampled draws | C3b ~10-30 ns/draw. cp_split costs ~10-20 ns/draw; it is the measurement the exact-key caches need (a wrong key = a wrong pipeline/binding, so no guessing) | None: no recorded byte changes; selftests 0 differences | S | rc4 `cp-thread split`: bind 2.86 us/draw, draw 4.1 us/draw | log `cp split:`; [cpu] `cp_split:`, `cp_split_total:`. `BBHOST_CP_SPLIT=0` |
+| b2 | **Splitting bb-cp0** | — (design only; see below) | — | L | draw_impl holds `g.mu` over all renderer state | — |
+| b3 | **Compute constant buffers** (GPU audit #1): `cb_ssbo` for the game's compute shaders; a compute layout with bindings 112-127; a conservative resolver that binds only what provably reads the walk's bytes (constant offsets, not indexed, imported as one buffer, no copy-back, vec4 base, not stored by the dispatch, not GPU-written earlier in the command buffer, nor the tables the V# came from). Walk otherwise, as before | GPU 0.1-0.3 ms/frame in heavy Old Yharnam (audit: 0.15-0.30 for all buffers; indexed ones stay on the walk). CP +0.03-0.05 ms/frame (~17 dispatches a frame) | Low-medium: compute stages translate again once (first start: longer precompile, possible first-sight hitches); the hazard rules are stricter than the graphics stages', but the dispatch path could not run on the box | M | Cache: 41 of 42 CS walk; ISA: 73 of 119 CS; top kernels 1-1.5k dependent loads; RGP game compute ≈ 0.48 ms | log `gpu: compute cb:`; [walks] `compute_cb:`. `BBHOST_CS_CB=0` |
+
+Validation for rc5b: ctest 54/54 (new `gcn_cs_cb_test`), the three selftests with the validation layer and
+sync validation (0 differences, the same 10 upstream SYNC-HAZARD lines), the same with `BBHOST_CS_CB=0
+BBHOST_CP_SPLIT=0`, the translator fingerprint unchanged, and locally only (never committed) the user's
+stage-manifest compute programs translated with and without `cb_ssbo`: 6/6, no regressions, valid SPIR-V,
+bindings 112-127.
+
+### Splitting bb-cp0: design (not built tonight)
+- **Why not tonight:** draw_impl holds `g.mu` for ~4.1 us/draw over the pass, set caches, params ring,
+  copy versions, uploads, texture cache, the YEBIS draw windows and Scaleform snapshots (CPU copies at
+  record time), and reads guest memory (V#/T#/tables) at the moment the CP reaches the draw. Nothing in
+  the selftests can show ordering against labels, flips and DMA for a split today.
+- **Stage A (bb-cp0):** PM4, register shadow, and a per-draw snapshot (the registers draw_impl reads,
+  user SGPRs, GX record pointer, index/indirect state, ~1-2 KB) plus the CPU copies taken at record time
+  now (windows, SF snapshots), into an SPSC ring.
+- **Stage B (bb-bind):** the sole owner of the renderer state; draws and dispatches in ring order.
+- **Ordering rule:** labels, EOP/fence writes, WAIT_REG_MEM, flips, DMA and CPU-visible copies stay on
+  cp0 and wait for stage B to drain what is before them (the game may rewrite descriptors once it sees a
+  label). The per-pass YEBIS waits are where the gain could vanish.
+- **Proof first:** a selftest that replays recorded PM4 streams in place and split and compares the
+  packet streams byte for byte (the pattern of the stream selftest for bb-record).
+- **Gain if it holds:** cp0 ~1.5 of ~5.2 us/draw; stage B ~3.5-4 us becomes the limit: ~+25% draws/s.
+- Per-pass parallel recording is not the lever: bb-record already records off cp0 and mostly waits
+  after rc5's MWAITX.
+
+### Ranked next (after rc5b, by measured cost)
+1. **The biggest `cp_split` section** from the PC run: an exact-key cache there (C2 memo for
+   `stage_user`/`buffers`/`images` when the stage's program, user data and descriptor words are
+   unchanged; a per-pipeline last-hit for `lookup`/`sets`). Expected 0.5-1.5 ms/frame of CP.
+2. **The cp0 split** above, if (1) leaves the CP the limit; selftest first.
+3. **Indexed compute constant buffers** (bind with the walk's semantics past the records, or check the
+   records at run time): the rest of GPU #1, if `compute_cb:` shows `walk_indexed` large.
+4. The per-command-buffer boundary (~0.5 ms/frame GPU idle), PGO, tess walks with other translator work,
+   merging small post passes — as in the list above.

@@ -149,6 +149,40 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## Snapshot additions (rc5b)
+- **[cpu]** gains `cp_split:` (since the previous snapshot) and `cp_split_total:` (since
+  start): `sampled_draws=` and then ns per draw for each section of the command
+  processor's draw path: `registers targets programs cb_check key lookup prefetch checks
+  setup stage_user buffers sets images update variant pass bind_cmds dynamic geometry
+  record`, and their `sum=` (≈ rc5's `draw_ns_per_draw`). 1 draw in 16 is timed.
+- **[walks]** gains `compute_cb: on= pipelines= buffers= pipelines_without= dispatches=
+  all_bound= bound= walk_no_base= walk_indexed= walk_unaligned= walk_gpu_written=
+  walk_copy_version= walk_unmapped= walk_too_long=` (compute pipelines that read constant
+  buffers through bindings, per-buffer outcomes since start).
+- New log labels: `cp split:` (every 100,000 sampled draws), `gpu: compute cb:` (at start,
+  the first 24 compute pipelines with constant buffers, every 20,000 dispatches).
+- Debugging variables (no menu entries; each `=0` is rc5's behaviour):
+  - `BBHOST_CS_CB=0` (compute constant buffers walk the page table; compute shaders then
+    translate as in rc5, from the cache rc5 left)
+  - `BBHOST_CP_SPLIT=0` (no section timing)
+
+## vk.1-rc5b checks (~15 min)
+As the rc5 checks below, with `bbtest start vk1-rc5b`, plus:
+1. **First start:** every compute shader translates and compiles once more (the graphics
+   caches stay). Expect a longer precompile before the title and possibly a few hitches the
+   first time a fight's new effects appear; the second start should be like rc5. The log
+   says `gpu: compute cb: compute shaders' constant buffers bound as storage buffers …`.
+2. At the Old Yharnam `010838` spot (F11 there and ~15 s later):
+   - [walks] `compute_cb:` — `pipelines` and `bound` should be well above 0; most walks
+     should be `walk_indexed` (by design);
+   - [pass_stats] / [gpu] compute passes vs rc5 (expect 0.1-0.3 ms less GPU a frame in the
+     heavy scene);
+   - [cpu] `cp_split:` — send it; it decides the next CP work.
+3. Watch for anything in the picture unlike rc5, especially effects drawn by compute
+   (particles, fog, lighting, motion blur): if something differs, F11 there, then repeat
+   that spot once with `BBHOST_CS_CB=0`.
+4. Only as an A/B: `BBHOST_CS_CB=0` at the `010838` spot, F11.
+
 ## Snapshot additions (rc5)
 - **[cpu]** (new):
   - `placement: on= domains= hot= cold= by= hot_threads= cold_threads= reset_threads=

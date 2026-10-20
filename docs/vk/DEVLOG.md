@@ -2093,3 +2093,104 @@ PS wave32 and params WC stay env A/Bs.
   video memory`), so that path ran; the MWAITX path and the placement could not run here
   (PAUSE fallback, `placement: off: one L3 domain`).
 - Translator fingerprint unchanged: cbb93a8ae24af3169f3cf6d437c1ac69.
+
+## 2026-10-20 (Tue), vk.1-rc5b ("build 5"): compute constant buffers, the CP split timers, the cp0 split design
+
+On top of rc5 (df31b8b), the same night. The three items, in the order they were asked for.
+Plan with the ranking: docs/vk/RC5_PLAN.md ("rc5b").
+
+### 1. bb-cp0's per-draw bind work (~2.9 us/draw)
+Read the bind path (draw_impl from the pipeline lookup to the record) for work that can go
+without changing a byte of output. Most of what such a pass usually finds is gone already:
+the counters are plain stores under `g.mu` (`bump`), samplers have a 64-entry memo, sets
+are cached by content, dynamic state is dirty-tracked (`g_recorded`), the lazy-barrier
+hazard sets are off by default, and the table-rebuild vectors are only built on that rare
+branch. What remained:
+- `stage_final_views` ran `strstr(pipeline_name, "+e0305cef")` for every stage of every
+  draw, for a log of 8 lines. Now only while those lines are still to come (identical
+  output: the flag was already false after 8).
+- No profile yet says which section of the 2.9 us dominates, and caching resolution
+  across draws needs that (a wrong key is a wrong pipeline or binding). So the main
+  deliverable is the measurement: **`cp_split`**. RenderCostStamp's 20 sections (split by
+  BBHOST_GX_COST before, with steady_clock on every draw) now also book TSC ticks on the
+  draws the phase timers sample (1 in 16): ~23 rdtsc and plain adds per sampled draw,
+  ~10-20 ns a draw on average. [cpu] `cp_split:` (since the previous snapshot) and
+  `cp_split_total:`; log `cp split:` every 100,000 sampled draws. The TSC is converted with
+  its ratio to steady_clock over the run. `BBHOST_CP_SPLIT=0`.
+- Output identity: neither change touches what is recorded. The selftests (0 differences)
+  and ctest cover the recording paths; draw_impl itself does not run on the box (no
+  game), so the new fields are first seen on the PC.
+
+### 2. Splitting bb-cp0 (assessed; design only)
+Not implemented: it cannot be shown correct tonight. draw_impl holds `g.mu` for all of
+its ~4.1 us and reads/writes nearly every piece of renderer state: the pass, set caches,
+params ring, copy versions, uploads, texture cache, the draw windows and Scaleform
+snapshots (CPU copies taken at record time), and guest memory (V#s, T#s, tables) read at
+the moment the CP reaches the draw. The design, for a later build:
+- **Stage A (bb-cp0):** PM4, the register shadow, and per draw a *draw snapshot*: the
+  registers draw_impl reads (context, SH user data, GX record pointer, indirect/index
+  state; ~1-2 KB) plus anything that copies CPU memory at record time today (YEBIS
+  windows, SF snapshots). Into an SPSC ring.
+- **Stage B (bb-bind, new):** everything under `g.mu` for draws and dispatches, in ring
+  order; it becomes the only owner of the renderer state.
+- **Ordering:** labels, EOP/fence writes, WAIT_REG_MEM, flips, DMA and CPU-visible copies
+  stay on cp0 but must wait until stage B has consumed everything before them (the game
+  may rewrite a V#/T#/table once it sees a label). That wait is where the gain can vanish
+  (YEBIS waits per pass).
+- **Proof needed first:** a selftest replaying recorded PM4 streams (draws, dispatches,
+  labels, flips, DMA) in place and split, comparing the packet streams byte for byte, as
+  the stream selftest does for bb-record.
+- Gain if it holds: cp0 keeps ~1.5 of ~5.2 us per draw; stage B ~3.5-4 us becomes the
+  limit: ~25% more draws per second. Effort L (days), risk medium-high. cp_split decides
+  first whether a cheaper exact-key cache in stage B's biggest section gets most of it.
+- Per-pass parallel recording is not the lever: bb-record already records off cp0, and
+  after rc5's MWAITX it is mostly waiting.
+
+### 3. Compute constant buffers (GPU audit #1)
+`compute_options` never set `cb_ssbo`: 41 of 42 cached CS walked every constant ("s_buffer_load
+with constant buffers off"), the top kernels with 1-1.5k dependent 64-bit loads; game
+compute is ~0.48 ms of RGP trace in heavy Old Yharnam. Now:
+- `compute_options` sets `cb_ssbo` (`compute_cb_on()`: BBHOST_CB_SSBO not 0 and
+  BBHOST_CS_CB not 0). The translator puts the bindings in the stage's set (0) from 112
+  and keeps the walk as each buffer's fallback (no lean variant). The cache keys include
+  the options (hash_options), so compute stages translate again once; the fingerprint is
+  unchanged.
+- With the push set (cb_push_on) the shared layout has no storage-buffer bindings, so the
+  game's compute pipelines get `g.cs_set_layout`/`g.cs_pipe_layout` (the shared bindings
+  plus 112-127). `create_compute`/`first_compute_pipeline`/the bb-cs-optimize job take the
+  layout, so a stand-in and its optimized pipeline agree. The tessellation LS pass and
+  every graphics pipeline keep their layouts (and their driver cache entries).
+- `resolve_compute_buffers_locked` (host_gpu_dispatch, after the copy-version flush,
+  before the params slot) binds a buffer only when the walk would read the same bytes:
+  - resolved, non-null base, dword aligned; **not indexed** (an indexed read past the
+    records differs: GCN returns zeros, the binding clamps, the walk reads memory);
+  - not stored to by this dispatch (its store V#s resolved first; an unresolved or
+    untraced store walks every buffer of the dispatch);
+  - **not written by the GPU earlier in this command buffer**, nor the tables its V# was
+    read from: `gpu_write_note_locked` collects, per `record_serial`, every range the GPU
+    writes into guest memory (all of shadow_written_locked's GPU writes: compute stores,
+    fills/copies, DMA, labels and fences, copy-backs, occlusion; the vertex shaders'
+    stores; the tessellation ring). Ranges are compared as physical direct memory, so a
+    CPU address and its GPU alias meet. A write of unknown extent, or more than 512
+    ranges, makes the whole command buffer count as written;
+  - no copy-back in flight over it; imported as one buffer (`locate`), the range within
+    it and `maxStorageBufferRange`; base on a vec4 of its binding (the graphics
+    stages' menu-flash rule: no realignment copy, no snapshot, no windows for compute).
+  Everything else: the dummy buffer and the walk, as rc5.
+- The binding reads the same memory the page table maps, when the dispatch runs, as the
+  walk does; the end-of-dispatch barrier (SHADER_WRITE → SHADER_READ) and the pass-end
+  barriers cover both alike.
+- Counters: [walks] `compute_cb: on= pipelines= buffers= pipelines_without= dispatches=
+  all_bound= bound= walk_no_base= walk_indexed= walk_unaligned= walk_gpu_written=
+  walk_copy_version= walk_unmapped= walk_too_long=`; log `gpu: compute cb:` at start, for
+  the first 24 pipelines with buffers, and every 20,000 dispatches.
+- Cost on cp0: ~1-3 us a dispatch (resolves, ~17 dispatches a frame in rc4's log:
+  456,118 dispatches for 72 M draws), ~0.03-0.05 ms a frame.
+
+Checked here: `gcn_cs_cb_test` (new): s_buffer_load from a V# and s_load from a pointer
+in user data bind at set 0 binding 112, not indexed, max_dw 4, valid SPIR-V; nothing bound
+with cb_ssbo off. Locally only (nothing committed): the user's stage manifest's 6 compute
+programs translate with and without cb_ssbo (no regressions), all valid SPIR-V, 13
+buffers (3 indexed, 4 pointers), every binding in 112-127. The dispatch path itself does
+not run on the box (no game): the layouts are created on lavapipe (`gpu: compute cb: …
+bound as storage buffers`), the selftests pass with it on and with BBHOST_CS_CB=0.

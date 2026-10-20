@@ -98,6 +98,55 @@ const bool g_import_whole = [] {
 }();
 std::atomic<std::uint64_t> g_imports_made{0}, g_imports_merged{0}, g_import_bytes{0}, g_import_us{0};
 
+// rc5b: compute constant buffers (compute_cb_on), set at device creation.
+bool g_cs_cb = false;
+// Guest memory the GPU writes in the recording g_gpu_writes_serial names
+// (gpu_write_note_locked), under g.mu. Past kMaxGpuWrites ranges, or after
+// a write whose range is not known, the whole recording counts as written.
+constexpr std::size_t kMaxGpuWrites = 512;
+std::vector<std::pair<std::uint64_t, std::uint64_t>> g_gpu_writes;  // [lo, hi)
+std::uint64_t g_gpu_writes_serial = ~0ull;
+bool g_gpu_writes_all = false;
+// The [walks] compute_cb line: per buffer resolve, why it took the walk.
+enum CsCbOutcome { kCsBound, kCsNoBase, kCsIndexed, kCsUnaligned, kCsWritten, kCsCopyVersion, kCsUnmapped, kCsTooLong, kCsOutcomes };
+std::atomic<std::uint64_t> g_cs_cb_outcomes[kCsOutcomes]{};
+std::atomic<std::uint64_t> g_cs_cb_pipelines{0}, g_cs_cb_pipeline_buffers{0}, g_cs_cb_pipelines_seen{0};
+std::atomic<std::uint64_t> g_cs_cb_dispatches{0}, g_cs_cb_dispatches_all{0};
+void gpu_writes_sync_locked() {
+    if (g_gpu_writes_serial == g.record_serial) return;
+    g_gpu_writes_serial = g.record_serial;
+    g_gpu_writes.clear();
+    g_gpu_writes_all = false;
+}
+// A guest range as the memory it is: direct memory by its physical address
+// (a CPU address and its GPU alias are the same bytes), anything else by its
+// address. False when the range leaves its mapping (taken as written).
+bool memory_range_key(std::uint64_t va, std::uint64_t bytes, std::uint64_t& lo, std::uint64_t& hi) {
+    for (const GuestMapInfo& mi : g.maps) {
+        if (va < mi.va || va - mi.va >= mi.len) continue;
+        if (bytes > mi.len - (va - mi.va)) return false;
+        const bool phys = mi.dmem && mi.phys >= 0;
+        lo = phys ? (1ull << 62) | (static_cast<std::uint64_t>(mi.phys) + (va - mi.va)) : va;
+        hi = lo + bytes;
+        return true;
+    }
+    lo = va;  // outside what the GPU maps: its own address
+    hi = va + bytes;
+    return hi >= lo;
+}
+// Whether [va, va + bytes) may have been written by the GPU earlier in the
+// current recording.
+bool gpu_written_locked(std::uint64_t va, std::uint64_t bytes) {
+    gpu_writes_sync_locked();
+    if (g_gpu_writes_all) return true;
+    std::uint64_t lo = 0, hi = 0;
+    if (!memory_range_key(va, bytes, lo, hi)) return true;
+    for (const auto& w : g_gpu_writes) {
+        if (lo < w.second && w.first < hi) return true;
+    }
+    return false;
+}
+
 // ---- The submission thread (BBHOST_SUBMIT_THREAD, on unless 0) ----
 // vkQueueSubmit off the command processor. The kernel's half of a submission
 // grows with the buffers it has to make resident - all of them, since shaders
@@ -2063,6 +2112,10 @@ bool init_locked() {
     const char* cb_env = std::getenv("BBHOST_CB_SSBO");
     g.cb_ssbo = !(cb_env && cb_env[0] == '0');
     g.cb_lean = g.cb_ssbo && !(cb_env && cb_env[0] == '1');
+    {
+        const char* e = std::getenv("BBHOST_CS_CB");
+        g_cs_cb = g.cb_ssbo && !(e && e[0] == '0');
+    }
     const char* exec_env = std::getenv("BBHOST_EXEC_KNOWN");
     g.exec_known = !(exec_env && exec_env[0] == '0');
     g.profile = [] {
@@ -2698,6 +2751,41 @@ bool init_locked() {
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &g.set_layout;
     vkCreatePipelineLayout(g.device, &plci, nullptr, &g.pipe_layout);
+    // rc5b: the game's compute pipelines. Without the push set the shared
+    // layout has the storage-buffer bindings already; with it, a layout of
+    // their own adds them (the tessellation pass and the graphics stages
+    // keep theirs, and with them their pipelines' cache entries).
+    g.cs_set_layout = g.set_layout;
+    g.cs_pipe_layout = g.pipe_layout;
+    if (g_cs_cb && cb_push_on()) {
+        std::vector<VkDescriptorSetLayoutBinding> cs = binds;
+        for (std::uint32_t k = 0; k < gcn::kMaxBuffers; ++k) {
+            cs.push_back({gcn::kBindingStorageBuffer0 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr});
+        }
+        VkDescriptorSetLayoutCreateInfo cci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        cci.bindingCount = static_cast<std::uint32_t>(cs.size());
+        cci.pBindings = cs.data();
+        VkPipelineLayout cs_pipe = VK_NULL_HANDLE;
+        VkDescriptorSetLayout cs_set = VK_NULL_HANDLE;
+        if (vkCreateDescriptorSetLayout(g.device, &cci, nullptr, &cs_set) == VK_SUCCESS) {
+            VkPipelineLayoutCreateInfo cpl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            cpl.setLayoutCount = 1;
+            cpl.pSetLayouts = &cs_set;
+            if (vkCreatePipelineLayout(g.device, &cpl, nullptr, &cs_pipe) == VK_SUCCESS) {
+                g.cs_set_layout = cs_set;
+                g.cs_pipe_layout = cs_pipe;
+            } else {
+                vkDestroyDescriptorSetLayout(g.device, cs_set, nullptr);
+            }
+        }
+        if (g.cs_pipe_layout == g.pipe_layout) {
+            g_cs_cb = false;
+            host_log("gpu: compute cb: no layout for compute constant buffers; they take the page table");
+        }
+    }
+    host_log("gpu: compute cb: compute shaders' constant buffers %s",
+             g_cs_cb ? "bound as storage buffers where the walk would read the same bytes (BBHOST_CS_CB=0 walks them all)"
+                     : "on the page-table walk (BBHOST_CS_CB=0 or BBHOST_CB_SSBO=0)");
     VkDescriptorSetLayout four[4] = {g.gfx_set_layout, g.gfx_set_layout, g.cb_push_layout, g.bindless_layout};
     plci.setLayoutCount = g.bindless ? 4 : cb_push_on() ? 3 : 2;
     plci.pSetLayouts = four;
@@ -3258,6 +3346,12 @@ gcn::TranslateOptions compute_options(std::uint32_t rsrc1, std::uint32_t rsrc2, 
     o.cs_threads[1] = threads[1];
     o.cs_threads[2] = threads[2];
     o.exec_known = g.exec_known;
+    // rc5b: constant buffers through storage-buffer bindings, as the
+    // graphics stages read theirs, in the dispatch's own set from binding
+    // 112 (g.cs_set_layout). The page-table walk stays every buffer's
+    // fallback (no lean variant): host_gpu_dispatch binds only what it can
+    // prove reads the same bytes (resolve_compute_buffers_locked).
+    o.cb_ssbo = compute_cb_on();
     return o;
 }
 
@@ -3361,6 +3455,7 @@ struct CsOptimizer {
         std::vector<std::uint32_t> spirv;
         std::uint64_t flip = 0;        // when its stand-in was built
         std::uint64_t standin_us = 0;  // and how long that took
+        VkPipelineLayout layout = VK_NULL_HANDLE;  // rc5b: the stand-in's (null: g.pipe_layout)
     };
     struct Running {
         std::string name;  // empty: the thread is idle
@@ -3434,7 +3529,7 @@ CsOptimize cs_optimize_mode() {
 // cache has it optimized, VK_NULL_HANDLE at once otherwise. `own_cache`: a
 // bb-cs-optimize build's, instead of the main cache.
 VkPipeline create_compute(VkShaderModule module, CsBuild how, const std::string& watch, const std::vector<std::uint32_t>* spirv,
-                          VkPipelineCache own_cache = VK_NULL_HANDLE) {
+                          VkPipelineCache own_cache = VK_NULL_HANDLE, VkPipelineLayout layout = VK_NULL_HANDLE) {
     if (how == CsBuild::kOptimizedCached && !g.cache_control) return VK_NULL_HANDLE;
     VkComputePipelineCreateInfo cpci{};
     cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -3442,7 +3537,7 @@ VkPipeline create_compute(VkShaderModule module, CsBuild how, const std::string&
     cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     cpci.stage.module = module;
     cpci.stage.pName = "main";
-    cpci.layout = g.pipe_layout;
+    cpci.layout = layout ? layout : g.pipe_layout;
     cpci.flags = how == CsBuild::kUnoptimized        ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT
                  : how == CsBuild::kOptimizedCached ? VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT
                                                      : 0;
@@ -3516,7 +3611,7 @@ void cs_optimize_thread(int index) {
             VkPipelineCacheCreateInfo pcci{};
             pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
             if (g.opt_cache == VK_NULL_HANDLE || vkCreatePipelineCache(g.device, &pcci, nullptr, &own) != VK_SUCCESS) own = VK_NULL_HANDLE;
-            p = create_compute(module, CsBuild::kOptimized, job.name + watch, &job.spirv, own);
+            p = create_compute(module, CsBuild::kOptimized, job.name + watch, &job.spirv, own, job.layout);
             if (own != VK_NULL_HANDLE) {
                 if (p) {
                     std::lock_guard<std::mutex> lk(g_opt_cache_mu);
@@ -3554,7 +3649,8 @@ void cs_optimize_thread(int index) {
     }
 }
 
-void queue_compute_optimize(std::uint64_t key, const std::string& name, const std::vector<std::uint32_t>& spirv, std::uint64_t standin_us) {
+void queue_compute_optimize(std::uint64_t key, const std::string& name, const std::vector<std::uint32_t>& spirv, std::uint64_t standin_us,
+                            VkPipelineLayout layout) {
     static std::once_flag started;
     std::call_once(started, [] {
         {
@@ -3572,6 +3668,7 @@ void queue_compute_optimize(std::uint64_t key, const std::string& name, const st
         job.spirv = spirv;
         job.flip = hle_video_flip_count();
         job.standin_us = standin_us;
+        job.layout = layout;
         g_cs_opt.jobs.push_back(std::move(job));
     }
     g_cs_opt.cv.notify_one();
@@ -3580,36 +3677,37 @@ void queue_compute_optimize(std::uint64_t key, const std::string& name, const st
 }  // namespace
 
 VkPipeline first_compute_pipeline(VkShaderModule module, std::uint64_t opt_key, const std::string& name,
-                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch) {
+                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch,
+                                  VkPipelineLayout layout) {
     standin = false;
     switch (cs_optimize_mode()) {
     case CsOptimize::kNever:
-        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv);
+        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     case CsOptimize::kAlways:
-        return create_compute(module, CsBuild::kOptimized, watch, &spirv);
+        return create_compute(module, CsBuild::kOptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     case CsOptimize::kBackground:
         break;
     }
     if (g_cs_opt.keep_unoptimized.count(name)) {
         g_cs_opt.kept.fetch_add(1, std::memory_order_relaxed);
-        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv);
+        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     }
     {
         // Built this run already, for an earlier pipeline of the same key.
         std::lock_guard<std::mutex> lk(g_cs_opt.mu);
         if (const auto it = g_cs_opt.ready.find(opt_key); it != g_cs_opt.ready.end()) return it->second;
     }
-    if (const VkPipeline p = create_compute(module, CsBuild::kOptimizedCached, watch, &spirv)) {
+    if (const VkPipeline p = create_compute(module, CsBuild::kOptimizedCached, watch, &spirv, VK_NULL_HANDLE, layout)) {
         g_cs_opt.from_cache.fetch_add(1, std::memory_order_relaxed);
         return p;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    const VkPipeline p = create_compute(module, CsBuild::kUnoptimized, watch, &spirv);
+    const VkPipeline p = create_compute(module, CsBuild::kUnoptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     if (!p) return p;
     standin = true;
     g_cs_opt.standins.fetch_add(1, std::memory_order_relaxed);
     if (!t_compute_worker) g_cs_opt.standins_cp.fetch_add(1, std::memory_order_relaxed);
-    queue_compute_optimize(opt_key, name, spirv, cs_us_since(t0));
+    queue_compute_optimize(opt_key, name, spirv, cs_us_since(t0), layout);
     return p;
 }
 
@@ -3855,7 +3953,7 @@ ComputePipeline& pipeline_for(const GpuDispatch& d, std::uint64_t key, const std
         return pl;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    pl.pipeline = first_compute_pipeline(pl.module, key, name, pl.meta.spirv, pl.standin, name + " (at its dispatch)");
+    pl.pipeline = first_compute_pipeline(pl.module, key, name, pl.meta.spirv, pl.standin, name + " (at its dispatch)", g.cs_pipe_layout);
     if (!pl.pipeline) {
         host_log("gpu: shader %s: pipeline creation failed", name.c_str());
         pl.failed = true;
@@ -3996,7 +4094,7 @@ void precompile_compute(const std::string& name, const std::vector<std::uint8_t>
         }();
         if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         t_compute_worker = true;
-        e.pipeline = first_compute_pipeline(e.module, key, name, e.meta.spirv, e.standin, name);
+        e.pipeline = first_compute_pipeline(e.module, key, name, e.meta.spirv, e.standin, name, g.cs_pipe_layout);
         if (!e.pipeline) why = "pipeline";
     }
     e.us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
@@ -5833,6 +5931,105 @@ const bool g_store_log = std::getenv("BBHOST_STORE_LOG") != nullptr;
 std::atomic<std::uint64_t> g_store_logs{0};
 }
 
+namespace {
+// rc5b: a compute shader's constant buffers (TranslateOptions::cb_ssbo, which
+// keeps the page-table walk as every buffer's fallback). One is bound only
+// when the binding provably reads what the walk would: a V# or pointer read
+// at constant offsets (not by index), over memory imported as one buffer,
+// that no copy-back holds, that this dispatch does not store to and that the
+// GPU has not written earlier in this recording, at a base on a vec4 of its
+// binding. The binding is the same memory the page table maps, read when the
+// dispatch runs, as the walk reads it; there is no copy and no snapshot. All
+// else stays on the walk (cb_valid bit clear) with the dummy buffer.
+void resolve_compute_buffers_locked(const ComputePipeline& pl, const std::uint32_t* user, gcn::StageParams& params,
+                                    std::vector<VkDescriptorBufferInfo>& infos) {
+    const gcn::TranslateResult& meta = pl.meta;
+    infos.assign(meta.buffers.size(), VkDescriptorBufferInfo{g.dummy_ssbo, 0, VK_WHOLE_SIZE});
+    // What this dispatch stores to; a store that does not resolve to a
+    // range, or one through a V# not traced to user data, could be anywhere.
+    bool stores_unknown = meta.untraced_stores != 0;
+    static thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>> stores;
+    stores.clear();
+    for (const gcn::ResourcePath& path : meta.store_buffers) {
+        std::uint32_t v[4]{};
+        if (!resolve_resource(path, user, 4, v)) {
+            stores_unknown = true;
+            break;
+        }
+        const std::uint64_t base = v[0] | (static_cast<std::uint64_t>(v[1] & 0xff) << 32);
+        const std::uint32_t stride = (v[1] >> 16) & 0x3fff;
+        const std::uint64_t bytes = stride ? std::uint64_t{v[2]} * stride : v[2];
+        std::uint64_t lo = 0, hi = 0;
+        if (!bytes || !memory_range_key(base, bytes, lo, hi)) {
+            stores_unknown = true;
+            break;
+        }
+        stores.emplace_back(lo, hi);
+    }
+    std::uint32_t bound = 0;
+    for (std::size_t i = 0; i < meta.buffers.size(); ++i) {
+        const gcn::BufferBinding& b = meta.buffers[i];
+        std::uint32_t words[4] = {};
+        // The tables the V# was read from, as the walk reads them on the GPU:
+        // none of them may have been written by the GPU in this recording either.
+        static thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>> touched;
+        touched.clear();
+        const bool resolved = resolve_resource(b.path, user, b.pointer ? 2 : 4, words, &touched);
+        const bool tables_written =
+            std::any_of(touched.begin(), touched.end(), [](const auto& t) { return gpu_written_locked(t.first, t.second); });
+        const std::uint64_t hi = b.pointer ? words[1] : (words[1] & 0xff);
+        const std::uint64_t base = resolved ? static_cast<std::uint64_t>(words[0]) | (hi << 32) : 0;
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(b.max_dw) * 4;
+        CsCbOutcome outcome = kCsBound;
+        Located loc;
+        std::uint64_t klo = 0, khi = 0;
+        if (!base || !bytes) {
+            outcome = kCsNoBase;
+        } else if (b.indexed) {
+            outcome = kCsIndexed;  // read anywhere in its records: past them GCN reads zeros
+        } else if (base & 3) {
+            outcome = kCsUnaligned;
+        } else if (stores_unknown || tables_written || gpu_written_locked(base, bytes)) {
+            outcome = kCsWritten;
+        } else if (!memory_range_key(base, bytes, klo, khi)) {
+            outcome = kCsWritten;
+        } else if (std::any_of(stores.begin(), stores.end(), [&](const auto& s) { return klo < s.second && s.first < khi; }) ||
+                   std::any_of(touched.begin(), touched.end(), [&](const auto& t) {
+                       std::uint64_t tlo = 0, thi = 0;
+                       if (!memory_range_key(t.first, t.second, tlo, thi)) return true;
+                       return std::any_of(stores.begin(), stores.end(), [&](const auto& s) { return tlo < s.second && s.first < thi; });
+                   })) {
+            outcome = kCsWritten;
+        } else if (copy_version_lookup_locked(base, bytes, nullptr) != kCopyVersionNone) {
+            outcome = kCsCopyVersion;
+        } else {
+            loc = locate(base, std::min<std::uint64_t>(bytes, g.ssbo_max_range ? g.ssbo_max_range : bytes));
+            if (!loc.buffer) {
+                outcome = kCsUnmapped;
+            } else {
+                const VkDeviceSize start = loc.offset & ~(g.ssbo_align - 1);
+                const VkDeviceSize bias = loc.offset - start;
+                if (bias % 16 != 0) {
+                    outcome = kCsUnaligned;  // as the graphics stages' realignment: a base off a vec4 stays on the walk
+                } else if (bytes <= loc.avail && bias + bytes <= g.ssbo_max_range) {
+                    infos[i] = {loc.buffer, start, bias + bytes};
+                    params.cb_valid |= 1u << i;
+                    params.cb_bias_dw[i] = static_cast<std::uint32_t>(bias / 4);
+                    ++bound;
+                } else {
+                    outcome = kCsTooLong;
+                }
+            }
+        }
+        g_cs_cb_outcomes[outcome].fetch_add(1, std::memory_order_relaxed);
+    }
+    g_cs_cb_dispatches.fetch_add(1, std::memory_order_relaxed);
+    if (bound == meta.buffers.size()) g_cs_cb_dispatches_all.fetch_add(1, std::memory_order_relaxed);
+    static std::uint64_t logged = 0;
+    if (++logged % 20000 == 0) host_log("gpu: compute cb: %s", compute_cb_line().c_str());
+}
+}  // namespace
+
 bool host_gpu_dispatch(const GpuDispatch& d) {
     DispatchStamp stamp;
     GpuPhaseTimer timer(kPhaseLock);
@@ -6004,9 +6201,28 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     gcn::StageParams params{};
     params.l1_table = g.l1.address;
     std::memcpy(params.user_sgpr, d.user_data, sizeof(params.user_sgpr));
+    // rc5b: its constant buffers, where they bind (resolve_compute_buffers_locked).
+    static thread_local std::vector<VkDescriptorBufferInfo> cb_infos;
+    cb_infos.clear();
+    if (g_cs_cb && !pl.meta.buffers.empty()) {
+        if (!pl.cb_counted) {
+            pl.cb_counted = true;
+            g_cs_cb_pipelines.fetch_add(1, std::memory_order_relaxed);
+            g_cs_cb_pipeline_buffers.fetch_add(pl.meta.buffers.size(), std::memory_order_relaxed);
+            if (g_cs_cb_pipelines.load(std::memory_order_relaxed) <= 24) {
+                host_log("gpu: compute cb: %s reads %zu constant buffer(s) through bindings (walk as their fallback)", pl.name.c_str(),
+                         pl.meta.buffers.size());
+            }
+        }
+        resolve_compute_buffers_locked(pl, d.user_data, params, cb_infos);
+    }
+    if (g_cs_cb && !pl.cb_counted) {
+        pl.cb_counted = true;
+        g_cs_cb_pipelines_seen.fetch_add(1, std::memory_order_relaxed);
+    }
     VkDescriptorBufferInfo ubi{};
     alloc_params_slot_locked(params, ubi);
-    VkDescriptorSet set = alloc_set_locked();
+    VkDescriptorSet set = alloc_set_locked(g.cs_set_layout);
     if (!set) {
         host_log("gpu: descriptor set allocation failed");
         g.failures.fetch_add(1);
@@ -6023,10 +6239,19 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     std::vector<VkDescriptorImageInfo> infos;
     infos.reserve(pl.meta.images.size() + pl.meta.samplers.size() + 1);
     bind_stage_images(set, pl.meta, stage_images, writes, infos, pl.name.c_str());
+    for (std::size_t i = 0; i < cb_infos.size(); ++i) {
+        VkWriteDescriptorSet bw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        bw.dstSet = set;
+        bw.dstBinding = pl.meta.buffers[i].binding;
+        bw.descriptorCount = 1;
+        bw.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bw.pBufferInfo = &cb_infos[i];
+        writes.push_back(bw);
+    }
     vkUpdateDescriptorSets(g.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     rec().bind_pipeline(VK_PIPELINE_BIND_POINT_COMPUTE, pl.pipeline);
     const std::uint32_t params_offset = static_cast<std::uint32_t>(ubi.offset);
-    rec().bind_sets(VK_PIPELINE_BIND_POINT_COMPUTE, g.pipe_layout, 0, 1, &set, set_cache_on() ? 1 : 0, &params_offset);
+    rec().bind_sets(VK_PIPELINE_BIND_POINT_COMPUTE, g.cs_pipe_layout, 0, 1, &set, set_cache_on() ? 1 : 0, &params_offset);
     profile_begin_locked(&pl.name);
     note_dispatch_name(g.dispatches.load(), pl.name.c_str());
     gpu_checkpoint(2, g.dispatches.load());
@@ -6049,6 +6274,7 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     for (const gcn::ResourcePath& path : pl.meta.store_buffers) {
         std::uint32_t v[4]{};
         if (!resolve_resource(path, d.user_data, 4, v)) {
+            gpu_write_taint_locked();  // rc5b: written somewhere
             if (g_unresolved_stores.fetch_add(1, std::memory_order_relaxed) < 8) {
                 host_log("gpu: dispatch %s stores through %s, which did not resolve", pl.name.c_str(), path.str().c_str());
             }
@@ -6062,7 +6288,9 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
                      static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), stride, v[2]);
         }
         shadow_written_locked(base, bytes, true);
+        if (!bytes) gpu_write_taint_locked();  // rc5b: no extent to go by
     }
+    if (pl.meta.untraced_stores) gpu_write_taint_locked();  // rc5b
     if (pl.meta.untraced_stores && !pl.untraced_stores_logged) {
         pl.untraced_stores_logged = true;
         host_log("gpu: dispatch %s has %u store(s) through a V# not traced to user data", pl.name.c_str(), pl.meta.untraced_stores);
@@ -7072,6 +7300,48 @@ std::string copy_versions_report() {
                   static_cast<ull>(g_cv_put[kCvPageTable].load()), static_cast<ull>(g_cv_put[kCvWalks].load()),
                   static_cast<ull>(g_batch_orders.load()));
     return b;
+}
+
+bool compute_cb_on() { return g_cs_cb; }
+
+std::string compute_cb_line() {
+    const auto n = [](const std::atomic<std::uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
+    char b[640];
+    std::snprintf(b, sizeof(b),
+                  "compute_cb: on=%d pipelines=%llu buffers=%llu pipelines_without=%llu dispatches=%llu all_bound=%llu bound=%llu "
+                  "walk_no_base=%llu walk_indexed=%llu walk_unaligned=%llu walk_gpu_written=%llu walk_copy_version=%llu "
+                  "walk_unmapped=%llu walk_too_long=%llu",
+                  g_cs_cb ? 1 : 0, n(g_cs_cb_pipelines), n(g_cs_cb_pipeline_buffers), n(g_cs_cb_pipelines_seen), n(g_cs_cb_dispatches),
+                  n(g_cs_cb_dispatches_all), n(g_cs_cb_outcomes[kCsBound]), n(g_cs_cb_outcomes[kCsNoBase]), n(g_cs_cb_outcomes[kCsIndexed]),
+                  n(g_cs_cb_outcomes[kCsUnaligned]), n(g_cs_cb_outcomes[kCsWritten]), n(g_cs_cb_outcomes[kCsCopyVersion]),
+                  n(g_cs_cb_outcomes[kCsUnmapped]), n(g_cs_cb_outcomes[kCsTooLong]));
+    return b;
+}
+
+void gpu_write_note_locked(std::uint64_t va, std::uint64_t bytes) {
+    if (!g_cs_cb || !bytes) return;
+    gpu_writes_sync_locked();
+    if (g_gpu_writes_all) return;
+    std::uint64_t lo = 0, hi = 0;
+    if (g_gpu_writes.size() >= kMaxGpuWrites || !memory_range_key(va, bytes, lo, hi)) {
+        g_gpu_writes_all = true;
+        return;
+    }
+    // Neighbouring writes (a dispatch's stores, label after label) as one range.
+    for (auto& w : g_gpu_writes) {
+        if (lo <= w.second && w.first <= hi) {
+            w.first = std::min(w.first, lo);
+            w.second = std::max(w.second, hi);
+            return;
+        }
+    }
+    g_gpu_writes.emplace_back(lo, hi);
+}
+
+void gpu_write_taint_locked() {
+    if (!g_cs_cb) return;
+    gpu_writes_sync_locked();
+    g_gpu_writes_all = true;
 }
 }  // namespace gpu
 

@@ -973,6 +973,7 @@ std::string cpu_section() {
                   per_draw(now, prev, kPhasePrefetch));
     prev = now;
     out += b;
+    out += "\n" + render_cp_split_section();
     return out;
 }
 const bool g_cpu_section = (perf::add_section("cpu", cpu_section), true);

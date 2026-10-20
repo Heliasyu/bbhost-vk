@@ -1,5 +1,35 @@
 # Changelog (bbhost-vk)
 
+## vk.1-rc5b (2026-10-20, test build "build 5", branch `phase-5-test-release`; not released)
+
+On top of rc5 ("build 4", df31b8b). Same rules: permanent, chosen automatically, no menu or
+launcher switch; each `BBHOST_*=0` is rc5's behaviour. The translator is unchanged
+(fingerprint cbb93a8a…), but compute shaders are translated with different options, so
+**each compute shader is translated and compiled once more** on the first start (the
+precompile workers do the known ones before the title; graphics stages keep their cache).
+
+- **Compute constant buffers through storage-buffer bindings** (GPU audit #1). The game's
+  compute shaders read every constant through the page-table walk (two dependent 64-bit
+  loads per constant); they now read them as the graphics stages do, from a binding over
+  the same memory, with the walk kept as each buffer's fallback. A buffer is bound only
+  when the binding provably reads the walk's bytes: a V# or a pointer in user data or a
+  table, read at constant offsets (not by index), whose memory is imported as one buffer,
+  holds no copy-back, is on a vec4 of its binding, is not stored to by the dispatch, and is
+  not written by the GPU earlier in the same command buffer (nor are the tables its V# was
+  read from). Anything else takes the walk, as before. The game's compute pipelines get a
+  layout of their own (the shared one plus bindings 112-127); the tessellation pass and the
+  graphics pipelines keep theirs. Log `gpu: compute cb:` (start, first pipelines, every
+  20,000 dispatches); [walks] `compute_cb:`. `BBHOST_CS_CB=0`.
+- **[cpu] `cp_split:` / `cp_split_total:`**: the command processor's draw path in 20
+  sections (registers, targets, programs, key, lookup, prefetch, stage_user, buffers, sets,
+  images, update, variant, pass, bind_cmds, dynamic, geometry, record, …) in ns per draw,
+  from the TSC on the one draw in 16 the phase timers already sample (~10-20 ns a draw
+  on average). Log `cp split:` every 100,000 sampled draws. `BBHOST_CP_SPLIT=0`.
+- The motion-blur log's name search in the per-stage image binding stops once its 8 lines
+  are written (it ran for every stage of every draw).
+- New test `gcn_cs_cb_test` (compute translation with constant-buffer bindings: set 0,
+  binding 112, constant offsets, valid SPIR-V; nothing bound when off).
+
 ## vk.1-rc5 (2026-10-20, test build "build 4", branch `phase-5-test-release`; not released)
 
 CPU headroom for heavy Old Yharnam (bb-cp0 ~91% of a core, bb-record ~87%, in rc4's

@@ -603,6 +603,7 @@ void shadow_probe_locked(std::uint64_t va, std::uint64_t bytes, char* out, std::
 }
 
 void shadow_written_locked(std::uint64_t va, std::uint64_t bytes, bool by_gpu) {
+    if (by_gpu) gpu_write_note_locked(va, bytes);  // rc5b: compute constant buffers over it take the walk
     if (!buffer_shadow_on() || !bytes) return;
     std::uint32_t chunk = 0;
     std::uint64_t off = 0, map_lo = 0, map_hi = 0;

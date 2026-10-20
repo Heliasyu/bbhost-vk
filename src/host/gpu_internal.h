@@ -160,6 +160,7 @@ struct ComputePipeline {
     bool buffer_to_image = false;  // MUBUF load + MIMG store
     int img_src_sgpr = -1;       // the source V#'s user SGPR, for buffer_to_image
     bool untraced_stores_logged = false;
+    bool cb_counted = false;  // rc5b: counted in the compute-constants line (compute_cb_line)
 };
 
 // Guest VA -> (VkBuffer, offset) for index buffers.
@@ -345,6 +346,11 @@ struct Gpu {
     std::map<VkBuffer, std::uint32_t> scratch_users;
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkPipelineLayout pipe_layout = VK_NULL_HANDLE;         // compute: one set
+    // rc5b: the game's compute shaders, with their constant buffers bound
+    // (compute_cb_on): set_layout plus the storage-buffer bindings when those
+    // went to the push set (cb_push_on); set_layout / pipe_layout otherwise.
+    VkDescriptorSetLayout cs_set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout cs_pipe_layout = VK_NULL_HANDLE;
     VkPipelineLayout gfx_pipe_layout = VK_NULL_HANDLE;     // graphics: set 0 VS, set 1 PS
     VkDescriptorPool desc_pool = VK_NULL_HANDLE;
     VkPipelineCache cache = VK_NULL_HANDLE;
@@ -637,6 +643,18 @@ bool rebuild_page_tables();
 bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool cached = false);  // cached: host-cached memory, for readbacks
 // rc5: the snapshot [walks] line `page_tables: vram= system=` (where the page tables were put; gpu.cpp create_table_buffer).
 std::string page_tables_line();
+// rc5b: constant buffers of the game's compute shaders through storage-buffer
+// bindings (TranslateOptions::cb_ssbo), on unless BBHOST_CS_CB=0 or
+// BBHOST_CB_SSBO=0. compute_cb_line: the [walks] line.
+bool compute_cb_on();
+std::string compute_cb_line();
+// rc5b: guest memory the GPU writes in the current recording, which a
+// compute shader's constant buffer then never binds over (it takes the
+// page-table walk, as before). taint: a write whose range is not known.
+void gpu_write_note_locked(std::uint64_t va, std::uint64_t bytes);
+void gpu_write_taint_locked();
+// rc5b: the snapshot [cpu] lines `cp_split:` / `cp_split_total:` (render.cpp, the sampled section split).
+std::string render_cp_split_section();
 std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags want);
 bool extract_program(std::uint64_t code_va, std::vector<std::uint32_t>& words, std::string& name);
 // A GX shader creator ran (render.cpp; host_gpu_note_shader_created).
@@ -897,7 +915,8 @@ extern std::uint64_t g_draw_rec_next;
 // thread under `opt_key`; adopt_optimized_compute swaps it in. `watch`: the
 // name the watchdog lists it under while it compiles.
 VkPipeline first_compute_pipeline(VkShaderModule module, std::uint64_t opt_key, const std::string& name,
-                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch);
+                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch,
+                                  VkPipelineLayout layout = VK_NULL_HANDLE);  // null: g.pipe_layout
 // A stand-in's optimized pipeline, when it is built: true when `pipeline` now
 // is it (and `standin` false). Cheap when nothing new was built since `seen`.
 bool adopt_optimized_compute(std::uint64_t opt_key, VkPipeline& pipeline, bool& standin, std::uint64_t& seen);
