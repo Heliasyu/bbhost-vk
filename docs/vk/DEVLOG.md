@@ -1795,3 +1795,59 @@ The second build of the night. Rule: optimizations are permanent (no new switche
 - `--stream-selftest`, `=2` with BBHOST_FSR4_FEATURES=1 and `=20`: pass, with the same 10
   upstream SYNC-HAZARD lines.
 - None of it ran on the hardware here.
+
+---
+
+## 2026-10-20 (Tue), async-fsr: FSR 4.1.1 on an async compute queue, not built
+
+This was asked for (rc2 ANALYSIS item 8, deferred in rc3). The design review found it
+cannot give overlap in bbhost-vk's frame, and would add two cross-queue hand-offs to the
+frame's critical path. So no code was written. Nothing on this branch changes behaviour.
+
+### Where FSR runs
+- FSR 4.1.1 does not run in the presenter after the game's frame. It runs inside the
+  game's frame, recorded into the renderer's stream on `g.queue`:
+  `post_end_window_locked` (render.cpp) → `fsr3_scale_pass_locked` (fsr3_pass.cpp) →
+  `fsr4_record_locked` (fsr4_pass.cpp), at the end of the post-at-render window.
+- Its output (written directly into the scale pass's 4K target A) is read at once by the
+  game's draws that stay at output size, all on graphics, in the same flip: CA
+  (84b3a182 / bb92a5b6, which closes the window), the bloom's downsample (4c37ae6d+4b766f62),
+  the bloom, the tonemap 1ea5a07e+ccb08339, the grain and the UI. The presenter only
+  blits or draws that finished display buffer.
+- RGP `snap-222230` (8.71 ms frame) agrees. FSR is the CS block at about 4.1-6.3 ms, and
+  about 2.4 ms of pixel-shader work follows it in the same frame: the rest of submission #5
+  (3.56-7.39 ms) and submissions #6-#13. All of it reads FSR's picture.
+- Every FSR 4.1.1 pass needs the post chain's colour: SPD exposure and the prepass read
+  `r_input_color`. So no part of FSR can start before the window closes.
+
+### Why async compute gives no overlap here
+- On one in-order graphics queue, the next frame's depth and shadow passes are submitted
+  after this frame's post-FSR draws. Those draws have to wait for FSR. If FSR moves to a
+  compute queue, the graphics queue waits on its semaphore for the whole of FSR, then the
+  next frame starts, as it does today. RADV exposes one graphics queue, so the next frame
+  cannot go on a second one.
+- Overlapping FSR(N) with frame N+1 would mean submitting N+1's first passes before N's
+  post-FSR draws, which reorders the game's command stream. Frame N's end-of-pipe labels
+  and fences tell the guest when it may reuse N's memory: render targets, constants,
+  index/vertex data, and userptr pages the CPU writes. Labels written before N's
+  deferred draws would let the guest overwrite what those draws still read. Holding the
+  labels back blocks the guest CPU instead, and adds a frame of latency under the
+  frame-latency limit and the pacer. This is a redesign of the frame, not a queue change.
+- Cost if it were built anyway: the graphics submission split before FSR (an
+  end-of-IB flush, where today there is a barrier), a compute submission, and a graphics
+  submission that waits on it. amdgpu resolves a cross-ring dependency on the CPU (the
+  DRM scheduler waits for the finished fence, then pushes the job), so there would be two
+  bubbles per frame, about 10-50 µs each, plus the extra submission overhead measured in
+  t8 (about 27 µs per submission). Estimate: +0.05 to +0.15 ms of GPU per frame, with no
+  concurrency to pay it back. FSR's own passes already run at 75-100% wave occupancy
+  in the RGP capture, so even real overlap would buy little.
+- Motion vectors on compute, overlapped with the render-size post chain: this is the one
+  real overlap. The motion pass is 0.03 ms (t6), and the reactive and opaque inputs are
+  not used by FSR 4.1.1. The extra submission split costs about as much as it saves.
+
+### Where the headroom is instead (for the next round, from the same data)
+- The 4K tail after FSR is about 2.4 ms, and includes ~20 latency-bound tiny passes at the
+  end of the frame (0.6 ms under 15% occupancy).
+- The occlusion resolve's bubble. rc3 made it parallel; it needs a new capture.
+- The 25-250 µs queued gaps per submission (rc3's [gpu_idle] split says which kind).
+- FSR 4.1.1 itself: check the snapshot says the FP8 variant on the 9070 XT.
