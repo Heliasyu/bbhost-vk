@@ -1,5 +1,57 @@
 # Changelog (bbhost-vk)
 
+## vk.1-rc3 (2026-10-19, test build, branch `phase-5-test-release`; not released)
+
+- **Frame-latency limit on the uncapped/120 path.** rc2's limit only covered flips
+  queued by the capped path. A flip the command processor recorded itself (`from_cp`) now
+  waits for the presenter too, instead of being replaced.
+- **Present pacer:**
+  - It is fed the time just before `vkQueuePresentKHR`, not after it.
+  - It judges each 30-frame window on the 3rd-earliest arrival, not the earliest, so one
+    outlier no longer sets the creep.
+  - A window with a few late frames keeps creeping; only one with more than a quarter late
+    drops the creep.
+  - When the last present was on time and a frame is more than 1 ms early, the grid is
+    pulled in by up to 0.5 ms, so the added latency comes back down sooner.
+- **The presenter's blit no longer queues behind bb-submit.** When nothing new reached the
+  stream while the blit was recorded, the presenter waits only for the game work its frame
+  needs and submits directly on the queue. Otherwise it goes through the stream as before.
+  This is not a separate queue: sharing the renderer's resources across queues would need
+  semaphores on every game submission. `BBHOST_PRESENT_PRIORITY=0` always uses the stream
+  (debugging only).
+- **Occlusion resolve:**
+  - It runs on 64 lanes with shared memory. Only the ordered scan stays on one lane.
+    Blocks that dump to the same or overlapping addresses fall back to the serial order.
+  - The diagnostic pair statistics are off on the GPU path. `BBHOST_OCCLUSION_STATS=1`
+    brings them back (debugging only).
+  - The barrier after the resolve covers only transfer, compute, host and conditional
+    rendering, not all commands.
+  - It is timed on the GPU: the `occlusion:` log lines and the snapshots' [occlusion].
+- **Fewer page-table walks in vertex shaders.** MUBUF `buffer_load_format_*` with idxen
+  (the post chain's YEBIS windows among them) reads through the bound, length-clamped
+  buffer. The walk stays as the fallback. The snapshots' [walks] counts the pipelines,
+  and the post pipelines, whose VS still walks, with their names.
+- **Stage manifest:** stages a graphics pipeline had to build on the command processor
+  (the host-tessellated 52d756df+2e86d610 hitch) are marked urgent and precompiled first
+  next start (`<manifest>.urgent`). No manifest ships: it holds the game's shader code.
+- **Small fixes:** the `~fallback` pipeline label only appears when the shader has
+  constant buffers; the texture log says unsupported or unusable, with the reason. dfmt 6
+  (B10G11R11) was already mapped. rc2's line came from a T# with no address.
+- **Snapshots gain:**
+  - `flip_to_present_split:` (record, submit, pacer wait, `vkQueuePresentKHR`);
+  - [frames] columns for the same, plus whether the blit took the priority path;
+  - [present]: pacer state, priority/stream blit counts, latency-limit waits;
+  - [occlusion]: resolve GPU time;
+  - [walks];
+  - [gpu_idle]: GPU idle with work queued, total, after an occlusion resolve and after a
+    present. The `gpu idle:` log lines add `queued after an occlusion resolve`, and
+    `gpu_gaps.py --idle` prints it.
+- **Not in rc3:**
+  - Bloom's first pass at render size. It reads CA's output, so moving it would change
+    CA's contribution.
+  - FSR on async compute.
+  - The ~200 µs idle after the occlusion submission: not fixed, diagnostics only (above).
+
 ## vk.1-rc2 (2026-10-19, test build, branch `phase-5-test-release`; not released)
 
 - **Post-processing at render size covers more passes.** Besides the vk.1 list, a pass now

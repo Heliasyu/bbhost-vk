@@ -153,6 +153,7 @@ std::atomic<std::uint64_t> g_sub_handover_ns[kSubRing];
 std::atomic<std::uint64_t> g_sub_recorded_ns[kSubRing];
 std::atomic<std::uint8_t> g_sub_starved[kSubRing];
 std::atomic<void*> g_sub_site[kSubRing];
+std::atomic<std::uint8_t> g_sub_occl[kSubRing];  // rc3: it ended with an occlusion resolve
 VkFence g_last_game_fence = VK_NULL_HANDLE;  // the previous game submission's (submit_job_now's callers run one at a time)
 // test7c, BBHOST_SUBMIT_BATCH: the serial whose fence covers this one's - its
 // own, or the last of the vkQueueSubmit it was merged into (slot_fence).
@@ -4969,7 +4970,7 @@ __attribute__((noinline)) void submit_locked() {
     }
     // The occlusion counters this recording dumped land before its labels,
     // as the PS4's DBs write them before the end-of-pipe event that follows.
-    occlusion_submit_locked();
+    const bool occl = occlusion_submit_locked();
     flush_deferred_writes_locked();  // (its transfer batch puts deferred copy-backs in place first)
     transfer_flush_locked();
     render_end_pass_locked();
@@ -5019,6 +5020,7 @@ __attribute__((noinline)) void submit_locked() {
         g_sub_recorded_ns[k].store(0, std::memory_order_relaxed);
         g_sub_starved[k].store(0, std::memory_order_relaxed);  // submit_job_now sets it
         g_fence_owner[k].store(cur.serial, std::memory_order_relaxed);  // its own fence, unless bb-submit merges it
+        g_sub_occl[k].store(occl ? 1 : 0, std::memory_order_relaxed);
         t_flush_site = nullptr;
     }
     textures_before_submit();  // the staging spans its copies read are filled
@@ -5112,6 +5114,8 @@ bool slot_fence_signaled(const Gpu::Slot& sl) {
 }
 
 // test7: a game submission's record for the idle report (gpu_busy.cpp).
+bool submit_had_occlusion(std::uint64_t serial) { return g_sub_occl[serial % kSubRing].load(std::memory_order_relaxed) != 0; }
+
 bool submit_record(std::uint64_t serial, void** site) {
     const std::uint64_t k = serial % kSubRing;
     *site = g_sub_site[k].load(std::memory_order_relaxed);
@@ -5307,6 +5311,87 @@ void host_gpu_wait_submitted(std::uint64_t ticket) {
         return;
     }
     g_sub_idle.wait(lk, [ticket] { return g_sub_submitted.load(std::memory_order_acquire) >= ticket; });
+}
+
+bool host_gpu_wait_submitted_until(std::uint64_t ticket, std::int64_t deadline_ns) {
+    if (!ticket) return true;
+    const auto deadline = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline_ns));
+    std::unique_lock<std::mutex> lk(g_sub_mu);
+    if (ticket & kForeignTicket) {
+        const std::uint64_t id = ticket & ~kForeignTicket;
+        return g_sub_idle.wait_until(lk, deadline, [id] { return g_foreign_submitted.load(std::memory_order_acquire) >= id; });
+    }
+    return g_sub_idle.wait_until(lk, deadline, [ticket] { return g_sub_submitted.load(std::memory_order_acquire) >= ticket; });
+}
+
+namespace {
+bool present_priority_env() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_PRESENT_PRIORITY");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+std::atomic<std::uint64_t> g_prio_direct{0}, g_prio_stream{0}, g_prio_wait_ns{0}, g_prio_timeouts{0};
+}  // namespace
+
+std::uint64_t host_gpu_stream_mark() { return stream_activity() + g.flushes; }
+
+bool host_gpu_presenter_priority_ok(std::uint64_t need, std::uint64_t mark) {
+    // The stream on (bb-submit and the recorder: the default), the blit
+    // recorded nothing into the game's stream - a transition or clear there
+    // would be in a later submission, and the blit must not pass it - and
+    // the flip names the submissions it needs.
+    const bool ok = present_priority_env() && g_sub_running && stream_on() && need != ~0ull && g.ok &&
+                    !g_device_lost.load(std::memory_order_acquire) && host_gpu_stream_mark() == mark;
+    (ok ? g_prio_direct : g_prio_stream).fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+void host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence, std::uint64_t need) {
+    // The flip's frame on the queue first: submissions on one queue execute
+    // in submission order, so what it rendered is ahead of the blit; only
+    // the next frame's, recorded since, may come after it. Bounded - a
+    // failed or lost device publishes its serial too, but never hang here.
+    if (g_stream_submitted.load(std::memory_order_acquire) < need) {
+        const std::uint64_t t0 = host_clock_monotonic_ns();
+        std::unique_lock<std::mutex> lk(g_sub_mu);
+        const bool got = g_sub_idle.wait_for(lk, std::chrono::seconds(2), [need] {
+            return g_stream_submitted.load(std::memory_order_acquire) >= need || g_device_lost.load(std::memory_order_acquire);
+        });
+        lk.unlock();
+        g_prio_wait_ns.fetch_add(host_clock_monotonic_ns() - t0, std::memory_order_relaxed);
+        if (!got) g_prio_timeouts.fetch_add(1, std::memory_order_relaxed);
+    }
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkSemaphore w = static_cast<VkSemaphore>(wait), sg = static_cast<VkSemaphore>(signal);
+    VkPipelineStageFlags ws = wait_stage;
+    VkCommandBuffer c = static_cast<VkCommandBuffer>(cmd);
+    si.waitSemaphoreCount = w ? 1 : 0;
+    si.pWaitSemaphores = w ? &w : nullptr;
+    si.pWaitDstStageMask = w ? &ws : nullptr;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &c;
+    si.signalSemaphoreCount = sg ? 1 : 0;
+    si.pSignalSemaphores = sg ? &sg : nullptr;
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> q(g.queue_mu);
+        r = vkQueueSubmit(g.queue, 1, &si, static_cast<VkFence>(fence));
+    }
+    if (r != VK_SUCCESS) {
+        int none = 0;
+        g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
+        static std::atomic<int> logs{0};
+        if (logs.fetch_add(1) < 4) host_log("present: the blit's priority submit failed (%d)", static_cast<int>(r));
+    }
+}
+
+void host_gpu_presenter_priority_stats(std::uint64_t* direct, std::uint64_t* stream, std::uint64_t* wait_ns, std::uint64_t* timeouts) {
+    *direct = g_prio_direct.load(std::memory_order_relaxed);
+    *stream = g_prio_stream.load(std::memory_order_relaxed);
+    *wait_ns = g_prio_wait_ns.load(std::memory_order_relaxed);
+    *timeouts = g_prio_timeouts.load(std::memory_order_relaxed);
 }
 
 bool host_gpu_submit_for_flip(std::uint64_t need) {

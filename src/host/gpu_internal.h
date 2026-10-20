@@ -921,6 +921,7 @@ std::string busy_exit_report();                    // the whole run's line, for 
 // test7: the idle-gap instrumentation (gpu.cpp): whether game submission
 // `serial` found the GPU idle at vkQueueSubmit, and what ended its recording.
 bool submit_record(std::uint64_t serial, void** site);
+bool submit_had_occlusion(std::uint64_t serial);  // rc3: the submission ended with an occlusion resolve
 struct SubmitLatencyTotals {
     std::uint64_t n = 0, starved = 0;
     std::uint64_t record_ns = 0, queue_ns = 0, submit_ns = 0;  // hand-over -> recorded -> vkQueueSubmit -> returned
@@ -957,7 +958,7 @@ void occlusion_device_ready_locked();     // after the slots are made
 void occlusion_begin_recording_locked();  // a recording's first commands
 bool occlusion_draw_entry();              // host_gpu_draw's start: false when SET_PREDICATION culls the draw
 void occlusion_draw_locked(DrawCall& call);
-void occlusion_submit_locked();  // before the submission's label writes
+bool occlusion_submit_locked();  // before the submission's label writes; rc3: whether the recording resolved occlusion on the GPU
 void occlusion_record_cond(VkCommandBuffer cmd, const DrawCall& call, bool begin);
 std::string occlusion_report(bool totals);
 // BBHOST_GLITCH_WATCH=<pipeline prefix>[,...]: the guest ranges those
@@ -1277,6 +1278,10 @@ std::string recorder_report();
 // them and hands their submissions to bb-submit, and rec() appends ops
 // (BBHOST_STREAM_SUBMIT, on unless 0, and the recorder on).
 bool stream_on();
+// rc3: grows with every op appended to the stream and every in-place
+// recording (under g.mu): the presenter's priority submit checks its blit
+// added nothing to the game's recording.
+std::uint64_t stream_activity();
 // Until submission `serial` has gone to the queue (or failed): a fence the
 // command processor waits for must have been submitted. Under g.mu.
 void stream_wait_submitted(std::uint64_t serial);

@@ -98,6 +98,8 @@ struct Frame {
     std::int32_t lat_us = -1;  // flip queued -> present returned; -1 unknown
     std::uint32_t dropped = 0, cp_waits = 0;  // totals
     std::uint64_t cp_wait_ns = 0;              // total
+    std::int32_t rec_us = -1, sub_us = -1, pace_us = -1, pres_us = -1;  // rc3: PresentSplit
+    bool prio = false;
 };
 constexpr std::size_t kFrames = 8192;  // 30 s at 240 fps
 std::mutex g_frames_mu;
@@ -138,6 +140,12 @@ std::mutex g_post_mu;
 std::string g_post_text;
 std::int64_t g_post_t = 0;
 std::atomic<bool> g_started{false};
+std::mutex g_sections_mu;
+std::vector<std::pair<std::string, SectionFn>>& sections() {
+    static std::vector<std::pair<std::string, SectionFn>> v;
+    return v;
+}
+std::int32_t split_us(std::int64_t ns) { return ns < 0 ? -1 : static_cast<std::int32_t>(std::min<std::int64_t>(ns / 1000, 2'000'000'000)); }
 
 // ---- shader translations and pipeline compiles ----
 struct Compile {
@@ -364,6 +372,39 @@ void capture(const std::string& trigger, const std::string& note) {
                   over_load, drops, cpw, cpw_ms, lat_n ? lat_sum / lat_n : 0.0, lat_max);
     o << buf;
     o << "(1%/0.1% lows: the fps of the 99th/99.9th percentile frame time; intervals over 250 ms are loads, counted apart)\n";
+    {  // rc3: flip to present, split
+        double r = 0, sb = 0, pc = 0, pr = 0, sb_max = 0, pc_max = 0, pr_max = 0;
+        int n = 0, prio = 0;
+        for (std::size_t i = 1; i < frames.size(); ++i) {
+            const Frame& f = frames[i];
+            if (f.sub_us < 0 || f.dt_us > 250000) continue;
+            ++n;
+            prio += f.prio;
+            r += f.rec_us / 1000.0;
+            sb += f.sub_us / 1000.0;
+            pc += f.pace_us / 1000.0;
+            pr += f.pres_us / 1000.0;
+            sb_max = std::max(sb_max, f.sub_us / 1000.0);
+            pc_max = std::max(pc_max, f.pace_us / 1000.0);
+            pr_max = std::max(pr_max, f.pres_us / 1000.0);
+        }
+        const double d = n ? n : 1;
+        std::snprintf(buf, sizeof(buf),
+                      "flip_to_present_split: frames=%d record_avg_ms=%.2f submit_avg_ms=%.2f submit_max_ms=%.2f pacer_avg_ms=%.2f pacer_max_ms=%.2f "
+                      "present_call_avg_ms=%.2f present_call_max_ms=%.2f priority_submits=%d latency_limit_waits=%u latency_limit_wait_ms=%.1f\n",
+                      n, r / d, sb / d, sb_max, pc / d, pc_max, pr / d, pr_max, prio, cpw, cpw_ms);
+        o << buf;
+        o << "(record: flip queued -> its blit recorded; submit: blit recorded -> on the queue (overlaps the pacer when queued); pacer: "
+             "the pacer's wait; present_call: vkQueuePresentKHR)\n";
+    }
+    {  // rc3: the modules' counters
+        std::vector<std::pair<std::string, SectionFn>> secs;
+        {
+            std::lock_guard<std::mutex> lk(g_sections_mu);
+            secs = sections();
+        }
+        for (const auto& [title, fn] : secs) o << "\n[" << title << "]\n" << fn() << "\n";
+    }
     // The latest GPU sample's top ten.
     o << "\n[passes]  # the newest GPU sample: GPU ms by pass (a render pass named by its first draw's program; compute by its shader; "
          "rt-copy-* the host's copies)\n";
@@ -447,10 +488,11 @@ void capture(const std::string& trigger, const std::string& note) {
         o << "\n";
     }
     o << "\n[frames]  # t_ms (from the window's start), interval_ms, flip_to_present_ms (-1: unknown), dropped (total), "
-         "cp_waits (total)\n";
+         "cp_waits (total), rc3: record_ms, submit_ms, pacer_ms, present_call_ms, priority (1: the blit's priority submit)\n";
     for (const Frame& f : frames) {
-        std::snprintf(buf, sizeof(buf), "%.3f,%.3f,%.3f,%u,%u\n", static_cast<double>(f.t - t_from) / 1e6, f.dt_us / 1000.0,
-                      f.lat_us >= 0 ? f.lat_us / 1000.0 : -1.0, f.dropped, f.cp_waits);
+        std::snprintf(buf, sizeof(buf), "%.3f,%.3f,%.3f,%u,%u,%.3f,%.3f,%.3f,%.3f,%d\n", static_cast<double>(f.t - t_from) / 1e6, f.dt_us / 1000.0,
+                      f.lat_us >= 0 ? f.lat_us / 1000.0 : -1.0, f.dropped, f.cp_waits, f.rec_us / 1000.0, f.sub_us / 1000.0,
+                      f.pace_us / 1000.0, f.pres_us / 1000.0, f.prio ? 1 : 0);
         o << buf;
     }
     o << "\n[log]  # the last 30 s of the log\n";
@@ -672,8 +714,16 @@ void start() {
              snap_dir().c_str());
 }
 
+
+void add_section(const char* title, SectionFn fn) {
+    std::lock_guard<std::mutex> lk(g_sections_mu);
+    for (const auto& s : sections())
+        if (s.second == fn) return;
+    sections().emplace_back(title, fn);
+}
+
 void note_present(std::int64_t now_ns, std::int64_t arrived_ns, std::uint64_t dropped_total, std::uint64_t cp_waits_total,
-                  std::uint64_t cp_wait_ns_total) {
+                  std::uint64_t cp_wait_ns_total, const PresentSplit& split) {
     if (!g_frames) return;
     const std::int64_t last = g_last_present.exchange(now_ns, std::memory_order_relaxed);
     const std::int64_t dt = last ? now_ns - last : 0;
@@ -685,6 +735,11 @@ void note_present(std::int64_t now_ns, std::int64_t arrived_ns, std::uint64_t dr
     f.dropped = static_cast<std::uint32_t>(dropped_total);
     f.cp_waits = static_cast<std::uint32_t>(cp_waits_total);
     f.cp_wait_ns = cp_wait_ns_total;
+    f.rec_us = split_us(split.record_ns);
+    f.sub_us = split_us(split.submit_ns);
+    f.pace_us = split_us(split.pace_ns);
+    f.pres_us = split_us(split.present_ns);
+    f.prio = split.priority;
     std::lock_guard<std::mutex> lk(g_frames_mu);
     (*g_frames)[g_frame_n % kFrames] = f;
     ++g_frame_n;

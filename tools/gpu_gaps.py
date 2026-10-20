@@ -79,6 +79,9 @@ if a.idle:
         m = re.search(r'submits ([0-9.]+)/s, ([0-9.]+)% found the GPU idle; hand-over to recorded ([0-9.]+) us .*?to vkQueueSubmit ([0-9.]+) us', line)
         if m:
             kinds['submits'].append(tuple(float(x) for x in m.groups()))
+        m = re.search(r'queued after an occlusion resolve ([0-9.]+) ms/s \(([0-9.]+)/s\)', line)
+        if m:  # rc3
+            kinds['queued after occlusion'].append(tuple(float(x) for x in m.groups()))
         m = re.search(r'flush_locked\) ([0-9.]+)/s, ([0-9.]+) ms/s; splits ([0-9.]+)/s', line)
         if m:
             kinds['waits'].append(tuple(float(x) for x in m.groups()))
@@ -94,6 +97,9 @@ if a.idle:
         if v:
             print('  %-15s %6.2f ms/s %6.0f gaps/s  (<25us %.2f, 25-250us %.2f, >250us %.2f ms/s)' %
                   ((k,) + tuple(mean([x[i] for x in v]) for i in range(5))))
+    if kinds['queued after occlusion']:  # rc3
+        v = kinds['queued after occlusion']
+        print('    of the queued, after an occlusion resolve %.2f ms/s %.0f gaps/s' % tuple(mean([x[i] for x in v]) for i in range(2)))
     if kinds['submits']:
         v = kinds['submits']
         print('  submits %.0f/s, %.0f%% found the GPU idle; hand-over to recorded %.0f us, to vkQueueSubmit %.0f us' %

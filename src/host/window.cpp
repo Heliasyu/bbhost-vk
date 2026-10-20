@@ -730,8 +730,11 @@ std::int64_t pace_now_ns() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-// The present about to go: held to its slot. Returns when it may go.
-std::int64_t pace_present() {
+// The present about to go, ready at `now`: its slot on the grid (0: at once).
+// rc3: split from the wait (pace_until) and the report (pace_presented), so
+// the wait overlaps the blit's submission and the pacer is told the time
+// just before the present call.
+std::int64_t pace_slot(std::int64_t now) {
     const int fps = frame_rate_game_fps();  // each time: the pace is chosen when the game starts, after the first presents
     const std::int64_t period = fps >= 30 ? static_cast<std::int64_t>(1000000000.0 / fps + 0.5) : 0;
     static bool said = false;
@@ -740,25 +743,70 @@ std::int64_t pace_present() {
         host_log("present: pacing %s (BBHOST_PRESENT_PACE%s): presents held to an even %.3f ms grid, a late frame at once",
                  pace_mode() && period ? "on" : "off", pace_mode() ? "=0 turns it off" : "=0", static_cast<double>(period) / 1e6);
     }
-    std::int64_t now = pace_now_ns();
     // Not while a loading screen shows, nor for 2 s after: the frames then
     // come unevenly and the grid would restart on each (t13's first half).
     static std::int64_t settle_until = 0;
     if (hle_video_loading()) settle_until = now + 2000000000ll;
     g_pacer.set_period(pace_mode() && g_pace_on && period && now >= settle_until ? period : 0);
     const std::int64_t w = g_pacer.wait_ns(now);
-    if (w > 0) {
-        const std::int64_t until = now + w;
-        if (w > 400000) std::this_thread::sleep_for(std::chrono::nanoseconds(w - 300000));
-        while ((now = pace_now_ns()) < until) {
-#if defined(__x86_64__)
-            __builtin_ia32_pause();
-#endif
-        }
-    }
-    g_pacer.presented(now);
-    return now;
+    return w > 0 ? now + w : 0;
 }
+
+// Until the slot: sleep, then spin the last 0.3 ms. How long it waited.
+std::int64_t pace_until(std::int64_t until) {
+    const std::int64_t t0 = pace_now_ns();
+    std::int64_t now = t0;
+    if (until - now > 400000) std::this_thread::sleep_for(std::chrono::nanoseconds(until - now - 300000));
+    while ((now = pace_now_ns()) < until) {
+#if defined(__x86_64__)
+        __builtin_ia32_pause();
+#endif
+    }
+    return now - t0;
+}
+
+void pace_presented(std::int64_t t) { g_pacer.presented(t); }
+
+// rc3: the pacer's state for the snapshots (perf::add_section; read on the
+// capture thread, so copied into atomics after each present).
+struct PacerPub {
+    std::atomic<std::int64_t> period{0}, creep{0}, robust{-1}, wait_total{0}, pulled_total{0};
+    std::atomic<std::uint64_t> waited{0}, late{0}, late_presents{0}, reanchors{0}, pulls{0};
+} g_pacer_pub;
+void pacer_publish() {
+    g_pacer_pub.period.store(g_pacer.period(), std::memory_order_relaxed);
+    g_pacer_pub.creep.store(g_pacer.creep_ns(), std::memory_order_relaxed);
+    g_pacer_pub.robust.store(g_pacer.last_robust_early_ns(), std::memory_order_relaxed);
+    g_pacer_pub.wait_total.store(g_pacer.wait_total_ns(), std::memory_order_relaxed);
+    g_pacer_pub.pulled_total.store(g_pacer.pulled_total_ns(), std::memory_order_relaxed);
+    g_pacer_pub.waited.store(g_pacer.waited(), std::memory_order_relaxed);
+    g_pacer_pub.late.store(g_pacer.late(), std::memory_order_relaxed);
+    g_pacer_pub.late_presents.store(g_pacer.late_presents(), std::memory_order_relaxed);
+    g_pacer_pub.reanchors.store(g_pacer.reanchors(), std::memory_order_relaxed);
+    g_pacer_pub.pulls.store(g_pacer.pulls(), std::memory_order_relaxed);
+}
+std::string pacer_section() {
+    char b[768];
+    std::uint64_t direct = 0, stream = 0, wait_ns = 0, timeouts = 0;
+    host_gpu_presenter_priority_stats(&direct, &stream, &wait_ns, &timeouts);
+    const std::uint64_t waited = g_pacer_pub.waited.load();
+    std::snprintf(b, sizeof(b),
+                  "pacer: period_us=%.1f creep_us=%.1f last_window_3rd_earliest_us=%.1f waited=%llu avg_wait_us=%.0f late_arrivals=%llu "
+                  "late_presents=%llu restarts=%llu pulls=%llu pulled_ms=%.1f (totals since start)\n"
+                  "blit_submit: priority=%llu stream=%llu priority_wait_for_frame_ms=%.1f priority_timeouts=%llu (BBHOST_PRESENT_PRIORITY=0: "
+                  "always the stream)\n"
+                  "latency_limit: waits=%llu wait_ms=%.1f (BBHOST_FRAME_LATENCY=0 drops instead)",
+                  g_pacer_pub.period.load() / 1e3, g_pacer_pub.creep.load() / 1e3,
+                  g_pacer_pub.robust.load() < 0 ? -1.0 : g_pacer_pub.robust.load() / 1e3, static_cast<unsigned long long>(waited),
+                  waited ? static_cast<double>(g_pacer_pub.wait_total.load()) / 1e3 / static_cast<double>(waited) : 0.0,
+                  static_cast<unsigned long long>(g_pacer_pub.late.load()), static_cast<unsigned long long>(g_pacer_pub.late_presents.load()),
+                  static_cast<unsigned long long>(g_pacer_pub.reanchors.load()), static_cast<unsigned long long>(g_pacer_pub.pulls.load()),
+                  g_pacer_pub.pulled_total.load() / 1e6, static_cast<unsigned long long>(direct), static_cast<unsigned long long>(stream),
+                  wait_ns / 1e6, static_cast<unsigned long long>(timeouts), static_cast<unsigned long long>(g_present_waits.load()),
+                  g_present_wait_ns.load() / 1e6);
+    return b;
+}
+const bool g_pacer_section = (perf::add_section("present", pacer_section), true);
 
 // The A/B halves' present intervals.
 void pace_ab_note(std::int64_t t) {
@@ -967,6 +1015,7 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
         }
     } unlock{locked};
     const auto t_locked = std::chrono::steady_clock::now();
+    const std::uint64_t stream_mark = host_gpu_stream_mark();  // rc3: the priority submit's check (host_gpu_presenter_priority_ok)
     vkResetFences(g_vk.device, 1, &g_vk.fence);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1179,19 +1228,53 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     // ~1.3 ms of vkQueueSubmit on a Steam Deck, held under it, cost the
     // command processor ~1.5 ms a frame. Only presenting waits for the
     // submission to have gone in.
-    const std::uint64_t ticket = host_gpu_submit_presenter(g_vk.cmd, by_fence ? nullptr : acquire_sem, wait_stage, rendered, g_vk.fence);
-    if (ticket) {
+    // rc3: the priority submit - the blit straight to the queue once the
+    // flip's own submissions are in, not behind the next frame's in the
+    // stream (rc2: ~1.4 ms a frame waiting there; gpu.h).
+    std::uint64_t ticket = 0;
+    bool priority = false;
+    const std::uint64_t need = g_present_submit_always ? ~0ull : flip.submit_need;
+    if (host_gpu_presenter_priority_ok(need, stream_mark)) {
+        priority = true;
         host_gpu_unlock();
         locked = false;
-        host_gpu_wait_submitted(ticket);
+        host_gpu_submit_presenter_priority(g_vk.cmd, by_fence ? nullptr : acquire_sem, wait_stage, rendered, g_vk.fence, need);
     } else {
-        host_gpu_queue_lock();
-        vkQueueSubmit(g_vk.queue, 1, &si, g_vk.fence);
-        host_gpu_queue_unlock();
-        host_gpu_unlock();
-        locked = false;
+        ticket = host_gpu_submit_presenter(g_vk.cmd, by_fence ? nullptr : acquire_sem, wait_stage, rendered, g_vk.fence);
+        if (ticket) {
+            host_gpu_unlock();
+            locked = false;
+        } else {
+            host_gpu_queue_lock();
+            vkQueueSubmit(g_vk.queue, 1, &si, g_vk.fence);
+            host_gpu_queue_unlock();
+            host_gpu_unlock();
+            locked = false;
+        }
     }
-    const auto t_submitted = std::chrono::steady_clock::now();
+    // rc3: the pacer's wait overlaps the wait for a queued blit to go in -
+    // they were back to back (submit, then pacer). The pacer judges the
+    // frame ready when its blit is recorded (and, by the priority path,
+    // submitted); the present waits for both. Not with
+    // BBHOST_PRESENT_GPU_WAIT, which waits for the GPU in between.
+    std::int64_t pace_wait = 0, t_pre_ns = 0;
+    auto t_submitted = std::chrono::steady_clock::now();
+    if (!g_vk.gpu_wait) {
+        const std::int64_t until = pace_slot(pace_now_ns());
+        if (ticket) {
+            if (until && host_gpu_wait_submitted_until(ticket, until)) {
+                t_submitted = std::chrono::steady_clock::now();
+            } else {
+                host_gpu_wait_submitted(ticket);
+                t_submitted = std::chrono::steady_clock::now();
+            }
+        }
+        if (until) pace_wait = pace_until(until);
+    } else if (ticket) {
+        host_gpu_wait_submitted(ticket);
+        t_submitted = std::chrono::steady_clock::now();
+    }
+    const auto t_gpu_wait0 = std::chrono::steady_clock::now();
     // The frame done on the GPU before the present is asked for, on no lock
     // (BBHOST_PRESENT_GPU_WAIT). Bounded: a lost device signals nothing.
     if (g_vk.gpu_wait) {
@@ -1199,6 +1282,10 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
         vkWaitForFences(g_vk.device, 1, &g_vk.fence, VK_TRUE, 1000000000ull);
     }
     const auto t_gpu_done = std::chrono::steady_clock::now();
+    if (g_vk.gpu_wait) {
+        const std::int64_t until = pace_slot(pace_now_ns());
+        if (until) pace_wait = pace_until(until);
+    }
     // The present itself goes on this thread's own queue, with no lock: it can
     // block - Xvfb copies the image inside it, ~20 ms a frame, and a full FIFO
     // waits for the display - and under the renderer's lock that held the
@@ -1209,10 +1296,13 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     // processor's own submits there.
     // test11: the present held to its slot on the pace's grid, on no lock
     // (BBHOST_PRESENT_PACE; the A/B halves' intervals logged from here).
-    pace_ab_note(pace_present());
+    // rc3: the pacer told the time just before the present call.
+    t_pre_ns = pace_now_ns();
+    pace_presented(t_pre_ns);
+    pace_ab_note(t_pre_ns);
     bool queue_held = false;
     if (!g_vk.present_queue) {
-        if (!ticket) {
+        if (!ticket && !priority) {
             host_gpu_lock();
             locked = true;
         }
@@ -1251,14 +1341,14 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     static std::uint64_t flush_us = 0, lock_us = 0, blit_us = 0, submit_us = 0, queue_present_us = 0;
     static auto last = std::chrono::steady_clock::now();
     wait_us += us(t_enter, t_acquired);
-    work_us += us(t_acquired, t_submitted) + us(t_gpu_done, t_presented);
+    work_us += us(t_acquired, t_submitted) + us(t_gpu_done, t_presented);  // (rc3: the pacer's wait is in the second part)
     flush_us += us(t_acquired, t_flushed);
     lock_us += us(t_flushed, t_locked);
     blit_us += us(t_locked, t_recorded);
     submit_us += us(t_recorded, t_submitted);
     queue_present_us += us(t_gpu_done, t_presented);
     PresentStats& ps = g_pstats;
-    ps.gpu_wait_us += us(t_submitted, t_gpu_done);
+    ps.gpu_wait_us += us(t_gpu_wait0, t_gpu_done);
     if (flip.arrived_ns) {
         const auto now_ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(t_presented.time_since_epoch()).count());
@@ -1270,9 +1360,20 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     ps.on_arrival += flip.on_arrival;
     ps.cpu_ns += host_thread_cpu_ns() - cpu_enter;
     // rc2: the frame into the performance capture's ring (what MangoHud times).
-    perf::note_present(static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_presented.time_since_epoch()).count()),
-                       static_cast<std::int64_t>(flip.arrived_ns), g_present_dropped.load(std::memory_order_relaxed),
-                       g_present_waits.load(std::memory_order_relaxed), g_present_wait_ns.load(std::memory_order_relaxed));
+    {
+        perf::PresentSplit split;
+        const auto ns_of = [](std::chrono::steady_clock::time_point t) {
+            return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
+        };
+        if (flip.arrived_ns) split.record_ns = std::max<std::int64_t>(0, ns_of(t_recorded) - static_cast<std::int64_t>(flip.arrived_ns));
+        split.submit_ns = std::max<std::int64_t>(0, ns_of(t_submitted) - ns_of(t_recorded));
+        split.pace_ns = pace_wait;
+        split.present_ns = std::max<std::int64_t>(0, ns_of(t_presented) - t_pre_ns);
+        split.priority = priority;
+        perf::note_present(ns_of(t_presented), static_cast<std::int64_t>(flip.arrived_ns), g_present_dropped.load(std::memory_order_relaxed),
+                           g_present_waits.load(std::memory_order_relaxed), g_present_wait_ns.load(std::memory_order_relaxed), split);
+        pacer_publish();
+    }
     if (++presents % 300 == 0) {
         const auto now = std::chrono::steady_clock::now();
         const long long win_ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count());
@@ -2583,9 +2684,11 @@ void host_present(int buffer_index, std::uint64_t display_va, unsigned display_w
     if (g_active) {
         std::unique_lock<std::mutex> lk(g_present_mu);
         if (!g_present_thread.joinable()) g_present_thread = std::thread(present_thread_main);
-        // Only the command processor's frames wait (flip.on_arrival): the
-        // vblank thread's must never block.
-        if (g_present_next.has && g_frame_latency_limit && flip.on_arrival && !g_present_quit) {
+        // Only the command processor's frames wait (flip.from_cp): the
+        // vblank thread's must never block. rc2 gated this on on_arrival,
+        // which only the capped (30/60) branch sets - at 90/120 the game runs
+        // uncapped and rc2 never waited (rc2's Dream: 25 drops, 0 waits).
+        if (g_present_next.has && g_frame_latency_limit && flip.from_cp && !g_present_quit) {
             const int fps = frame_rate_game_fps();
             const auto bound = std::chrono::microseconds(std::max(20000, fps > 0 ? 2000000 / fps : 20000));
             const auto t0 = std::chrono::steady_clock::now();

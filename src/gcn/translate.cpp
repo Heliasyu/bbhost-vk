@@ -801,14 +801,25 @@ struct Translator {
     // n dwords of buffers[index] from dword `first_dw` of the V# (whose base
     // sits in SGPRs [reg, reg + 1]): from the storage-buffer binding when the
     // host bound it, otherwise the page-table walk at `guest_u64`.
-    std::vector<Id> read_bound(std::size_t index, int reg, Id first_dw, int n, Id guest_u64) {
+    // rc3 `clamp`: each dword's index held inside the binding (its array
+    // length) - for a load whose element size is only known at run time
+    // (buffer_load_format_* with the format in the V#), which reads the most
+    // a format can need; the dwords a smaller format does not use may then
+    // repeat the last one, and are not used.
+    Id clamp_bound(std::size_t index, Id at) {
+        const Id len = m.emit(spv::OpArrayLength, t_u32, {buffer_vars[index], 0u});
+        const Id last = m.emit(spv::OpISub, t_u32, {m.ext_inst(t_u32, spv::GlslUMax, {len, c_one_u}), c_one_u});
+        return m.ext_inst(t_u32, spv::GlslUMin, {at, last});
+    }
+    std::vector<Id> read_bound(std::size_t index, int reg, Id first_dw, int n, Id guest_u64, bool clamp = false) {
         res.buffer_at[cur_offset] = static_cast<std::uint32_t>(index);
         buffer_sites.push_back({reg, index, sym_key(sym_of(reg)), sym_key(sym_of(reg + 1)), def_seq++, cur_block});
         if (opt.cb_no_fallback) {
             const Id bias = params_u32(4, index);
             std::vector<Id> vals;
             for (int k = 0; k < n; ++k) {
-                const Id at = iadd(bias, iadd(first_dw, cu(static_cast<std::uint32_t>(k))));
+                Id at = iadd(bias, iadd(first_dw, cu(static_cast<std::uint32_t>(k))));
+                if (clamp) at = clamp_bound(index, at);
                 vals.push_back(m.load(t_u32, m.access_chain(p_ssbo_u32, buffer_vars[index], {c_zero_u, at})));
             }
             return vals;
@@ -822,7 +833,8 @@ struct Translator {
         m.label(l_bound);
         const Id bias = params_u32(4, index);
         for (int k = 0; k < n; ++k) {
-            const Id at = iadd(bias, iadd(first_dw, cu(static_cast<std::uint32_t>(k))));
+            Id at = iadd(bias, iadd(first_dw, cu(static_cast<std::uint32_t>(k))));
+            if (clamp) at = clamp_bound(index, at);
             m.store(vars[static_cast<std::size_t>(k)], m.load(t_u32, m.access_chain(p_ssbo_u32, buffer_vars[index], {c_zero_u, at})));
         }
         m.emit_void(spv::OpBranch, {l_merge});
@@ -2150,7 +2162,7 @@ struct Translator {
     }
     void mubuf(const Inst& in) {
         const std::uint32_t op = in.op;
-        if (op < 112) note_walk(mnemonic(in) + buffer_walk_form(in));
+        if (op < 112 && op > 3) note_walk(mnemonic(in) + buffer_walk_form(in));  // (0-3: below, when not bound)
         if ((op >= 4 && op <= 7) || (op >= 24 && op <= 31) || (op >= 48 && op < 112)) note_store(in);
         auto load_n = [&](int n) {
             const BufferAddr ba = buffer_address(in);
@@ -2167,10 +2179,18 @@ struct Translator {
         };
         switch (op) {
         case 0: case 1: case 2: case 3: {  // buffer_load_format_*: format from V#
-            const BufferAddr ba = buffer_address(in);
-            const Id w3 = read_s(in.srsrc + 3, in);
-            const Id dfmt = ubfe(w3, 15, 4), nfmt = ubfe(w3, 12, 3);
-            std::vector<Id> comps = format_load_dynamic(ba.addr, dfmt, nfmt, 4);
+            // rc3: indexed into a traced V#, from its storage-buffer binding
+            // as tbuffer_load_format_* is (the walk stays the fallback when
+            // the host leaves it unbound).
+            std::vector<Id> comps;
+            Id w3 = 0;
+            if (!indexed_buffer_load(in, comps, w3, true)) {
+                note_walk(mnemonic(in) + buffer_walk_form(in) + indexed_reject);
+                const BufferAddr ba = buffer_address(in);
+                w3 = read_s(in.srsrc + 3, in);
+                comps = format_load_dynamic(ba.addr, ubfe(w3, 15, 4), ubfe(w3, 12, 3), 4);
+            }
+            const Id nfmt = ubfe(w3, 12, 3);
             const Id is_int = bor(ieq(nfmt, cu(4)), ieq(nfmt, cu(5)));
             write_swizzled(in.vdata, static_cast<int>(op) + 1, comps, w3, is_int);
             break;
@@ -2369,7 +2389,13 @@ struct Translator {
     const char* indexed_reject = "";  // why indexed_buffer_load declined the last load, for TranslateResult::walks
     Id cb_w3_spec[kMaxBuffers] = {};   // the specialization constant of each buffer's word 3, once used
     Id cb_stride_spec[kMaxBuffers] = {};  // and of its stride (kCbStrideSpecId)
-    bool indexed_buffer_load(const Inst& in, std::vector<Id>& comps, Id& w3) {
+    // rc3 `dynamic_format`: MUBUF buffer_load_format_* (the format in the
+    // V#'s word 3, read at run time): four dwords read, each held inside the
+    // binding, decoded as format_load_dynamic decodes them. rc2 sent every
+    // MUBUF load through the page table - YEBIS's post-chain vertex shaders'
+    // buffer_load_format_xy from a table, 1,500-4,370 instructions and three
+    // dependent loads a dword (docs/vk/DEVLOG.md, rc3).
+    bool indexed_buffer_load(const Inst& in, std::vector<Id>& comps, Id& w3, bool dynamic_format = false) {
         int count = 0, bits[4] = {};
         const auto reject = [&](const char* why) {
             indexed_reject = why;
@@ -2377,8 +2403,14 @@ struct Translator {
         };
         if (!opt.cb_ssbo) return reject("");
         if (!in.idxen || in.offen || in.addr64) return reject(", offset register or 64-bit address");
+        if (dynamic_format && (in.lds || in.tfe)) return reject(", to LDS or with tfe");
         if (in.soffset < 128 || in.soffset > 208) return reject(", register offset");
-        if (!format_layout(in.dfmt, count, bits)) return reject(", unknown format");
+        if (dynamic_format) {
+            count = 4;
+            bits[0] = bits[1] = bits[2] = bits[3] = 32;
+        } else if (!format_layout(in.dfmt, count, bits)) {
+            return reject(", unknown format");
+        }
         const std::int32_t constant = in.soffset <= 192 ? static_cast<std::int32_t>(in.soffset) - 128 : 192 - static_cast<std::int32_t>(in.soffset);
         const std::int32_t off = static_cast<std::int32_t>(in.offset12) + constant;
         ResourcePath path;
@@ -2402,13 +2434,18 @@ struct Translator {
         const Id first = iadd(cu(static_cast<std::uint32_t>(off / 4)), imul(ld(vgpr_var(in.vaddr)), stride_dw));
         // The element's guest address feeds only the fallback walk.
         const Id guest = opt.cb_no_fallback ? m.const_u64(0) : buffer_address(in).addr;
-        comps = format_decode(read_bound(index, in.srsrc, first, nwords, guest), in.dfmt, in.nfmt, 4);
+        const std::vector<Id> words = read_bound(index, in.srsrc, first, nwords, guest, dynamic_format);
         if (opt.cb_no_fallback) {
             Id& spec = cb_w3_spec[index];  // translate.h kCbW3SpecId
             if (!spec) spec = m.spec_const_u32(0, kCbW3SpecId + static_cast<std::uint32_t>(index));
             w3 = sel(ine(spec, c_zero_u), spec, params_u32(6, index));
         } else {
             w3 = sel(buffer_bound(index), params_u32(6, index), read_s(in.srsrc + 3, in));
+        }
+        if (dynamic_format) {
+            comps = format_decode_dynamic(words, ubfe(w3, 15, 4), ubfe(w3, 12, 3), 4);
+        } else {
+            comps = format_decode(words, in.dfmt, in.nfmt, 4);
         }
         return true;
     }
@@ -2505,10 +2542,13 @@ struct Translator {
     }
     // Dynamic format (from V#): supports the 32-bit and 16-bit families; others load raw dwords.
     std::vector<Id> format_load_dynamic(Id addr, Id dfmt, Id nfmt, int want) {
-        std::vector<Id> out;
         // Select stride/width by dfmt at runtime: handle 32, 32_32, 32_32_32, 32_32_32_32 (raw floats),
         // 16, 16_16, 16_16_16_16 (float16 or unorm), 8_8_8_8 (unorm) — common vertex/format cases.
-        const std::vector<Id> words = load_u32_any(addr, want);
+        return format_decode_dynamic(load_u32_any(addr, want), dfmt, nfmt, want);
+    }
+    // The dwords of one element (`want` of them) in the run-time format.
+    std::vector<Id> format_decode_dynamic(const std::vector<Id>& words, Id dfmt, Id nfmt, int want) {
+        std::vector<Id> out;
         const Id w0 = words[0];
         const Id w1 = want > 1 ? words[1] : w0;
         const Id w2 = want > 2 ? words[2] : w0;

@@ -1714,3 +1714,84 @@ for optimizations, and compile tracking in the snapshots.
   - lavapipe lacks VK_KHR_pipeline_executable_properties, so the shader-stats path logs
     that and does nothing. RGP needs RADV.
   - Neither ran on the hardware here.
+
+---
+
+## 2026-10-19 (Mon), vk.1-rc3: pacing, presenter submit, occlusion resolve, walks
+
+The second build of the night. Rule: optimizations are permanent (no new switches);
+`BBHOST_*` variables only for debugging.
+
+### Done
+- **Latency limit, uncapped path:** `PresentFlip::from_cp` (video.cpp) marks flips the
+  command processor recorded itself. `host_present` waits on them as on the capped ones.
+  The capped path's queued copy has `from_cp = false`.
+- **Pacer (`temporal/present_pacer.h`):**
+  - Fed `t_pre` (just before `vkQueuePresentKHR`).
+  - A window of 30 judges on the 3rd-earliest early time (`nth_element`).
+  - The creep is dropped only if more than a quarter of the window arrived late.
+  - While the last present was on time, an arrival more than 1 ms early pulls the grid in
+    by `min(early - 1 ms, 0.5 ms)`.
+  - `present_pacer_test` has new cases: "late-per-window" and "pull".
+  - window.cpp splits it into `pace_slot` / `pace_until` / `pace_presented`, so the pacer
+    wait overlaps `host_gpu_wait_submitted_until`.
+- **Presenter priority submit (gpu.cpp):**
+  - `host_gpu_stream_mark()` is the recorder's activity counter plus `g.flushes`, taken
+    after `host_gpu_lock`.
+  - If it is unchanged when the blit is recorded, nothing was appended to the stream in
+    between. The presenter waits on `g_sub_idle` until `g_stream_submitted >= need`
+    (2 s cap), then submits on `g.queue` under `queue_mu`.
+  - Otherwise it uses the stream's kForeignSubmit op, as in rc2.
+  - Rejected: a separate present queue. The blit reads the renderer's images, and so would
+    need cross-queue semaphores on every game submission.
+- **Occlusion resolve (`shaders/occlusion.comp`):**
+  - A 64-lane workgroup: each lane sums its chunk into LDS, lane 0 runs the ordered scan,
+    then each lane writes its chunk's dumps.
+  - The host flags a slot serial when a dump address repeats or overlaps (16-byte steps
+    under 128 B). In that slot, lane 0 does everything, because a later dump may not be
+    ready and the earlier write must stay.
+  - Abandoned: skipping a repeated block's earlier write. It is wrong when the later dump
+    is not ready.
+  - Pair stats run only with flags bit 1 (`BBHOST_OCCLUSION_STATS=1`).
+  - The barrier after it covers transfer, compute, host and conditional rendering.
+  - Timestamps around the end-of-submission resolve are read back at the slot's next
+    recording.
+  - Checked against the rc2 shader on lavapipe (a standalone harness on the box): 400 random
+    cases, 168 of them serial, 0 mismatches.
+- **MUBUF bound path (translate.cpp):** `indexed_buffer_load()` takes
+  `buffer_load_format_*` (ops 0-3) with idxen:
+  - it reads 4 words clamped by `OpArrayLength`;
+  - it decodes with `format_decode_dynamic` (split out of `format_load_dynamic`);
+  - it declines lds/tfe and offen, which keep the walk;
+  - new test: `gcn_mubuf_bound_test`.
+  - render.cpp counts the pipelines whose VS still walks, the post-chain ones separately,
+    in the [walks] snapshot section.
+- **Stage manifest urgent ordering (render.cpp):** a graphics pipeline built on the
+  command processor marks its stages urgent. Save writes them first and adds a
+  `.urgent` sidecar. Load stable-partitions them to the front.
+  - Shipping a manifest entry for 52d756df+2e86d610 was rejected, because the manifest
+    holds game shader words.
+  - Note that the domain VS of host-tessellated draws is not noted in the manifest
+    (`!vs_in.tess_window`), so this may only help part of that hitch.
+- **Idle with work queued (item 7):** not fixed. Candidates that can't be told apart on the
+  box:
+  - per-submission kernel/firmware overhead;
+  - end-of-IB cache flushes for the userptr memory;
+  - userptr revalidation (MMU notifier, NUMA balancing).
+  - Implicit sync is unlikely: same process, same entity.
+  - Added: a per-serial flag (`g_sub_occl`) for "this submission ended with an occlusion
+    resolve". The busy meter splits queued gaps into after-resolve, after-present and
+    other: `gpu idle:` lines, snapshot [gpu_idle], `gpu_gaps.py --idle`.
+  - If the after-resolve share dominates, the narrowed barrier or the resolve's position
+    is the next thing to move. If it is spread evenly, it is per-submission overhead, and
+    the answer is fewer submissions.
+- **Not done:**
+  - Bloom pass 1 at render size. CA (84b3a182+3c2b7974) runs every frame and bloom #10
+    reads CA's 4K output, so moving it would feed it the pre-CA, jittered image.
+  - FSR on async compute: not confident in the cross-queue hand-off.
+
+### Verified here
+- 52/52 ctest (19 skipped as before: they need the game's files).
+- `--stream-selftest`, `=2` with BBHOST_FSR4_FEATURES=1 and `=20`: pass, with the same 10
+  upstream SYNC-HAZARD lines.
+- None of it ran on the hardware here.

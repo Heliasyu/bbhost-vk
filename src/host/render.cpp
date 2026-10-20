@@ -1461,6 +1461,26 @@ RtImage* post_shadow_locked(const RtImage& real) {
     return &made;
 }
 
+// rc3: pipelines (each bound variant, once) whose vertex shader keeps
+// page-table walks (render.cpp, the draw's profile name), and the post
+// chain's: perf section [walks].
+struct WalkPipelines {
+    std::atomic<std::uint64_t> pipelines{0}, vs_walking{0}, post{0}, post_vs_walking{0};
+    std::mutex mu;
+    std::vector<std::string> post_names;
+} g_walk_pl;
+std::string walk_section() {
+    char b[512];
+    std::snprintf(b, sizeof(b), "pipelines=%llu vs_walking=%llu post_pipelines=%llu post_vs_walking=%llu (bound variants since start; post: "
+                  "drawn with YEBIS's CPU-written windows)",
+                  static_cast<unsigned long long>(g_walk_pl.pipelines.load()), static_cast<unsigned long long>(g_walk_pl.vs_walking.load()),
+                  static_cast<unsigned long long>(g_walk_pl.post.load()), static_cast<unsigned long long>(g_walk_pl.post_vs_walking.load()));
+    std::string out = b;
+    std::lock_guard<std::mutex> lk(g_walk_pl.mu);
+    for (const std::string& n : g_walk_pl.post_names) out += "\npost_vs_walks: " + n;
+    return out;
+}
+const bool g_walk_section = (perf::add_section("walks", walk_section), true);
 std::map<std::string, std::uint64_t> g_post_fallback_by;  // rc2: why frames fell back (snapshots)
 void post_fallback(const char* why) {
     ++g_post_stats.fallbacks;
@@ -3810,6 +3830,10 @@ struct StageManifest {
     std::unordered_map<std::uint64_t, std::shared_ptr<const ManifestStage>> by_key;  // under mu
     std::unordered_set<std::uint64_t> ready;                                         // under mu: compiled at this start
     bool dirty = false;                                                               // under mu
+    // rc3: the stage names of pipelines a frame waited on (built on the
+    // command processor), this run's and earlier runs' (<manifest>.urgent):
+    // their stages are written first, so the next start compiles them first.
+    std::unordered_set<std::string> urgent;                                           // under mu
     std::atomic<std::uint64_t> loaded{0}, compiled{0}, failed{0}, recorded{0}, hits{0}, compile_us{0};
 };
 StageManifest g_manifest;
@@ -3826,6 +3850,21 @@ void manifest_add(std::uint64_t key, std::shared_ptr<const ManifestStage> m) {
     if (g_manifest.by_key.size() >= kManifestMax || !g_manifest.by_key.emplace(key, std::move(m)).second) return;
     g_manifest.dirty = true;
     g_manifest.recorded.fetch_add(1, std::memory_order_relaxed);
+}
+// rc3: a pipeline the command processor waited for: its stages ("vs+ps",
+// each name up to its first '~' or '+') first in the manifest.
+void stage_manifest_urgent(const std::string& pipeline) {
+    if (!stage_manifest_on()) return;
+    std::lock_guard<std::mutex> lk(g_manifest.mu);
+    if (g_manifest.urgent.size() >= 256) return;
+    std::size_t from = 0;
+    while (from < pipeline.size()) {
+        std::size_t to = pipeline.find_first_of("+~", from);
+        if (to == std::string::npos) to = pipeline.size();
+        if (to > from && g_manifest.urgent.insert(pipeline.substr(from, to - from)).second) g_manifest.dirty = true;
+        if (to >= pipeline.size() || pipeline[to] == '~') break;
+        from = to + 1;
+    }
 }
 void manifest_note_ps(std::uint64_t key, const std::string& name, const PsStageInputs& in, bool lift) {
     if (!stage_manifest_on()) return;
@@ -6072,6 +6111,7 @@ bool create_gfx_pipeline(GfxPipeline& pl, const DrawState& s, const VertexInputP
     if (!t_pipeline_worker) g_pl_create_us.fetch_add(pl_us_since(t0), std::memory_order_relaxed);
     // rc2: into the performance capture; one the command processor builds holds its frame up.
     perf::note_compile("graphics", pl.name, pl_us_since(t0), t_pipeline_worker, !t_pipeline_worker);
+    if (!t_pipeline_worker) stage_manifest_urgent(pl.name);
     // Slow driver compiles, with what might make them slow: the stages'
     // SPIR-V sizes and whether this is the page-table fallback or the
     // no-fallback variant.
@@ -14094,7 +14134,24 @@ static bool draw_impl(const GpuDraw& d) {
     }
     if (bind_pl->profile_name.empty()) {
         const bool walks = !bind_pl->vs.meta().walks.empty() || !bind_pl->ps.meta().walks.empty();
-        bind_pl->profile_name = pl.name + (bind_pl->lean ? "" : "~fallback") + (walks ? "~walks" : "");
+        // rc3: "~fallback" only where a lean variant could exist - a pipeline
+        // with no constant buffers has nothing to fall back from (rc2
+        // labelled every one of those ~fallback).
+        const bool has_cbs = !bind_pl->vs.meta().buffers.empty() || !bind_pl->ps.meta().buffers.empty();
+        bind_pl->profile_name = pl.name + (bind_pl->lean || !has_cbs ? "" : "~fallback") + (walks ? "~walks" : "");
+        // rc3: how many pipelines' vertex shaders still walk the page table -
+        // all of them, and the post chain's (YEBIS: drawn with CPU-written
+        // windows) - for the snapshots ([walks]) and the exit report.
+        const bool vs_walks = !bind_pl->vs.meta().walks.empty();
+        const bool post = !t_draw_windows.empty();
+        g_walk_pl.pipelines.fetch_add(1, std::memory_order_relaxed);
+        if (vs_walks) g_walk_pl.vs_walking.fetch_add(1, std::memory_order_relaxed);
+        if (post) g_walk_pl.post.fetch_add(1, std::memory_order_relaxed);
+        if (post && vs_walks) {
+            g_walk_pl.post_vs_walking.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lk(g_walk_pl.mu);
+            if (g_walk_pl.post_names.size() < 24) g_walk_pl.post_names.push_back(pl.name);
+        }
         static int logs = 0;  // under g.mu
         if (walks && logs < 400) {
             ++logs;
@@ -15675,6 +15732,20 @@ void stage_manifest_load(const std::string& path) {
         if (!manifest_file::read(r, *m)) break;
         stages.push_back(std::move(m));
     }
+    // rc3: the stages of pipelines a frame waited on, first (<manifest>.urgent).
+    std::size_t urgent_n = 0;
+    {
+        std::ifstream u(path + ".urgent");
+        std::string line;
+        std::lock_guard<std::mutex> lk(g_manifest.mu);
+        while (std::getline(u, line) && g_manifest.urgent.size() < 256) {
+            if (!line.empty()) g_manifest.urgent.insert(line);
+        }
+        const auto first = std::stable_partition(stages.begin(), stages.end(), [](const std::shared_ptr<const ManifestStage>& m) {
+            return m->stage < 2 && !m->name.empty() && g_manifest.urgent.count(m->name) != 0;
+        });
+        urgent_n = static_cast<std::size_t>(first - stages.begin());
+    }
     Precompiler& w = precompiler();
     {
         std::lock_guard<std::mutex> lk(g_manifest.mu);
@@ -15692,7 +15763,8 @@ void stage_manifest_load(const std::string& path) {
     }
     g_manifest.loaded.store(stages.size());
     w.cv.notify_all();
-    host_log("render: stage manifest: %zu stages from earlier runs queued for their compile", stages.size());
+    host_log("render: stage manifest: %zu stages from earlier runs queued for their compile (%zu first: a frame waited on their pipeline)",
+             stages.size(), urgent_n);
 }
 
 // The whole manifest, when stages were recorded since the last write.
@@ -15708,11 +15780,21 @@ void stage_manifest_save(const std::string& path) {
         out.u32(manifest_file::kMagic);
         out.u32(manifest_file::kVersion);
         out.u32(static_cast<std::uint32_t>(g_manifest.by_key.size()));
-        for (int pass = 0; pass < 2; ++pass) {  // stages, then paths: a reader that knows only stages stops at the first paths entry
+        // Stages, then paths: a reader that knows only stages stops at the
+        // first paths entry. rc3: the urgent stages before the rest.
+        const auto urgent = [](const ManifestStage& m) { return m.stage < 2 && !m.name.empty() && g_manifest.urgent.count(m.name) != 0; };
+        for (int pass = 0; pass < 3; ++pass) {
             for (const auto& [key, m] : g_manifest.by_key) {
-                if ((m->stage >= 2) == (pass == 1)) manifest_file::write(out, *m);
+                const int p = m->stage >= 2 ? 2 : urgent(*m) ? 0 : 1;
+                if (p == pass) manifest_file::write(out, *m);
             }
         }
+        std::ofstream u(path + ".urgent.tmp", std::ios::trunc);
+        for (const std::string& name : g_manifest.urgent) u << name << "\n";
+    }
+    {
+        std::error_code uec;
+        std::filesystem::rename(path + ".urgent.tmp", path + ".urgent", uec);
     }
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);

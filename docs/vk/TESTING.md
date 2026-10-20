@@ -149,6 +149,39 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## Snapshot additions (rc3)
+- `flip_to_present_split:` in the summary gives the averages and maxima of `record` (the
+  blit), `submit` (until its work is in the queue), `pacer` (the wait) and `present`
+  (`vkQueuePresentKHR`).
+- [frames] has 5 more columns: record_ms, submit_ms, pacer_ms, present_call_ms, priority.
+- New sections (totals since start):
+  - **[present]:** the pacer (creep, the window's 3rd-earliest early time, late arrivals
+    and presents, pulls), the blit's priority/stream counts, and the latency-limit waits;
+  - **[occlusion]:** resolve GPU µs;
+  - **[walks]:** the pipelines whose VS still walks page tables, the post chain's by name;
+  - **[gpu_idle]:** the GPU idle with work queued, also split by whether an occlusion
+    resolve or a present came before.
+- Debugging variables (no menu entries): `BBHOST_PRESENT_PRIORITY=0` (the blit always goes
+  through the stream) and `BBHOST_OCCLUSION_STATS=1` (the resolve's pair statistics).
+
+## vk.1-rc3 checks (~10-15 min)
+FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
+
+1. Run `bbtest start vk1-rc3`.
+2. **Hunter's Dream, ~4 min:** walk the paths, turn the camera, and go up to the
+   workshop and back. Press F11 at every dip or stutter, and once when it is smooth.
+3. **Old Yharnam, ~6 min:** from the lamp, go down through the plaza and the church
+   area. Fire and smoke are welcome. Press F11 at every dip, and once when smooth.
+4. Watch for anything that would be a regression:
+   - flicker or wrongly missing objects (occlusion);
+   - broken or garbled post effects or HUD (the vertex fetch);
+   - a frame shown out of order or a tear-like jump (the blit's priority submit).
+   - If one appears, note where and press F11.
+5. Run `bbtest stop`, then send the session folder (`snaps/`, `summary.txt`,
+   `session.txt`, `bbhost.log`).
+6. Only if something looked wrong: repeat that spot with `BBHOST_PRESENT_PRIORITY=0` and
+   then `BBHOST_OCCLUSION_STATS=1`, and press F11 in each.
+
 ## Profiling session (rc2): `bbtest profile`
 For RADV (Mesa 25.1+ has RGP on RDNA4/GFX12; Mesa 26.2.4 here) and AMD's Radeon GPU
 Profiler (RGP) to open the captures.

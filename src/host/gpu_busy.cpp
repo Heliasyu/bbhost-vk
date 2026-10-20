@@ -56,6 +56,7 @@
 // line in the 300-flip report. BBHOST_GPU_BUSY=0 turns all of it off.
 #include "host/gpu.h"
 #include "host/gpu_internal.h"
+#include "host/perf_capture.h"
 #include "core/portable.h"
 #include "log.h"
 
@@ -85,6 +86,7 @@ struct Span {
     int source = kGame;
     bool starved = false;   // test7: the GPU had run dry when it was submitted (game)
     void* site = nullptr;   // what ended its recording (game; submit_record)
+    bool occl = false;      // rc3: it ended with an occlusion resolve (game)
 };
 
 // test7: the gaps between spans (the GPU idle with nothing of ours on it), by
@@ -119,9 +121,28 @@ struct Meter {
     // test7: the gaps (ticks, count) by kind and size (<25 us, 25-250 us, more).
     std::uint64_t gap_ticks[kGapKinds][kGapSizes] = {}, gap_n[kGapKinds][kGapSizes] = {};
     void* end_site = nullptr;                                           // the site of the span that reached union_end
+    bool end_occl = false;                                              // rc3: that span ended with an occlusion resolve
+    bool end_present = false;                                           // rc3: that span was the presenter's blit
+    std::uint64_t q_occl_ticks = 0, q_occl_n = 0;                       // rc3: queued gaps after such a span (since the report)
     std::map<void*, std::pair<std::uint64_t, std::uint64_t>> late_by_site;  // ticks, count
 };
 Meter g_meter;
+// rc3: the GPU idle with work queued, totals since start (snapshots: [gpu_idle]).
+std::atomic<std::uint64_t> g_idle_queued_ns{0}, g_idle_queued_n{0}, g_idle_queued_occl_ns{0}, g_idle_queued_occl_n{0},
+    g_idle_queued_present_ns{0}, g_idle_queued_present_n{0};
+std::string idle_section() {
+    char b[512];
+    const auto ms = [](const std::atomic<std::uint64_t>& v) { return static_cast<double>(v.load()) / 1e6; };
+    std::snprintf(b, sizeof(b),
+                  "idle_with_queued: ms=%.1f gaps=%llu after_occlusion_resolve_ms=%.1f gaps=%llu after_present_ms=%.1f gaps=%llu "
+                  "(totals since start: the GPU idle between two of our command buffers when the second was already submitted; "
+                  "the 300-flip `gpu idle:` lines in [log] have each window's, `queued` and `queued after an occlusion resolve`)",
+                  ms(g_idle_queued_ns), static_cast<unsigned long long>(g_idle_queued_n.load()), ms(g_idle_queued_occl_ns),
+                  static_cast<unsigned long long>(g_idle_queued_occl_n.load()), ms(g_idle_queued_present_ns),
+                  static_cast<unsigned long long>(g_idle_queued_present_n.load()));
+    return b;
+}
+const bool g_idle_section = (perf::add_section("gpu_idle", idle_section), true);
 
 // The presenter's pair: it has one command buffer, and waits for its fence
 // before recording it again.
@@ -161,8 +182,24 @@ void count_locked(Meter& m, const Span& s) {
             e.first += gap;
             ++e.second;
         }
+        if (kind == kGapQueued) {  // rc3: the GPU idle with work queued (snapshots: [gpu_idle])
+            const std::uint64_t ns = static_cast<std::uint64_t>(static_cast<double>(gap) * m.tick_ns);
+            g_idle_queued_ns.fetch_add(ns, std::memory_order_relaxed);
+            g_idle_queued_n.fetch_add(1, std::memory_order_relaxed);
+            if (m.end_occl) {
+                m.q_occl_ticks += gap;
+                ++m.q_occl_n;
+                g_idle_queued_occl_ns.fetch_add(ns, std::memory_order_relaxed);
+                g_idle_queued_occl_n.fetch_add(1, std::memory_order_relaxed);
+            } else if (m.end_present) {
+                g_idle_queued_present_ns.fetch_add(ns, std::memory_order_relaxed);
+                g_idle_queued_present_n.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
     }
     if (s.t1 > m.union_end) {
+        m.end_occl = s.source == kGame && s.occl;
+        m.end_present = s.source == kPresenter;
         m.end_site = s.source == kGame ? s.site : nullptr;
         m.busy += s.t1 - std::max(s.t0, m.union_end);
         m.union_end = s.t1;
@@ -191,7 +228,7 @@ void drain_locked(Meter& m) {
 
 // A command buffer of `source` is done: its two raw timestamps, or `ok`
 // false when they could not be read (a lost device).
-void deliver(int source, std::uint64_t raw0, std::uint64_t raw1, bool ok, bool starved = false, void* site = nullptr) {
+void deliver(int source, std::uint64_t raw0, std::uint64_t raw1, bool ok, bool starved = false, void* site = nullptr, bool occl = false) {
     Meter& m = g_meter;
     std::lock_guard<std::mutex> lk(m.mu);
     if (m.out[source] > 0) --m.out[source];
@@ -200,6 +237,7 @@ void deliver(int source, std::uint64_t raw0, std::uint64_t raw1, bool ok, bool s
         s.source = source;
         s.starved = starved;
         s.site = site;
+        s.occl = occl;
         s.t0 = unwrap_locked(m, raw0);
         s.t1 = s.t0 + ((raw1 - raw0) & m.mask);
         // Ten seconds in one command buffer would have been a device loss:
@@ -342,7 +380,7 @@ void busy_retired_locked(Gpu::Slot& sl, bool ok) {
     const bool have = ok && read_pair(sl.busy_pool, ts);
     void* site = nullptr;
     const bool starved = submit_record(sl.serial, &site);
-    deliver(kGame, ts[0], ts[1], have, starved, site);
+    deliver(kGame, ts[0], ts[1], have, starved, site, submit_had_occlusion(sl.serial));
 }
 
 }  // namespace gpu
@@ -433,6 +471,7 @@ std::string host_gpu_idle_report() {
     const SubmitLatencyTotals lat = submit_latency_totals();
     std::uint64_t ticks[kGapKinds][kGapSizes], n[kGapKinds][kGapSizes];
     std::vector<std::pair<void*, std::pair<std::uint64_t, std::uint64_t>>> sites;
+    std::uint64_t q_occl_ticks = 0, q_occl_n = 0;
     double tick_ns = 1.0;
     {
         std::lock_guard<std::mutex> lk(g_meter.mu);
@@ -444,6 +483,9 @@ std::string host_gpu_idle_report() {
         std::memset(g_meter.gap_n, 0, sizeof(g_meter.gap_n));
         sites.assign(g_meter.late_by_site.begin(), g_meter.late_by_site.end());
         g_meter.late_by_site.clear();
+        q_occl_ticks = g_meter.q_occl_ticks;
+        q_occl_n = g_meter.q_occl_n;
+        g_meter.q_occl_ticks = g_meter.q_occl_n = 0;
     }
     const SubmitLatencyTotals prev = last;
     last = lat;
@@ -470,6 +512,9 @@ std::string host_gpu_idle_report() {
                       static_cast<double>(kn) * per_s, ms_s(ticks[k][0]), ms_s(ticks[k][1]), ms_s(ticks[k][2]));
         r += buf;
     }
+    // rc3: the queued gaps after a command buffer that ended with an occlusion resolve.
+    std::snprintf(buf, sizeof(buf), " queued after an occlusion resolve %.2f ms/s (%.0f/s);", ms_s(q_occl_ticks), static_cast<double>(q_occl_n) * per_s);
+    r += buf;
     const std::uint64_t subs = lat.n - prev.n;
     const double sn = subs ? static_cast<double>(subs) : 1.0;
     std::snprintf(buf, sizeof(buf),

@@ -229,6 +229,7 @@ alignas(64) std::uint64_t g_pk_taken = 0;               // packets taken (under 
 std::uint64_t g_done_seen = 0, g_pk_done_seen = 0;      // the producer's last reads of g_done and g_pk_done
 bool g_block_open = false;                  // the block at g_published is being appended to (under g.mu)
 bool g_inplace_dirty = false;               // recorded in place since the last publish (R3)
+std::uint64_t g_activity = 0;               // rc3: ops appended + in-place recordings (stream_activity(); under g.mu)
 DrawCmds* g_open = nullptr;  // under g.mu
 bool g_thread_started = false;
 
@@ -734,6 +735,7 @@ std::uint8_t* append_record(Op kind, std::size_t payload) {
     h->bytes = static_cast<std::uint32_t>(bytes);
     b.used += words;
     ++b.ops;
+    ++g_activity;
     ++g_counts.ops[static_cast<std::size_t>(kind)];
     return reinterpret_cast<std::uint8_t*>(h + 1);
 }
@@ -757,6 +759,7 @@ template <class T> void put_array(std::uint8_t*& at, const T* src, std::size_t n
 // replayed (under g.mu). `site` is who records, for the census and
 // BBHOST_GPU_PROFILE=2's gaps.
 VkCommandBuffer in_place(void* site) {
+    ++g_activity;
     if (g.profile_gaps) profile_note_site_locked(site);
     if (g_census_on) ++g_census[site];
     if (g_mode != kModeOff && g_blocks) {
@@ -780,6 +783,7 @@ bool warn_pnext(const char* what) {
 }  // namespace
 
 bool stream_on() { return g_mode != kModeOff && g_submit_on; }
+std::uint64_t stream_activity() { return g_activity; }
 bool recorder_enabled() { return g_mode != kModeOff; }
 
 void recorder_drain() {

@@ -36,8 +36,23 @@ bool enabled();
 void start();
 // The presenter, after each present returned. `arrived_ns`: the flip's
 // arrival (0: unknown). Totals, not deltas.
+// rc3: where the flip-to-present went - the frame's wait to be recorded
+// (arrival to its blit recorded: the presenter busy with the frame before,
+// the acquire, the lock), the blit's submit (recorded to on the queue), the
+// pacer's wait and vkQueuePresentKHR; -1 unknown. `priority`: the blit went
+// by the priority submit (gpu.h).
+struct PresentSplit {
+    std::int64_t record_ns = -1, submit_ns = -1, pace_ns = -1, present_ns = -1;
+    bool priority = false;
+};
 void note_present(std::int64_t now_ns, std::int64_t arrived_ns, std::uint64_t dropped_total, std::uint64_t cp_waits_total,
-                  std::uint64_t cp_wait_ns_total);
+                  std::uint64_t cp_wait_ns_total, const PresentSplit& split = {});
+// rc3: a section of counters written into every snapshot, from any module
+// (the pacer, the occlusion resolve, the walking vertex shaders, the GPU's
+// idle time with work queued). `fn` runs on the capture thread: it reads
+// atomics only. Register once (static init or start).
+using SectionFn = std::string (*)();
+void add_section(const char* title, SectionFn fn);
 // The last present interval (ns; 0 before two presents) - the GPU sampler
 // skips a frame after one over budget.
 std::int64_t last_interval_ns();

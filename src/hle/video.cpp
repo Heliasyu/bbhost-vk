@@ -873,6 +873,7 @@ void hle_video_finish_flip(int handle, int buffer, std::int64_t arg, bool record
     PresentFlip flip;
     flip.submit_need = recorded ? work : ~0ull;
     flip.arrived_ns = steady_ns();
+    flip.from_cp = recorded;  // rc3: the latency limit engages at 90/120 (uncapped) too
     if (!g_flip_uncapped.load() && !g_flip_loading.load(std::memory_order_relaxed)) {
         std::uint64_t display_va = 0;
         unsigned dw = 0, dh = 0;
@@ -908,7 +909,13 @@ void hle_video_finish_flip(int handle, int buffer, std::int64_t arg, bool record
                 }
             }
             flip.on_arrival = show;
-            p->flip_queue.push_back({buffer, arg, mark, gpu_need, flip, show});
+            {
+                // The queued copy is presented by the vblank thread (when not
+                // shown on arrival), which must never wait: not from_cp.
+                PresentFlip queued = flip;
+                queued.from_cp = false;
+                p->flip_queue.push_back({buffer, arg, mark, gpu_need, queued, show});
+            }
             p->pending = static_cast<int>(p->flip_queue.size());
             if (!show) return;
             if (buffer >= 0 && buffer < 16) display_va = p->buffers[buffer];

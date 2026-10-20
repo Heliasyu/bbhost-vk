@@ -2405,7 +2405,13 @@ VkImageView texture_view_uncached(const std::uint32_t* w, bool storage, bool& di
     const std::uint32_t slices = type == 10 ? depth : layers;
     if (fi.format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || slices == 0 || base == 0) {
         static std::atomic<int> logs{0};
-        if (logs.fetch_add(1) < 8) host_log("texture: unsupported T# dfmt=%u nfmt=%u type=%u %ux%u", dfmt, nfmt, type, width, height);
+        // rc3: why - rc2's "unsupported T# dfmt=6" read as an unmapped
+        // 10_11_11, which is mapped (B10G11R11): that T# had no address.
+        if (logs.fetch_add(1) < 8) {
+            host_log("texture: %s T# dfmt=%u nfmt=%u type=%u %ux%u (%s)", fi.format == VK_FORMAT_UNDEFINED ? "unsupported" : "unusable", dfmt, nfmt,
+                     type, width, height,
+                     fi.format == VK_FORMAT_UNDEFINED ? "no Vulkan format" : base == 0 ? "no address: an unbound slot" : "no size");
+        }
         g_unsupported.fetch_add(1);
         return VK_NULL_HANDLE;
     }

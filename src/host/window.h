@@ -177,6 +177,11 @@ struct PresentFlip {
     std::uint64_t submit_need = ~0ull;  // host_gpu_work_needs() when the flip arrived; ~0: not known, submit
     std::uint64_t arrived_ns = 0;       // steady clock when the flip was queued (for the flip-to-present time); 0: not known
     bool on_arrival = false;            // shown when it arrived, before its vblank completes it (BBHOST_PRESENT_ON_ARRIVAL)
+    // rc3: handed in by the command processor's thread after the frame's
+    // commands (hle_video_finish_flip recorded=true), capped or uncapped: the
+    // frame-latency limit's wait applies (host_present). The vblank thread's
+    // flips never set it - that thread must never block.
+    bool from_cp = false;
 };
 // Present one frame: copies the render target the game displays (`display_va`
 // from sceVideoOutRegisterBuffers) into the swapchain, or clears when there

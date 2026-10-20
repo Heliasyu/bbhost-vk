@@ -20,19 +20,30 @@
 //     stays as the game left it (zeroed: not ready);
 //   - a predicate reads a block back and writes whether a predicated draw
 //     goes ahead, for VK_EXT_conditional_rendering.
-// One invocation does it all: a submission has a few hundred items, and they
-// must be taken in order. T and the open interval live in a small buffer of
-// their own, so they carry across command buffers on the one queue.
+// rc3: one workgroup of 64 lanes (rc2: one invocation walked every item -
+// a few hundred to thousands a submission, serially, with a read of guest
+// memory per dump for a diagnostic). Each lane takes a contiguous chunk of
+// the items; a lane's summary (its samples, whether it holds a dump, the
+// unavailable queries before its first and after its last dump) goes to
+// LDS, and lane 0 scans the 64 summaries in order - the only serial part -
+// giving each chunk its running total T and "bad" on entry. Each lane then
+// writes its own dumps. A predicate (always the last item of its resolve:
+// occlusion.cpp resolves at once after pushing one) is taken by lane 0 after
+// every dump is written and visible. The pair statistics (how a Gnm block's
+// second dump reads) only with flags bit 1 (BBHOST_OCCLUSION_STATS=1).
+// T and the open interval live in a small buffer of their own, so they
+// carry across command buffers on the one queue.
 //
 // Compiled offline (tools/build_shaders.sh) into occlusion.spv.h.
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+const uint kLanes = 64u;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Items { uvec4 v[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Results { uint64_t v[]; };
-layout(buffer_reference, std430, buffer_reference_align = 8) buffer Words { uint64_t v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 8) coherent buffer Words { uint64_t v[]; };
 layout(buffer_reference, std430, buffer_reference_align = 8) buffer State {
     uint64_t total;  // T
     uint64_t acc;    // samples since the last dump
@@ -48,7 +59,7 @@ layout(push_constant) uniform Params {
     uint64_t state;
     uint64_t preds;    // two words a predicate: [0] draw (1) or not (0), [1] visible | unknown << 1
     uint count;
-    uint flags;  // bit 0: the queries are not precise
+    uint flags;  // bit 0: the queries are not precise; bit 1: the pair statistics (a diagnostic)
 } p;
 
 // Item kinds (occlusion.cpp, OccItem).
@@ -72,64 +83,167 @@ bool block_samples(uint64_t block, uint pipes, out uint64_t sum) {
     return true;
 }
 
+// A lane's summary of its chunk.
+shared uint64_t sh_sum[kLanes];    // samples added in the chunk
+shared uint64_t sh_tail[kLanes];   // added after its last dump
+shared uint sh_flags[kLanes];      // 1: holds a dump, 2: unavailable before its first dump (all of it with none), 4: after its last, 8: a predicate
+shared uint64_t sh_t_in[kLanes];   // the samples added before the chunk
+shared uint sh_bad_in[kLanes];
+shared uint sh_counters[12];
+
+// What an item adds to T (0 for an unavailable query, which makes its interval bad).
+uint64_t item_add(uvec4 it, Results res, out bool unavailable) {
+    unavailable = false;
+    const uint kind = it.x & 0xffu;
+    if (kind == kQuery) {
+        const uint64_t n = res.v[2u * it.y], available = res.v[2u * it.y + 1u];
+        if (available == 0ul) {
+            unavailable = true;
+            return 0ul;
+        }
+        return (p.flags & 1u) != 0u && n != 0ul ? kUnmeasured : n;
+    }
+    return kind == kPoison ? kUnmeasured : 0ul;
+}
+
 void main() {
+    const uint lane = gl_LocalInvocationID.x;
     State s = State(p.state);
-    uint64_t total = s.total, acc = s.acc;
-    bool bad = s.bad != 0u;
     Items items = Items(p.items);
     Results res = Results(p.results);
-    for (uint i = 0u; i < p.count; ++i) {
+    // flags bit 2: a block dumped twice, or overlapping another's words, in
+    // this resolve - lane 0 takes every item, in order (occlusion.cpp).
+    const uint chunk = (p.flags & 4u) != 0u ? p.count : (p.count + kLanes - 1u) / kLanes;
+    const uint b = min(lane * chunk, p.count), e = min(b + chunk, p.count);
+    if (lane < 12u) sh_counters[lane] = 0u;
+    const uint64_t base = s.total + s.acc;  // read by every lane before lane 0 rewrites the state (step 2)
+
+    // 1. The chunk's summary.
+    uint64_t sum = 0ul, tail = 0ul;
+    uint flags = 0u;
+    for (uint i = b; i < e; ++i) {
         const uvec4 it = items.v[i];
         const uint kind = it.x & 0xffu;
-        if (kind == kQuery) {
-            const uint64_t n = res.v[2u * it.y], available = res.v[2u * it.y + 1u];
-            if (available == 0ul) {
-                bad = true;
-                s.counters[kUnavailable] += 1u;
-            } else {
-                acc += (p.flags & 1u) != 0u && n != 0ul ? kUnmeasured : n;
-            }
-        } else if (kind == kPoison) {
-            acc += kUnmeasured;
-        } else if (kind == kDump) {
-            total += acc;
-            acc = 0ul;
-            if (bad) {
-                s.counters[kNotReady] += 1u;
-            } else {
-                const uint pipes = (it.x >> 8) & 0xffu;
-                const uint64_t at = uint64_t(it.y) | (uint64_t(it.z) << 32);
-                Words w = Words(at);
-                const uint64_t share = total / uint64_t(pipes), extra = total % uint64_t(pipes);
-                for (uint k = 0u; k < pipes; ++k) w.v[2u * k] = (share + (uint64_t(k) < extra ? 1ul : 0ul)) | kValid;
-                s.counters[kWritten] += 1u;
-                // The second dump of a Gnm block (at +8): how the pair reads.
-                uint64_t sum;
-                if (((it.x >> 16) & 1u) != 0u && block_samples(at - 8ul, pipes, sum)) {
-                    s.counters[sum != 0ul ? kPairsVisible : kPairsOccluded] += 1u;
-                }
-            }
-            bad = false;
+        if (kind == kDump) {
+            flags = (flags | 1u) & ~4u;
+            tail = 0ul;
         } else if (kind == kPredicate) {
-            // x: kind | pipes << 8 | draw-if-visible << 16 | continue << 17; y, z: the block; w: the predicate.
-            const uint pipes = (it.x >> 8) & 0xffu;
-            const bool if_visible = ((it.x >> 16) & 1u) != 0u, cont = ((it.x >> 17) & 1u) != 0u;
-            Preds pr = Preds(p.preds);
-            uint seen = cont ? pr.v[2u * it.w + 1u] : 0u;
-            uint64_t sum;
-            if (block_samples(uint64_t(it.y) | (uint64_t(it.z) << 32), pipes, sum)) {
-                if (sum != 0ul) seen |= 1u;
-            } else {
-                seen |= 2u;
-            }
-            // Unknown draws: a wrong "occluded" would make geometry vanish.
-            const bool draw = (seen & 2u) != 0u || (((seen & 1u) != 0u) == if_visible);
-            pr.v[2u * it.w + 1u] = seen;
-            pr.v[2u * it.w] = draw ? 1u : 0u;
-            s.counters[(seen & 2u) != 0u ? kPredUnknown : draw ? kPredDraw : kPredSkip] += 1u;
+            flags |= 8u;
+        } else {
+            bool unavailable;
+            const uint64_t a = item_add(it, res, unavailable);
+            sum += a;
+            tail += a;
+            if (unavailable) flags |= (flags & 1u) != 0u ? 4u : 2u;
         }
     }
-    s.total = total;
-    s.acc = acc;
-    s.bad = bad ? 1u : 0u;
+    sh_sum[lane] = sum;
+    sh_tail[lane] = tail;
+    sh_flags[lane] = flags;
+    barrier();
+
+    // 2. The ordered scan, on lane 0: each chunk's T and bad on entry, and
+    // the state carried to the next resolve.
+    if (lane == 0u) {
+        uint64_t t = 0ul, acc = s.acc;
+        bool bad = s.bad != 0u;
+        for (uint k = 0u; k < kLanes; ++k) {
+            sh_t_in[k] = t;
+            sh_bad_in[k] = bad ? 1u : 0u;
+            const uint f = sh_flags[k];
+            t += sh_sum[k];
+            if ((f & 1u) != 0u) {
+                bad = (f & 4u) != 0u;
+                acc = sh_tail[k];
+            } else {
+                bad = bad || (f & 2u) != 0u;
+                acc += sh_sum[k];
+            }
+        }
+        s.total = base + t - acc;
+        s.acc = acc;
+        s.bad = bad ? 1u : 0u;
+    }
+    barrier();
+
+    // 3. Each lane's dumps: T split over the DBs, valid bit set - unless a
+    // query of the interval was unavailable (the block stays not ready).
+    {
+        uint64_t total = base + sh_t_in[lane];
+        bool bad = sh_bad_in[lane] != 0u;
+        uint written = 0u, not_ready = 0u, unavailable_n = 0u;
+        for (uint i = b; i < e; ++i) {
+            const uvec4 it = items.v[i];
+            const uint kind = it.x & 0xffu;
+            if (kind == kDump) {
+                if (bad) {
+                    ++not_ready;
+                } else {
+                    const uint pipes = (it.x >> 8) & 0xffu;
+                    Words w = Words(uint64_t(it.y) | (uint64_t(it.z) << 32));
+                    const uint64_t share = total / uint64_t(pipes), extra = total % uint64_t(pipes);
+                    for (uint k = 0u; k < pipes; ++k) w.v[2u * k] = (share + (uint64_t(k) < extra ? 1ul : 0ul)) | kValid;
+                    ++written;
+                }
+                bad = false;
+            } else if (kind != kPredicate) {
+                bool unavailable;
+                total += item_add(it, res, unavailable);
+                if (unavailable) {
+                    bad = true;
+                    ++unavailable_n;
+                }
+            }
+        }
+        if (written != 0u) atomicAdd(sh_counters[kWritten], written);
+        if (not_ready != 0u) atomicAdd(sh_counters[kNotReady], not_ready);
+        if (unavailable_n != 0u) atomicAdd(sh_counters[kUnavailable], unavailable_n);
+    }
+    // Every dump written and visible to the workgroup before a predicate or
+    // the statistics read a block back.
+    memoryBarrierBuffer();
+    barrier();
+
+    // 4. The pair statistics (a diagnostic, flags bit 1): each lane its own
+    // chunk's second dumps of a Gnm block.
+    if ((p.flags & 2u) != 0u) {
+        for (uint i = b; i < e; ++i) {
+            const uvec4 it = items.v[i];
+            if ((it.x & 0xffu) != kDump || ((it.x >> 16) & 1u) == 0u) continue;
+            uint64_t sum2;
+            const uint pipes = (it.x >> 8) & 0xffu;
+            if (block_samples((uint64_t(it.y) | (uint64_t(it.z) << 32)) - 8ul, pipes, sum2))
+                atomicAdd(sh_counters[sum2 != 0ul ? kPairsVisible : kPairsOccluded], 1u);
+        }
+    }
+
+    // 5. Predicates, in order, on lane 0 (only the chunks that hold one).
+    if (lane == 0u) {
+        for (uint k = 0u; k < kLanes; ++k) {
+            if ((sh_flags[k] & 8u) == 0u) continue;
+            const uint kb = min(k * chunk, p.count), ke = min(kb + chunk, p.count);
+            for (uint i = kb; i < ke; ++i) {
+                const uvec4 it = items.v[i];
+                if ((it.x & 0xffu) != kPredicate) continue;
+                // x: kind | pipes << 8 | draw-if-visible << 16 | continue << 17; y, z: the block; w: the predicate.
+                const uint pipes = (it.x >> 8) & 0xffu;
+                const bool if_visible = ((it.x >> 16) & 1u) != 0u, cont = ((it.x >> 17) & 1u) != 0u;
+                Preds pr = Preds(p.preds);
+                uint seen = cont ? pr.v[2u * it.w + 1u] : 0u;
+                uint64_t sum2;
+                if (block_samples(uint64_t(it.y) | (uint64_t(it.z) << 32), pipes, sum2)) {
+                    if (sum2 != 0ul) seen |= 1u;
+                } else {
+                    seen |= 2u;
+                }
+                // Unknown draws: a wrong "occluded" would make geometry vanish.
+                const bool draw = (seen & 2u) != 0u || (((seen & 1u) != 0u) == if_visible);
+                pr.v[2u * it.w + 1u] = seen;
+                pr.v[2u * it.w] = draw ? 1u : 0u;
+                atomicAdd(sh_counters[(seen & 2u) != 0u ? kPredUnknown : draw ? kPredDraw : kPredSkip], 1u);
+            }
+        }
+    }
+    barrier();
+    if (lane < 12u && sh_counters[lane] != 0u) s.counters[lane] += sh_counters[lane];
 }

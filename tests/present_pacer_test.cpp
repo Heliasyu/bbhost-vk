@@ -55,7 +55,7 @@ int main() {
         p.set_period(P);
         auto t = run(p, 1000, P, 900000, 0, 2, 500, 3000000);
         CHECK(t[500] - t[499] > P);
-        for (std::size_t k = 501; k < 520; ++k) CHECK(t[k] - t[k - 1] >= P - PresentPacer::kCreepNs - 1);
+        for (std::size_t k = 501; k < 520; ++k) CHECK(t[k] - t[k - 1] >= P - PresentPacer::kCreepNs - PresentPacer::kPullNs - 1);  // rc3: the pull
     }
     {  // under the pace: every frame passes straight through (no wait)
         PresentPacer p;
@@ -103,6 +103,47 @@ int main() {
         }
         std::printf("settle: wait 90 frames after a 4 ms re-anchor %.0f us\n", static_cast<double>(w60) / 1e3);
         CHECK(w60 < 300000);
+    }
+    {  // rc3: one late frame in every window must not stop the creep (rc2 zeroed it)
+        PresentPacer p;
+        p.set_period(P);
+        std::int64_t t0 = 1000000000;
+        p.wait_ns(t0 + 3000000);
+        p.presented(t0 + 3000000);
+        std::int64_t w_end = 0;
+        std::int64_t extra = 0;  // the late frames push later ones
+        for (int k = 1; k <= 600; ++k) {
+            std::int64_t a = t0 + k * P + 900000;
+            if (k % 30 == 15) a += 9000000;  // one frame a window arrives a frame late
+            const std::int64_t w = p.wait_ns(a);
+            p.presented(a + w);
+            if (k == 599) w_end = w;
+            (void)extra;
+        }
+        std::printf("late-per-window: wait at the end %.0f us, creep %lld us, pulls %llu\n", static_cast<double>(w_end) / 1e3,
+                    static_cast<long long>(p.creep_ns() / 1000), static_cast<unsigned long long>(p.pulls()));
+        CHECK(w_end < 1000000);
+    }
+    {  // rc3: the pull - a grid 4 ms behind on-time arrivals is under 1 ms within a few frames, intervals at most 0.5 ms short
+        PresentPacer p;
+        p.set_period(P);
+        std::int64_t t0 = 1000000000;
+        p.wait_ns(t0);
+        p.presented(t0);
+        std::int64_t last = t0, w8 = 0;
+        bool ok = true;
+        for (int k = 1; k <= 12; ++k) {
+            const std::int64_t a = t0 + k * P - (k >= 2 ? 4000000 : 0);
+            const std::int64_t w = p.wait_ns(a);
+            const std::int64_t t = a + w;
+            p.presented(t);
+            if (t - last < P - PresentPacer::kPullNs - PresentPacer::kCreepNs - 1) ok = false;
+            last = t;
+            if (k == 10) w8 = w;
+        }
+        std::printf("pull: wait 10 frames after arrivals moved 4 ms earlier %.0f us\n", static_cast<double>(w8) / 1e3);
+        CHECK(ok);
+        CHECK(w8 <= PresentPacer::kCapNs);
     }
     if (failures) {
         std::printf("%d failures\n", failures);
