@@ -257,7 +257,18 @@ launch() {  # launch BIN VAR=VALUE...: start the game with these variables, outp
   if [ -f "$GAME/$cfg" ] || { [ "${cfg:0:1}" = / ] && [ -f "$cfg" ]; }; then args=(--config "$cfg"); fi
   echo "args: ${args[*]}" >> "$SD/run.txt"
   event "launch $* ${args[*]}"
-  ( cd "$GAME" && exec env BBHOST_SNAP_DIR="$SD/snaps" "$@" "$LAUNCH" "${args[@]}" ) > "$SD/game.log" 2>&1 &
+  # rc6: the log on tmpfs while the game runs (a symlink in the step folder;
+  # log_settle moves it there at the exit): a write to game.log on btrfs during
+  # writeback held GXRenderThread 3-5 ms in rc5's m4. BBPROFILE_LOGDIR=DIR
+  # another folder; BBPROFILE_LOGDIR=- the step folder itself, as before.
+  local out=$SD/game.log logdir=${BBPROFILE_LOGDIR:-${XDG_RUNTIME_DIR:-/dev/shm}}
+  LOGTMP=""
+  if [ "$logdir" != - ] && [ -d "$logdir" ] && [ -w "$logdir" ]; then
+    LOGTMP=$logdir/bbprofile-$SESSION-$STEP.log
+    rm -f "$SD/game.log"; ln -s "$LOGTMP" "$SD/game.log"; out=$LOGTMP
+    echo "log: $LOGTMP while running" >> "$SD/run.txt"
+  fi
+  ( cd "$GAME" && exec env BBHOST_SNAP_DIR="$SD/snaps" "$@" "$LAUNCH" "${args[@]}" ) > "$out" 2>&1 &
   GAME_PID=$!
   sleep 3
   if ! game_alive; then
@@ -265,6 +276,13 @@ launch() {  # launch BIN VAR=VALUE...: start the game with these variables, outp
   fi
   sysmon_start
   say "[$(stamp)] game started (pid $GAME_PID, log $SD/game.log)"
+}
+LOGTMP=""
+log_settle() {  # the tmpfs log into the step folder (after the game exited)
+  [ -n "${LOGTMP:-}" ] && [ -f "$LOGTMP" ] || return 0
+  if [ -L "$SD/game.log" ]; then rm -f "$SD/game.log"; fi
+  mv -f "$LOGTMP" "$SD/game.log" 2> /dev/null || cp -f "$LOGTMP" "$SD/game.log"
+  LOGTMP=""
 }
 game_stop() {  # ask the player to close the game, or close it on Enter
   game_alive || { GAME_PID=""; return 0; }
@@ -281,6 +299,7 @@ game_wait() {  # wait up to N s for the exit, then kill
   for ((i = 0; i < $1 * 2; i++)); do game_alive || break; sleep 0.5; done
   if game_alive; then say "the game did not exit; killing it"; kill -KILL "$GAME_PID" 2> /dev/null; sleep 1; fi
   wait "$GAME_PID" 2> /dev/null; echo "exit code $?" >> "$SD/run.txt"
+  log_settle
   event "exited"
   GAME_PID=""
   sysmon_stop
@@ -382,8 +401,10 @@ countdown() {  # countdown SECONDS LABEL
 measure_two() {  # two back-to-back 30 s windows after a 5 s settle (60 s of frames)
   countdown "$(secs 35)" "first 30 s window" || return 1
   snap_request "$STEP window 1" || true
-  countdown "$(secs 30)" "second 30 s window" || return 1
+  gpuq_record_bg "$(secs 8)"  # rc6: in the second window of every step
+  countdown "$(secs 30)" "second 30 s window" || { bgperf_wait; return 1; }
   snap_request "$STEP window 2" || true
+  bgperf_wait
 }
 
 spot_text() {
@@ -452,6 +473,17 @@ cpu_profile() {  # the A1 CPU profile (the game keeps running at the spot)
   threads_dump > "$P/threads-end.txt"
   event "perf done"
 }
+gpuq_record_bg() {  # rc6: gpuq_record_bg SECONDS: the GPU scheduler's queue (job queued/run/done, CS ioctls), every step
+  [ "$PERF_OK" = 1 ] && [ "$SUDO_OK" = 1 ] || return 0
+  [ -n "$GAME_PID" ] || return 0
+  [ -f "$SD/perf/gpu-queue.data" ] && return 0
+  mkdir -p "$SD/perf"
+  event "perf gpu queue $1 s"
+  # shellcheck disable=SC2024  # the log is ours on purpose
+  sudo -n perf record -q -a -k CLOCK_MONOTONIC -o "$SD/perf/gpu-queue.data" -e 'gpu_scheduler:*' -e 'amdgpu:amdgpu_cs_ioctl' \
+    -e 'amdgpu:amdgpu_sched_run_job' -- sleep "$1" > "$SD/perf/record-gpu-queue.log" 2>&1 &
+  BGPERF_PIDS+=($!)
+}
 sched_record_bg() {  # sched_record_bg SECONDS: system-wide perf sched record in the background
   if [ "$PERF_OK" != 1 ] || [ "$SUDO_OK" != 1 ]; then say "  (no perf/sudo: no perf sched trace)"; return 0; fi
   mkdir -p "$SD/perf"
@@ -466,6 +498,7 @@ bgperf_wait() {
   for p in "${BGPERF_PIDS[@]}"; do wait "$p" 2> /dev/null; done
   BGPERF_PIDS=()
   [ -f "$SD/perf/sched.data" ] && sudo -n chown "$(id -u):$(id -g)" "$SD/perf/sched.data" 2> /dev/null
+  [ -f "$SD/perf/gpu-queue.data" ] && sudo -n chown "$(id -u):$(id -g)" "$SD/perf/gpu-queue.data" 2> /dev/null
   return 0
 }
 
@@ -571,6 +604,7 @@ step_m4() {
   countdown "$(secs 35)" "first 30 s window" || { wait_game_exit; return 1; }
   snap_request "m4 window 1" || true
   sched_record_bg "$(secs 22)"
+  gpuq_record_bg "$(secs 8)"
   countdown "$(secs 30)" "second 30 s window (perf sched running)" || { bgperf_wait; wait_game_exit; return 1; }
   snap_request "m4 window 2" || true
   bgperf_wait
@@ -692,6 +726,7 @@ cleanup() {
   trap '' INT TERM HUP
   if game_alive; then say; say "closing the game..."; kill -TERM "$GAME_PID" 2> /dev/null; game_wait 15; fi
   sysmon_stop
+  log_settle
   local p
   for p in "${BGPERF_PIDS[@]}"; do wait "$p" 2> /dev/null; done
   if [ -n "$GAME" ] && [ -d "$GAME" ]; then restore_bin; fi
