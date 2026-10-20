@@ -1049,10 +1049,19 @@ struct KeyStage {
     std::vector<std::pair<std::uint32_t, bool>> dims;  // parallel to paths_for's images
     std::vector<bool> modes;                           // parallel to its samplers
     std::vector<Words> images, samplers;
+    // vk.1-rc7: the stage memo (resolve_key_stage). Set when every binding of
+    // the last resolution came from its GX record through `memo_plan`, so the
+    // words above are those records' bytes; a draw whose plan is the same and
+    // whose records hold the same bytes gets the same lists.
+    const void* memo_paths = nullptr;
+    const void* memo_plan = nullptr;
+    bool memo_ok = false;
 };
 // Fills `out` for a stage; `paths` is null for a stage without a program. The
-// vectors keep their storage from draw to draw.
-void resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out);
+// vectors keep their storage from draw to draw. True when `out` was left as
+// it was because the same inputs gave it (the stage memo,
+// BBHOST_CP_STAGE_CACHE=0 turns it off): dims and modes are unchanged then.
+bool resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out);
 // True when `meta`, a pipeline's translation, lists the image and sampler
 // bindings of `paths` in the same order.
 bool key_stage_matches(const gcn::TranslateResult& meta, const gcn::TranslateResult& paths);

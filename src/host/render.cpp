@@ -6865,6 +6865,15 @@ PlanSlot g_plan_slots[kPlanSlots];
 constexpr std::size_t kPlanFront = 4096;
 GxStagePlan* g_plan_front[kPlanFront] = {};
 std::uint64_t g_plans_built = 0, g_plans_used = 0, g_plans_disagreed = 0, g_plans_evicted = 0;
+// BBHOST_CP_STAGE_CACHE=0: resolve every stage's key words at every draw, as
+// before rc7 (BBHOST_STAGE_CACHE is the translation cache's switch). =2
+// (checks): on every memo hit resolve again as well and count (and log the
+// first 8) disagreements.
+const int g_cp_stage_cache = [] {
+    const char* e = std::getenv("BBHOST_CP_STAGE_CACHE");
+    return e && *e ? std::atoi(e) : 1;
+}();
+std::uint64_t g_key_memo_hits = 0, g_key_memo_misses = 0, g_key_memo_off = 0, g_key_memo_disagreed = 0;  // under g.mu (draw_impl)
 // GX stages whose user data was not built because nothing would
 // read it, and those built (draw_impl). BBHOST_SKIP_USER_DATA=0 builds all.
 std::uint64_t g_ud_skipped = 0, g_ud_built = 0, g_ud_partial = 0;
@@ -7590,6 +7599,11 @@ void render_report() {
         host_log("render: binding plans: %llu built (%llu pushed out of the table), %llu reused%s",
                  static_cast<unsigned long long>(g_plans_built), static_cast<unsigned long long>(g_plans_evicted),
                  static_cast<unsigned long long>(g_plans_used), checked.c_str());
+        host_log("render: stage memo (rc7; BBHOST_CP_STAGE_CACHE=0 turns it off): %llu stages kept their key words, %llu resolved, "
+                 "%llu without a plan or with it off%s",
+                 static_cast<unsigned long long>(g_key_memo_hits), static_cast<unsigned long long>(g_key_memo_misses),
+                 static_cast<unsigned long long>(g_key_memo_off),
+                 g_cp_stage_cache == 2 ? ("; checked, disagreeing " + std::to_string(g_key_memo_disagreed)).c_str() : "");
     }
     report_gx_state_compare();
     if (g_view_extents) {
@@ -8138,25 +8152,137 @@ std::vector<std::pair<std::uint32_t, bool>> image_dims_for(const gcn::TranslateR
     return dims;
 }
 
-void resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out) {
+// vk.1-rc7: the stage memo. A binding whose plan names a GX record resolves
+// to that record's first dwords when the record's object is set, and to the
+// user-data path otherwise (resolve_planned, resolve_via_plan). planned_record
+// is the first half: the record, or null.
+const std::uint8_t* planned_record(const GxBindingPlan& p, const GxStageRecords& st) {
+    switch (p.source) {
+        case GxBindingPlan::kTex:
+            return (st.obj_tex_set >> p.slot) & 1 ? st.obj_tex + static_cast<std::size_t>(p.slot) * 32 : nullptr;
+        case GxBindingPlan::kSmp:
+            return (st.obj_smp_set >> p.slot) & 1 ? st.obj_smp + static_cast<std::size_t>(p.slot) * 32 : nullptr;
+        case GxBindingPlan::kSmpCache:
+            return ((st.obj_smp_set | st.obj_smp_default) >> p.slot) & 1 ? st.obj_smp + static_cast<std::size_t>(p.slot) * 32 : nullptr;
+        case GxBindingPlan::kCb:
+            return (st.obj_cb_set >> p.slot) & 1 ? st.obj_cb + static_cast<std::size_t>(p.slot) * 16 : nullptr;
+        case GxBindingPlan::kFallback:
+            break;
+    }
+    return nullptr;
+}
+
+
+bool resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out) {
+    if (!paths) {
+        const bool same = !out.memo_ok && out.memo_paths == nullptr && out.dims.empty() && out.modes.empty() && out.images.empty() &&
+                          out.samplers.empty();
+        out.dims.clear();
+        out.modes.clear();
+        out.images.clear();
+        out.samplers.clear();
+        out.memo_ok = false;
+        out.memo_paths = nullptr;
+        out.memo_plan = nullptr;
+        return same && g_cp_stage_cache;
+    }
+    const GxStagePlan* plan = gx && g_binding_plans ? &stage_plan(*paths, *gx) : nullptr;
+    // The memo: the last resolution of this stage took every binding from a GX
+    // record through this same plan (so its words are those records' bytes,
+    // and no user data or guest memory was read). The same plan with every
+    // record's object still set and its bytes unchanged resolves every binding
+    // to the same words again - and dims and modes are functions of the words
+    // and the bindings. Only with plans in their plain mode (=2 compares).
+    if (g_cp_stage_cache && plan && g_binding_plans == 1) {
+        if (out.memo_ok && out.memo_plan == plan && out.memo_paths == paths && out.images.size() == paths->images.size() &&
+            out.samplers.size() == paths->samplers.size()) {
+            bool same = true;
+            for (std::size_t k = 0; same && k < paths->images.size(); ++k) {
+                const std::uint8_t* rec = planned_record(plan->images[k], *gx);
+                same = rec && std::memcmp(rec, out.images[k].w, paths->images[k].r128 ? 16 : 32) == 0;
+            }
+            for (std::size_t k = 0; same && k < paths->samplers.size(); ++k) {
+                const std::uint8_t* rec = planned_record(plan->samplers[k], *gx);
+                same = rec && std::memcmp(rec, out.samplers[k].w, 16) == 0;
+            }
+            if (same && g_cp_stage_cache == 2) {
+                // The check: the full resolution into a scratch stage, compared.
+                static thread_local KeyStage check;
+                check.memo_ok = false;
+                check.dims.clear();
+                check.modes.clear();
+                check.images.clear();
+                check.samplers.clear();
+                for (std::size_t k = 0; k < paths->images.size(); ++k) {
+                    const gcn::ImageBinding& b = paths->images[k];
+                    KeyStage::Words& r = check.images.emplace_back();
+                    r.resolved = resolve_via_plan(&plan->images[k], b.path, stage_user, gx, b.r128 ? 4 : 8, r.w);
+                    check.dims.push_back(image_dim_of(b, r.resolved, r.w));
+                }
+                for (std::size_t k = 0; k < paths->samplers.size(); ++k) {
+                    const gcn::SamplerBinding& b = paths->samplers[k];
+                    KeyStage::Words& r = check.samplers.emplace_back();
+                    r.resolved = resolve_via_plan(&plan->samplers[k], b.path, stage_user, gx, 4, r.w);
+                    check.modes.push_back(r.resolved && (r.w[0] & (1u << 15)));
+                }
+                const auto words_equal = [](const std::vector<KeyStage::Words>& a, const std::vector<KeyStage::Words>& b) {
+                    if (a.size() != b.size()) return false;
+                    for (std::size_t k = 0; k < a.size(); ++k)
+                        if (a[k].resolved != b[k].resolved || std::memcmp(a[k].w, b[k].w, sizeof(a[k].w)) != 0) return false;
+                    return true;
+                };
+                if (check.dims != out.dims || check.modes != out.modes || !words_equal(check.images, out.images) ||
+                    !words_equal(check.samplers, out.samplers)) {
+                    if (g_key_memo_disagreed++ < 8)
+                        host_log("render: stage memo disagreed with resolving again (%zu images, %zu samplers); "
+                                 "taking the resolution (BBHOST_CP_STAGE_CACHE=2)", paths->images.size(), paths->samplers.size());
+                    std::swap(check.dims, out.dims);
+                    std::swap(check.modes, out.modes);
+                    std::swap(check.images, out.images);
+                    std::swap(check.samplers, out.samplers);
+                    out.memo_ok = false;
+                    ++g_key_memo_misses;
+                    return false;
+                }
+            }
+            if (same) {
+                // The counters the resolution would have moved: every binding from a record.
+                const std::uint64_t n = paths->images.size() + paths->samplers.size();
+                if (n) {
+                    bump(g_gx_resolves[kGxRecord], n);
+                    if (t_token_draw) bump(g_gx_token_resolves[kGxRecord], n);
+                }
+                ++g_key_memo_hits;
+                return true;
+            }
+        }
+        ++g_key_memo_misses;
+    } else {
+        ++g_key_memo_off;
+    }
     out.dims.clear();
     out.modes.clear();
     out.images.clear();
     out.samplers.clear();
-    if (!paths) return;
-    const GxStagePlan* plan = gx && g_binding_plans ? &stage_plan(*paths, *gx) : nullptr;
+    bool all_records = plan != nullptr;
     for (std::size_t k = 0; k < paths->images.size(); ++k) {
         const gcn::ImageBinding& b = paths->images[k];
         KeyStage::Words& r = out.images.emplace_back();
         r.resolved = resolve_via_plan(plan ? &plan->images[k] : nullptr, b.path, stage_user, gx, b.r128 ? 4 : 8, r.w);
         out.dims.push_back(image_dim_of(b, r.resolved, r.w));
+        all_records = all_records && planned_record(plan->images[k], *gx) != nullptr;
     }
     for (std::size_t k = 0; k < paths->samplers.size(); ++k) {
         const gcn::SamplerBinding& b = paths->samplers[k];
         KeyStage::Words& r = out.samplers.emplace_back();
         r.resolved = resolve_via_plan(plan ? &plan->samplers[k] : nullptr, b.path, stage_user, gx, 4, r.w);
         out.modes.push_back(r.resolved && (r.w[0] & (1u << 15)));
+        all_records = all_records && planned_record(plan->samplers[k], *gx) != nullptr;
     }
+    out.memo_ok = g_cp_stage_cache && g_binding_plans == 1 && all_records;
+    out.memo_paths = paths;
+    out.memo_plan = plan;
+    return false;
 }
 
 bool key_stage_matches(const gcn::TranslateResult& meta, const gcn::TranslateResult& paths) {
@@ -12269,8 +12395,10 @@ static bool draw_impl(const GpuDraw& d) {
     const gcn::TranslateResult* const ps_paths =
         ps_words.empty() ? nullptr : &paths_for(ps_hash, ps_words, gcn::Stage::Pixel, s.ps_rsrc1, s.ps_rsrc2);
     t_resolve_site = kSiteKey;
-    resolve_key_stage(&vs_paths, s.vs_user, gx_stage[0], key_stages[0]);
-    resolve_key_stage(ps_paths, s.ps_user, gx_stage[1], key_stages[1]);
+    // rc7: both stages as the last draw left them (the stage memo): the
+    // shape below is unchanged too.
+    const bool vs_same = resolve_key_stage(&vs_paths, s.vs_user, gx_stage[0], key_stages[0]);
+    const bool ps_same = resolve_key_stage(ps_paths, s.ps_user, gx_stage[1], key_stages[1]);
     const std::vector<std::pair<std::uint32_t, bool>>& vs_dims = key_stages[0].dims;
     const std::vector<std::pair<std::uint32_t, bool>>& ps_dims = key_stages[1].dims;
     const std::vector<bool>& vs_sampler_modes = key_stages[0].modes;
@@ -12281,14 +12409,18 @@ static bool draw_impl(const GpuDraw& d) {
         // The sampler modes and image dimensions the translation depends on,
         // packed and hashed once; a separator ends each list.
         static thread_local std::vector<std::uint32_t> shape;
-        shape.clear();
-        for (const bool mode : vs_sampler_modes) shape.push_back(mode ? 1u : 0u);
-        shape.push_back(~0u);
-        for (const bool mode : ps_sampler_modes) shape.push_back(mode ? 1u : 0u);
-        shape.push_back(~0u);
-        for (const auto& d2 : vs_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
-        shape.push_back(~0u);
-        for (const auto& d2 : ps_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
+        static thread_local bool shape_built = false;  // shape holds key_stages' lists
+        if (!(vs_same && ps_same && shape_built)) {
+            shape.clear();
+            for (const bool mode : vs_sampler_modes) shape.push_back(mode ? 1u : 0u);
+            shape.push_back(~0u);
+            for (const bool mode : ps_sampler_modes) shape.push_back(mode ? 1u : 0u);
+            shape.push_back(~0u);
+            for (const auto& d2 : vs_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
+            shape.push_back(~0u);
+            for (const auto& d2 : ps_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
+            shape_built = true;
+        }
         key = fnv1a(shape.data(), shape.size() * sizeof(std::uint32_t), key);
     }
     draw_stamp.to(kRenderCostKey);
