@@ -9,6 +9,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #include <ctime>
 #include <mutex>
 #include <vector>
@@ -344,12 +349,68 @@ void host_sleep_until(std::chrono::steady_clock::time_point t) {
     host_sleep_us(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t - now).count()));
 }
 
+// rc6: 32 positions at a time (AVX2 where the CPU has it, else 16 with SSE2,
+// every x86-64): a candidate is a position whose first and last bytes both
+// match the needle's, and only those are compared in full - the camera's table
+// search (engine/camera.cpp) went through 8 GiB of guest memory a byte at a
+// time. The first match, as the byte loop (still the fallback and the tail)
+// finds it.
+#if defined(__x86_64__)
+namespace {
+__attribute__((target("avx2"))) std::size_t memmem_avx2(const unsigned char* h, std::size_t hay_len, const unsigned char* n,
+                                                         std::size_t needle_len, const unsigned char** hit) {
+    const __m256i first = _mm256_set1_epi8(static_cast<char>(n[0]));
+    const __m256i last = _mm256_set1_epi8(static_cast<char>(n[needle_len - 1]));
+    std::size_t i = 0;
+    for (; i + 32 + needle_len - 1 <= hay_len; i += 32) {
+        const __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(h + i));
+        const __m256i z = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(h + i + needle_len - 1));
+        unsigned mask = static_cast<unsigned>(_mm256_movemask_epi8(_mm256_and_si256(_mm256_cmpeq_epi8(a, first), _mm256_cmpeq_epi8(z, last))));
+        while (mask) {
+            const unsigned bit = static_cast<unsigned>(__builtin_ctz(mask));
+            if (std::memcmp(h + i + bit + 1, n + 1, needle_len - 2) == 0) {
+                *hit = h + i + bit;
+                return i;
+            }
+            mask &= mask - 1;
+        }
+    }
+    return i;
+}
+const bool g_have_avx2 = __builtin_cpu_supports("avx2");
+}  // namespace
+#endif
+
 const void* host_memmem(const void* hay, std::size_t hay_len, const void* needle, std::size_t needle_len) {
     if (!needle_len) return hay;
     if (!hay || hay_len < needle_len) return nullptr;
     const auto* h = static_cast<const unsigned char*>(hay);
     const auto* n = static_cast<const unsigned char*>(needle);
-    for (std::size_t i = 0; i + needle_len <= hay_len; ++i) {
+    std::size_t i = 0;
+#if defined(__SSE2__)
+    if (needle_len >= 2) {
+#if defined(__x86_64__)
+        if (g_have_avx2) {
+            const unsigned char* hit = nullptr;
+            i = memmem_avx2(h, hay_len, n, needle_len, &hit);
+            if (hit) return hit;
+        }
+#endif
+        const __m128i first = _mm_set1_epi8(static_cast<char>(n[0]));
+        const __m128i last = _mm_set1_epi8(static_cast<char>(n[needle_len - 1]));
+        for (; i + 16 + needle_len - 1 <= hay_len; i += 16) {
+            const __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(h + i));
+            const __m128i z = _mm_loadu_si128(reinterpret_cast<const __m128i*>(h + i + needle_len - 1));
+            unsigned mask = static_cast<unsigned>(_mm_movemask_epi8(_mm_and_si128(_mm_cmpeq_epi8(a, first), _mm_cmpeq_epi8(z, last))));
+            while (mask) {
+                const unsigned bit = static_cast<unsigned>(__builtin_ctz(mask));
+                if (std::memcmp(h + i + bit + 1, n + 1, needle_len - 2) == 0) return h + i + bit;
+                mask &= mask - 1;
+            }
+        }
+    }
+#endif
+    for (; i + needle_len <= hay_len; ++i) {
         if (h[i] == n[0] && std::memcmp(h + i, n, needle_len) == 0) return h + i;
     }
     return nullptr;
