@@ -2374,3 +2374,71 @@ with the cache on and off" cannot be shown here. For build 6: a draw-path replay
 (recorded GX streams through draw_impl with the cache on/off, packets compared), then a
 cache limited to `GxStagePlan::all_records` stages (records copied at the call, keyed by
 their bytes) as the first, provable step.
+
+## 2026-10-20 (Tue), vk.1-rc7 ("build 6"): the stage memo for the key words
+
+Start: the tree was clean at bddd030 (no partial per-stage cache work in the checkout, its
+stash or the other worktrees), and origin/phase-5-test-release already pointed at bddd030.
+
+### What the per-stage cache can be, exactly
+Of the three per-stage resolutions in the draw path, only `resolve_key_stage` is a pure
+function of what a draw hands it: the translation's binding paths, the plan
+(`stage_plan`: translation, descriptor fingerprint, plan generation), and per binding
+either the GX record's bytes (`resolve_planned`) or a user-data/guest-memory walk
+(`resolve_resource_impl`). The other two have to run every draw:
+- `prefetch_stage_images` calls `texture_view`, which is where the texture cache notices
+  CPU writes and re-uploads; skipping it on a "same words" hit would show stale textures.
+  It also feeds the post-window and motion-blur-skip watchers.
+- `resolve_stage_buffers` updates the buffer shadows (per-recording page state, write
+  watches), looks up copy versions and YEBIS draw windows, snapshots unaligned constant
+  buffers into the scratch ring (the bytes as of this draw) and feeds the temporal observer.
+  A hit would need generations for all of that plus every guest word the walks read; the
+  game rewrites its tables every frame and nothing tracks those writes cheaply (rc6 DEVLOG).
+So rc7 memoizes only the key words, and only where the inputs are bytes in hand.
+
+### The memo (render.cpp `resolve_key_stage`)
+`KeyStage` (thread-local per stage in `draw_impl`) keeps `memo_paths`, `memo_plan` and
+`memo_ok`. `memo_ok` is set after a full resolution when a plan was used (plans on, mode 1)
+and every image and sampler binding found its record (`planned_record`: the plan's source
+and slot, the object bit - for the sampler cache `obj_smp_set | obj_smp_default` - as
+`resolve_planned` decides). Then each word list is exactly that record's first 4 or 8
+dwords. At the next draw of the stage, with the same plan pointer (so the same translation,
+descriptors and plan generation; plans are never freed) and the same paths, each binding's
+record must again exist and `memcmp` equal to the kept words (16 bytes for an r128 image or
+a sampler, 32 otherwise). Then the resolution would copy the same bytes, and `dims`/`modes`
+are functions of the words and the bindings (`image_dim_of`, bit 15), so the lists are left
+as they are. The `g_gx_resolves`/`g_gx_token_resolves` record counters are bumped as the
+resolution would have. Anything else - a fallback binding, a missing object, different
+bytes, another plan, `BBHOST_BINDING_PLANS` 0 or 2 - resolves in full, as rc6.
+`draw_impl` skips rebuilding the key's shape list when both stages kept theirs (it is built
+from those lists only; the fnv1a over it still runs, seeded by the new pipeline key).
+A stage without a program counts as kept when the last call was also programless.
+`BBHOST_CP_STAGE_CACHE=0` turns it off (`BBHOST_STAGE_CACHE` was already taken by the
+translation cache, which must stay on); `=2` resolves again on every hit into a scratch
+`KeyStage`, compares words, resolved flags, dims and modes, logs the first 8
+disagreements and uses the fresh resolution. Exit line in `render_report`.
+Cost of a hit: the plan lookup (as before), one bit test and a 16/32-byte compare a binding.
+Saved: the vector rebuilds, `image_dim_of` and the per-binding counters, and for both
+stages kept the shape list. The hit rate is not known (no game on the box); the exit line
+gives it. Estimate 0.1-0.3 ms of bb-cp0 a frame at ~1,400 draws - well under the 1.1-1.9 ms
+the rc5 report hoped for from all three resolutions, because the other two cannot be
+skipped exactly.
+
+### The other items, checked and left
+- bb-submit's `hmm_range_fault`: the only userptr import was the GX table ring (128 MiB at
+  0xf000000000; the game's flexible mappings had no GPU bits). rc6 already imports it as a
+  memfd dma-buf on AMD/Linux (its start-up lines in TESTING's rc6 checks say whether that
+  took on the PC). The BO-list sort is the kernel's, over RADV's global BO list; rc6's large
+  dma-buf pieces (with udmabuf `size_limit_mb=1024`) are the lever left without
+  sub-allocating images. Nothing new here until the rc6 measurements.
+- Indexed compute constant buffers: binding the whole range differs from the walk for an
+  index past `num_records` (GCN returns zeros, the walk reads memory); exactness needs a
+  bounds check in the translated shader - a translator change (shader-cache rebuild) that
+  the box cannot verify against the game. Game compute is ~0.48 ms of GPU in heavy Old
+  Yharnam, so the gain is small. Left.
+- bb-bind thread (splitting bb-cp0): L effort, needs the PM4 replay harness first. Left.
+- Post chain (bloom, tonemap, grain) before FSR: changes pixels. Skipped by the rules.
+
+Checked here: render.cpp compiles in both build trees, the full build (PGO and nopgo)
+passes ctest; the draw path itself does not run on the box (no game), hence `=2`.
+

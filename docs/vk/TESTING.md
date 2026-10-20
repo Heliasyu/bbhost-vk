@@ -149,6 +149,24 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## vk.1-rc7 checks (~10 min)
+Install as before (`bbtest start vk1-rc7`). The translator is unchanged: **no shader-cache
+rebuild**. Two binaries as in rc6: `bbhost.bin` (ThinLTO + PGO, the rc5 session's profile)
+and `bbhost.bin.nopgo`. Everything in the rc6 checks below still applies.
+1. **Picture unchanged** in the usual places (Hunter's Dream, Old Yharnam, a fight, the
+   menus, Scaleform UI): textures on every mesh, nothing flickering or swapped. A texture or
+   sampler on the wrong mesh would be this build's change - repeat with
+   `BBHOST_CP_STAGE_CACHE=0` and say so.
+2. **Proof run (once, any spot, a minute):** `BBHOST_CP_STAGE_CACHE=2` (slower: every hit is
+   resolved again). After closing the game, game.log's `render: stage memo (rc7 …)` line must
+   end in `checked, disagreeing 0`, and no `render: stage memo disagreed` line may appear.
+3. **At the Old Yharnam spot** (F11, stand still, F11 ~30 s later), against rc6:
+   [cpu] `cp_split:` `key` and `prefetch` ns per draw should drop, `cp_cost:
+   exec_ns_per_draw` with them; bb-cp0 ms/s down, 1% lows equal or better. GPU ms per frame
+   is unchanged by design. After closing: the exit line's hits against resolved give the
+   memo's hit rate (stages, two a draw).
+4. Debug revert (no menu entry): `BBHOST_CP_STAGE_CACHE=0` (rc6's resolution every draw).
+
 ## vk.1-rc6 checks (~15 min)
 Install as before (`bbtest start vk1-rc6`). The translator is unchanged: **no shader-cache
 rebuild**, the first start is like rc5b's second. Two binaries come with the package:

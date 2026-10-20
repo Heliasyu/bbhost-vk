@@ -1,5 +1,32 @@
 # Changelog (bbhost-vk)
 
+## vk.1-rc7 (2026-10-20, test build "build 6"/rc7, branch `phase-5-test-release`; not released)
+
+On top of rc6 (bddd030). Same rules: no picture, HDR, chromatic-aberration or menu change,
+nothing new in the launcher; each `BBHOST_*` below is a debug revert. The translator is
+unchanged: **the shader caches are kept** (no rebuild).
+
+- **The command processor's stage memo (key words).** Each draw resolved every image and
+  sampler binding of both shader stages again for the pipeline key (`resolve_key_stage`,
+  cp_split `key` ≈ 280-300 ns a draw in rc5). When the last draw of a stage took every
+  binding from its GX records through the same binding plan, and this draw's records still
+  hold every one of those objects with the same bytes, the words, image shapes and sampler
+  modes are the same and are kept; the key's shape list is not rebuilt when both stages kept
+  theirs. A binding read through user data or guest memory, a missing object, plans off or in
+  their check mode: resolved as before. Exact by construction: the only inputs compared are
+  the bytes the resolution would copy. Expected: some of `key` and of `prefetch` (which
+  takes these words); roughly 0.1-0.3 ms of bb-cp0 a frame at ~1,400 draws, depending on
+  how often consecutive draws repeat a stage's textures and samplers (the exit line says).
+  `BBHOST_CP_STAGE_CACHE=0`: resolve every draw (rc6). `=2`: resolve on every hit as well and
+  count disagreements (should stay 0). Exit log line `render: stage memo (rc7 …)`.
+- Not in this build (see DEVLOG): memoizing `resolve_stage_buffers` and
+  `prefetch_stage_images` (their per-draw side effects - texture uploads on CPU writes,
+  buffer shadows, copy versions, the temporal observer, scratch copies - must run, and no
+  cheap generation proves their guest words unchanged); the flexible/ring import is already
+  a dma-buf since rc6; indexed compute constant buffers (needs a translator change, i.e. a
+  shader-cache rebuild, and exactness past the records); the bb-bind thread; moving post
+  effects before FSR (changes pixels).
+
 ## vk.1-rc6 (2026-10-20, test build "build 5"/rc6, branch `phase-5-test-release`; not released)
 
 On top of the profiling-kit commits (ea885ba, b30746b, fbfe181), from the rc5 profile's plan
