@@ -162,7 +162,7 @@ Steps (each can be skipped; `--resume` continues a session):
 2. **A2 `BBHOST_TABLES_VRAM=0`**, **A3 `BBHOST_PARAMS_VRAM=1`**, **A4 `BBHOST_PARAMS_WC=1`**:
    ~60 s each at the same spot (the GPU idle with work queued).
 3. **M4**: `BBHOST_FLIP_TRACE=1 BBHOST_FRAME_STATS=1 BBHOST_FRAME_DETAIL=1
-   BBHOST_FRAME_SLOW_MS=11 BBHOST_WAIT_LOG=GXRender,bbhost.bin BBHOST_WAIT_LOG_MS=3
+   BBHOST_FRAME_SLOW_MS=11 BBHOST_WAIT_LOG=GXRender BBHOST_WAIT_LOG_MS=8
    BBHOST_HLE_COUNT=1`, with `perf sched record -k CLOCK_MONOTONIC` (system-wide, 20 s),
    then two presented-frame captures (`BBHOST_VK_CAPTURE=1`) as reference pictures.
 4. **PGO**: the instrumented binary, a few minutes in Old Yharnam and the Hunter's Dream; the

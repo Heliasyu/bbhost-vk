@@ -2241,3 +2241,27 @@ runtime's atexit write would never run.
 ctest 55/55 (19 skipped as before, no game files); `--stream-selftest` passes with and
 without `BBHOST_PARAMS_VRAM=1` (lavapipe: `params ring: … in video memory the CPU maps`,
 0 differences). Build warnings: none new.
+
+### The kit itself (tools/bbprofile/)
+- `bbprofile.sh`: the guided driver (steps sys, a1 plain + CPU profile, a2 TABLES_VRAM=0,
+  a3 PARAMS_WC=1, a4 PARAMS_VRAM=1, m4, pgo, a5 PS_WAVE32=32, a6 plain again; ~28-30 min).
+  It swaps the kit binary in as the game folder's `bbhost.bin` (copy + rename; the original
+  kept as `bbhost.bin.bbprofile-orig`, restored and checked on exit, Ctrl-C included, and by
+  the next run after a crash), launches `./bbhost` with the folder's `bbhost.toml` as
+  run-bbhost.sh does but logs into the session folder (run-bbhost.sh prunes `logs/`), and
+  takes the A/B windows by itself: F11 at the spot marks t=0, `snap.request` at +35 s and
+  +65 s gives two back-to-back 30 s windows. perf runs during the stand; `perf sched record
+  -k CLOCK_MONOTONIC` lines up with bbhost's steady clock (`fliptrace: … at <s> monotonic`,
+  `[flip_trace]` `base_steady_ns`). sysctls saved to `~/bbprofile-work/.sysctl-orig` and
+  restored (the file survives a crash, so the next run restores the true originals).
+- `bbprofile_analyze.py`: box side; the A/B table against a1 and the a6 drift, M4's stage
+  excess (slow vs normal medians per stage and per thread run/run-queue), the perf sched
+  windows around each slow frame, bb-cp0 / hot-chain folded stacks with an inline view from
+  the unstripped binary (llvm-symbolizer), sysmon, `pgo-merge` (llvm-profdata 19).
+- `test/fakegame.{sh,py}`: a stand-in game (named threads, snapshot/capture requests, PGO
+  dumps) for dry runs here: `BBPROFILE_LAUNCH=tools/bbprofile/test/fakegame.sh
+  BBPROFILE_AUTO=1 BBPROFILE_QUICK=1`. Verified here: full sessions, Ctrl-C mid-step
+  (binary and sysctls restored, exit 130), `--resume`, recovery from a killed session,
+  bundle + analysis + pgo-merge; the PGO binary writes its profile periodically and on a
+  normal exit, merges with llvm-profdata 19, and a `-DBBHOST_PGO_USE` build of it passes the
+  stream selftest. Not verifiable here: the game itself (no game files, lavapipe).
