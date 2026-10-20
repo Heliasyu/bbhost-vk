@@ -202,9 +202,6 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     bool debug_upscaler_time = host_opt_get("debug_upscaler_time");
     bool upscale_reactive = host_opt_get("upscale_reactive");
     bool upscale_jitter = host_opt_get("upscale_jitter");
-    // v0.2.18-vk.1: the frame-time features, as fallback switches (on by default).
-    bool present_pace = host_opt_get("present_pace");
-    bool post_at_render = host_opt_get("post_at_render");
     static const char* const kResolutions[] = {"1280x720",         "1600x900",         "1920x1080",        "2560x1440",
                                                "3200x1800",        "3840x2160",        "2560x1080 (21:9)", "3440x1440 (21:9)",
                                                "5120x2160 (21:9)", "3840x1080 (32:9)", "5120x1440 (32:9)", "1280x800 (16:10)",
@@ -345,8 +342,6 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         host_opt_set("debug_upscaler_time", debug_upscaler_time);
         host_opt_set("upscale_reactive", upscale_reactive);
         host_opt_set("upscale_jitter", upscale_jitter);
-        host_opt_set("present_pace", present_pace);
-        host_opt_set("post_at_render", post_at_render);
         for (const Enhancement& x : enhancements) host_opt_set(x.key, x.on);
         host_options_save_now();
         saved_note = "Saved to " + file;
@@ -641,13 +636,8 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::EndDisabled();
         }
 
-        ImGui::SeparatorText("Start-up and display");
+        ImGui::SeparatorText("Display");  // rc2: the F10 menu's sections, mirrored
         ImGui::Checkbox("Fullscreen", &fullscreen);
-        ImGui::SameLine(260 * scale);
-        ImGui::Checkbox("Skip company logos", &skip_logos);
-        ImGui::Checkbox("Debug camera", &debug_camera);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Lance McDonald's free camera: hold Interact (E) and press L3 (Left Ctrl). The debug menu's LOAD TEST crashes while it is on.");
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kCapLabels[] = {"30 fps", "60 fps", "90 fps", "120 fps", "Uncapped"};
         ImGui::Combo("Frame rate", &cap_choice, kCapLabels, 5);
@@ -669,11 +659,6 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::SliderInt("Upscaler sharpness", &upscale_sharpness, 0, 10, "%d / 10");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: FSR 3.1's and FSR 4.1.1's sharpening (RCAS); 0 turns it off. 8 matches stock bbhost's FSR 1, which keeps its own.");
-        ImGui::SetNextItemWidth(200 * scale);
-        static const char* const kAntiAlias[] = {"On", "Off", "Auto (off with FSR 4.1.1)"};
-        ImGui::Combo("Anti-aliasing", &anti_alias, kAntiAlias, 3);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("The game's own AA pass (about 0.35 ms at 4K). Auto turns it off while FSR 4.1.1 upscales, which smooths edges itself, and keeps it on otherwise.");
         ImGui::Checkbox("Upscaler reactive mask", &upscale_reactive);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("bbhost-vk, FSR 3.1: keeps particles, fog, Blood Echoes and the lantern's glow from smearing. Off for comparison.");
@@ -681,18 +666,24 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         ImGui::Checkbox("Upscaler jitter", &upscale_jitter);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("bbhost-vk, FSR 3.1 / 4.1.1: the scene's sub-pixel jitter that lets the upscaler rebuild detail. Off for comparison only.");
-        ImGui::Checkbox("Even frame pacing", &present_pace);
+        ImGui::SeparatorText("Graphics & effects");
+        ImGui::SetNextItemWidth(200 * scale);
+        static const char* const kAntiAlias[] = {"On", "Off", "Auto (off with FSR 4.1.1)"};
+        ImGui::Combo("Anti-aliasing", &anti_alias, kAntiAlias, 3);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Holds each frame to an even slot at the frame rate, so lights and fog do not flicker with uneven frame times (adds a few ms of latency). Off presents each frame as soon as it is ready.");
-        ImGui::SameLine(260 * scale);
-        ImGui::Checkbox("Post-processing at render size", &post_at_render);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("FSR 3.1 / 4.1.1 below Native AA: depth of field, fog and motion blur run at the render size, and FSR upscales after them (~0.7 ms at 4K). Turn off if a picture looks wrong.");
+            ImGui::SetTooltip("The game's own AA pass (about 0.35 ms at 4K). Auto turns it off while FSR 4.1.1 upscales, which smooths edges itself, and keeps it on otherwise.");
+        ImGui::SeparatorText("Game");
+        ImGui::Checkbox("Skip company logos", &skip_logos);
+        ImGui::SeparatorText("Debug");
         ImGui::Checkbox("Show motion vectors", &debug_motion_vectors);
         ImGui::SameLine(260 * scale);
         ImGui::Checkbox("Show upscaler GPU time", &debug_upscaler_time);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("bbhost-vk debug: the presenter's GPU time per pass under the FPS counter. Motion vectors: red/green = horizontal/vertical motion, blue = object motion, dark = no camera found (needs the scene/UI split).");
+        ImGui::Checkbox("Debug camera", &debug_camera);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lance McDonald's free camera: hold Interact (E) and press L3 (Left Ctrl). The debug menu's LOAD TEST crashes while it is on.");
+        ImGui::SeparatorText("FSR 4.1.1 assets");
         // bbhost-vk Phase 4: FSR 4.1.1 is built once from the player's own
         // DLL (tools/fsr4cap) into the asset folder; without it, FSR 3.1.
         path_row("FSR 4.1.1: your amd_fidelityfx_upscaler_dx12.dll (4.1.x, e.g. from OptiScaler)", kDll, false, "");

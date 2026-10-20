@@ -14,6 +14,7 @@
 #include "host/options.h"
 #include "host/settings.h"
 #include "host/overlay.h"
+#include "host/perf_capture.h"
 #include "host/present_pass.h"
 #include "host/ingame_menu.h"
 #include "host/audio.h"
@@ -682,6 +683,7 @@ bool vk_start() {
 }
 
 std::atomic<std::uint64_t> g_present_dropped{0};
+std::atomic<std::uint64_t> g_present_waits{0}, g_present_wait_ns{0};  // rc2: the command processor waiting on the presenter (host_present)
 
 // bbhost-vk's per-pass GPU timer (host/gpu_timer.h) over the presenter's
 // command buffer, while debug_upscaler_time is on: made the first frame it is
@@ -710,12 +712,13 @@ std::deque<std::chrono::steady_clock::time_point> g_present_times;  // the last 
 // at the game's fixed pace. BBHOST_AB_SECONDS=<s> (with BBHOST_AB_TOGGLE unset
 // or "pace") turns it off and on every s seconds and logs each half's present
 // intervals - what MangoHud times - as `ab: present pace` lines.
-// v0.2.18-vk.1: BBHOST_PRESENT_PACE when set, else the options' "Even frame
-// pacing" (on); read at the first present, after the options load.
+// rc2: permanent - no options switch any more (vk.1's "Even frame pacing"
+// is gone from the menu and the launcher; a saved value is ignored).
+// BBHOST_PRESENT_PACE=0 stays, for debugging.
 bool pace_mode() {
     static const bool on = [] {
         const char* e = std::getenv("BBHOST_PRESENT_PACE");
-        return e && *e ? e[0] != '0' : host_opt_get("present_pace");
+        return !(e && e[0] == '0');
     }();
     return on;
 }
@@ -1266,6 +1269,10 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
     }
     ps.on_arrival += flip.on_arrival;
     ps.cpu_ns += host_thread_cpu_ns() - cpu_enter;
+    // rc2: the frame into the performance capture's ring (what MangoHud times).
+    perf::note_present(static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_presented.time_since_epoch()).count()),
+                       static_cast<std::int64_t>(flip.arrived_ns), g_present_dropped.load(std::memory_order_relaxed),
+                       g_present_waits.load(std::memory_order_relaxed), g_present_wait_ns.load(std::memory_order_relaxed));
     if (++presents % 300 == 0) {
         const auto now = std::chrono::steady_clock::now();
         const long long win_ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count());
@@ -1276,6 +1283,9 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
                  static_cast<unsigned long long>(flush_us / 1000), static_cast<unsigned long long>(lock_us / 1000),
                  static_cast<unsigned long long>(blit_us / 1000), static_cast<unsigned long long>(submit_us / 1000),
                  static_cast<unsigned long long>(queue_present_us / 1000), static_cast<unsigned long long>(g_present_dropped.load()));
+        host_log("present: the command processor waited for the presenter %llu times, %llu ms in all (frame-latency limit; "
+                 "BBHOST_FRAME_LATENCY=0 drops instead)",
+                 static_cast<unsigned long long>(g_present_waits.load()), static_cast<unsigned long long>(g_present_wait_ns.load() / 1000000));
         // What each of those frames cost and how old it was when it went up:
         // bb-present's own CPU, the time from the command processor queueing
         // the flip to its present returning, how many were shown as they
@@ -1817,7 +1827,14 @@ bool host_window_pump() {
                     break;
                 }
                 if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_F11) {
-                    g_ime_test_reopen.store(true, std::memory_order_relaxed);
+                    // rc2: F11 saves a performance snapshot (host/perf_capture.h);
+                    // with BBHOST_IME_TEST it reopens the test's text box, as before.
+                    static const bool ime_test = [] {
+                        const char* v = std::getenv("BBHOST_IME_TEST");
+                        return v && v[0] == '1';
+                    }();
+                    if (ime_test) g_ime_test_reopen.store(true, std::memory_order_relaxed);
+                    else perf::request("F11", "");
                     break;
                 }
                 if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_F12 && (e.key.mod & SDL_KMOD_SHIFT) &&
@@ -2249,6 +2266,12 @@ bool host_window_pump() {
         float mx = 0.0f, my = 0.0f;
         if (ours && host_mouse_position(mx, my)) host_overlay_cursor(mx, my);
     }
+    // rc2: the performance capture's confirmation, top left, for a few seconds.
+    if (const std::string b = perf::banner(); !b.empty()) {
+        const float scale = 0.7f, w = host_overlay_text_width(scale, b.c_str());
+        host_overlay_rect(12.0f, 10.0f, w + 16.0f, 24.0f * scale + 8.0f, 0x000000b0u);
+        host_overlay_text(20.0f, 14.0f, scale, 0xe8dcc0ffu, b.c_str());
+    }
     // The frame's overlay, whole, to the presenter: a present never sees one
     // half rebuilt. Nothing on it (no counter, pointer, box or screen) and the
     // presenter's pass draws nothing over the picture.
@@ -2331,13 +2354,29 @@ struct PendingPresent {
 };
 std::mutex g_present_mu;
 std::condition_variable g_present_cv;
+std::condition_variable g_present_taken_cv;  // rc2: the present thread took g_present_next
 PendingPresent g_present_next;
+// rc2, frame-latency limit: the command processor's frame waits for the
+// present thread to take the one before it, instead of replacing it.
+// vk1-dream: GPU-bound at 89-92% busy, the command processor ran ahead of
+// presentation and ~500 frames were replaced unshown in a 10-minute run
+// ("dropped" - each one a hitch MangoHud sees as a long interval, and GPU
+// time spent on a frame nobody saw). The wait is bounded (two periods of
+// the game's pace, at least 20 ms) so a stuck presenter cannot stall the
+// game; past it the frame is replaced as before and counted.
+// BBHOST_FRAME_LATENCY=0 (debugging) replaces at once, as vk.1 did.
+const bool g_frame_latency_limit = [] {
+    const char* e = std::getenv("BBHOST_FRAME_LATENCY");
+    return !(e && e[0] == '0');
+}();
+
 bool g_present_quit = false;
 std::thread g_present_thread;
 
 void present_thread_main() {
     host_thread_set_name("bb-present");
     host_thread_set_class(HostThreadClass::GpuFeed, "bb-present");  // core/host_clock.h
+    perf::start();  // rc2: the performance capture (F11 / bbtest snap)
     for (;;) {
         PendingPresent p;
         {
@@ -2347,6 +2386,7 @@ void present_thread_main() {
             p = g_present_next;
             g_present_next.has = false;
         }
+        g_present_taken_cv.notify_all();
         vk_present(p.buffer, p.va, p.w, p.h, p.flip);
         // With V-Sync on this returned on the display's vblank: the flip clock
         // uses it to stay in phase with the display.
@@ -2387,6 +2427,7 @@ void host_window_stop() {
         std::lock_guard<std::mutex> lk(g_present_mu);
         g_present_quit = true;
         g_present_cv.notify_all();
+        g_present_taken_cv.notify_all();
     }
     if (g_present_thread.joinable()) g_present_thread.join();
     if (g_vk.ok) {
@@ -2540,8 +2581,20 @@ void host_pad_rumble(std::uint8_t small, std::uint8_t large) {
 void host_present(int buffer_index, std::uint64_t display_va, unsigned display_w, unsigned display_h, const PresentFlip& flip) {
 #if defined(BBHOST_HAVE_SDL3)
     if (g_active) {
-        std::lock_guard<std::mutex> lk(g_present_mu);
+        std::unique_lock<std::mutex> lk(g_present_mu);
         if (!g_present_thread.joinable()) g_present_thread = std::thread(present_thread_main);
+        // Only the command processor's frames wait (flip.on_arrival): the
+        // vblank thread's must never block.
+        if (g_present_next.has && g_frame_latency_limit && flip.on_arrival && !g_present_quit) {
+            const int fps = frame_rate_game_fps();
+            const auto bound = std::chrono::microseconds(std::max(20000, fps > 0 ? 2000000 / fps : 20000));
+            const auto t0 = std::chrono::steady_clock::now();
+            g_present_taken_cv.wait_for(lk, bound, [] { return !g_present_next.has || g_present_quit; });
+            g_present_waits.fetch_add(1, std::memory_order_relaxed);
+            g_present_wait_ns.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - t0).count()),
+                                        std::memory_order_relaxed);
+        }
         if (g_present_next.has && g_present_dropped.fetch_add(1) % 300 == 0) {
             host_log("present: display behind the game; dropped %llu frames so far",
                      static_cast<unsigned long long>(g_present_dropped.load()));

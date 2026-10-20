@@ -1,5 +1,66 @@
 # Changelog (bbhost-vk)
 
+## vk.1-rc2 (2026-10-19, test build, branch `phase-5-test-release`; not released)
+
+- **Post-processing at render size covers more passes.** Besides the vk.1 list, a pass now
+  joins by its shape: one RGBA16F target, no depth or MRT, reading the chain's stand-ins
+  and a smaller RGBA16F input. Four programs seen in the Hunter's Dream (88414cd6, 597cbbcc,
+  9e1cb278, c3eff688) are added by hash. Bloom's first pass and CA stay at output size. The
+  per-frame fallback stays.
+- **Frame-latency limit.** The command processor runs at most one frame ahead of the
+  presenter and waits for it instead of having its frame replaced: vk1-dream's ~500 drops.
+  `hle_video` no longer discards the oldest flip when its queue of 4 is full; it waits up
+  to 34 ms. `BBHOST_FRAME_LATENCY=0` brings the vk.1 behaviour back (debugging only).
+- **The present pacing settles faster.** It creeps up to 100 µs a frame and checks every 30
+  frames (was 20 µs and 120), so the ~3 ms of latency t13 measured comes back down.
+- **Sharpening in the present pass** (`BBHOST_SHARPEN_AT_PRESENT=1`): off by default.
+  The present pass sees the HUD, so it would put a halo on the HUD. The default stays
+  FSR's sharpening of the scene before the HUD.
+- **F10 menu:**
+  - The overlay buffer is 1 MiB. On overflow it draws what fits and logs once; before,
+    it drew nothing.
+  - Notes wrap to 3 lines.
+  - Selection changes are logged with the vertex count.
+  - Fewer sections, by subject: DISPLAY, GRAPHICS & EFFECTS, CAMERA & CONTROLS, GAME,
+    ONLINE & ACCOUNT, DEBUG.
+  - Every setting that only takes effect after a restart says "(restart required)": frame
+    rate, upscaler and upscaling quality.
+- **Removed switches:** "Even frame pacing" and "Post-processing at render size" are gone
+  from F10 and the launcher, along with any optimization switch. Optimizations are always
+  on. Saved keys are ignored. `BBHOST_PRESENT_PACE=0` and `BBHOST_POST_AT_RENDER=0` remain
+  for debugging. The launcher has the same sections.
+- **Performance snapshots: F11, or `bbtest snap "note"`.** These save the last 30 s from
+  memory into a text file, `snaps/snap-<date>-<time>-<map>.txt`, on a background thread,
+  with a brief on-screen confirmation. The file has:
+  - every frame's time, present delay, drops and the game's waits;
+  - GPU busy every second;
+  - per-pass GPU times from the GPU sampler;
+  - FSR and sharpening ms;
+  - post-at-render coverage and fallback reasons;
+  - every shader translation or pipeline compile, with ms each, which thread, and whether
+    the frame waited;
+  - the area or map id, the settings and the busiest threads' CPU ms;
+  - the log.
+
+  `bbtest snap --show` summarizes snapshots: avg, 1%/0.1% lows, over 8.5/9/12 ms, drops,
+  the top 10 passes and the area. `BBHOST_SNAP=0` turns snapshots off and
+  `BBHOST_SNAP_DIR` sets the folder.
+- **GPU sampler:** one frame every ~10 s is timed pass by pass, skipped when the frame
+  before it was over budget, and logged as `gpu sample:`. `BBHOST_GPU_SAMPLE=0` turns it
+  off.
+- **Startup log:**
+  - whether the shader caches were kept or cleared for a new translator;
+  - how many pipelines the precompile built before the first in-game frame.
+- **`bbtest profile ["note"]`:** a session with RADV's RGP tracing armed
+  (`MESA_VK_TRACE=rgp`, a per-session `MESA_VK_TRACE_TRIGGER`).
+  - Each snapshot also captures the next frame as `rgp/<snapshot>.rgp`, at most one every
+    10 s, listed in `rgp/captures.tsv`.
+  - Every pipeline's shader statistics go to `shader-stats.tsv`: VGPRs, SGPRs, spills,
+    LDS, code size, occupancy, with the pass label. They come from
+    VK_KHR_pipeline_executable_properties and the capture-statistics flag, built without
+    bbhost's pipeline cache.
+  - Profile mode only. A normal launch is unchanged.
+
 ## v0.2.18-vk.1 (2026-10-18): the first release since vk.0
 
 Release notes: docs/vk/RELEASE-v0.2.18-vk.1.md.

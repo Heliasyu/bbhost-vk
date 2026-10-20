@@ -460,6 +460,8 @@ struct GpuBusy {
     std::uint64_t cmdbufs = 0, presents = 0;
 };
 GpuBusy host_gpu_busy();
+// rc2: the GPU sampler's frame is being recorded (the pass timer times it too).
+bool host_gpu_sample_running();
 // The presenter's command buffer (a VkCommandBuffer): its first command and
 // its last (before vkEndCommandBuffer), and once its fence has signalled - or
 // before the next one is recorded, which waits for it. Caller holds the lock

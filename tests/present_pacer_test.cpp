@@ -88,6 +88,22 @@ int main() {
         std::printf("creep: wait at the end %.0f us\n", static_cast<double>(last_wait) / 1e3);
         CHECK(last_wait <= PresentPacer::kKeepNs + PresentPacer::kCreepNs);
     }
+    {  // rc2: after a late frame re-anchors the grid 4 ms behind the arrivals, the wait is back under 0.3 ms within 90 frames (3/4 s)
+        PresentPacer p;
+        p.set_period(P);
+        std::int64_t t0 = 1000000000;
+        p.wait_ns(t0 + 4900000);
+        p.presented(t0 + 4900000);
+        std::int64_t w60 = 0;
+        for (int k = 1; k <= 90; ++k) {
+            const std::int64_t a = t0 + k * P + 900000;
+            const std::int64_t w = p.wait_ns(a);
+            p.presented(a + w);
+            if (k == 90) w60 = w;
+        }
+        std::printf("settle: wait 90 frames after a 4 ms re-anchor %.0f us\n", static_cast<double>(w60) / 1e3);
+        CHECK(w60 < 300000);
+    }
     if (failures) {
         std::printf("%d failures\n", failures);
         return 1;

@@ -62,6 +62,8 @@ void host_opt_set_index(const char* key, int index);
 void host_opt_fsr4_unavailable();
 // Writes the options file now: the key bindings changed (host/bindings.h).
 void host_options_save_now();
+// rc2: every setting as "key = value" lines (no account), for the performance capture.
+std::string host_options_dump();
 
 // A Steam Deck - Valve's Jupiter or Galileo, from /sys/devices/virtual/dmi/id
 // on Linux and the BIOS registry key on Windows - where the System menu has a

@@ -1613,3 +1613,104 @@ blur skip on throughout):
   - The skip stays out (blur on is not eligible), as it should.
   - test9/t11 looked fine with blur on at 4K. vk.1's defaults check looks at it under post
     at render.
+
+## vk.1-rc2: frame-latency limit, wider post at render, snapshots, profile mode (2026-10-19)
+
+From vk1-dream's analysis, approved as one build, with two steering changes: no switches
+for optimizations, and compile tracking in the snapshots.
+
+- **Drops (vk1-dream: ~500).**
+  - `host_present` replaced a frame waiting in the mailbox (`g_present_next`) when the
+    command processor (CP) handed in the next one.
+  - Now, while the presenter has not taken the waiting frame, the CP waits for it on
+    `g_present_taken_cv`: up to max(20 ms, 2 frames), then drops as before. This is safe
+    because the CP's `done()` callback runs after `host_gpu_submit` with no locks held.
+  - `hle_video_finish_flip` did the same at its queue of 4: it threw the oldest flip
+    away. Now it waits up to 34 ms for `vblank_tick` to pop one (`g_vo_popped`), then
+    completes the oldest normally.
+  - The counts are in the 300-frame present log line ("command processor waited").
+- **Pacing:** creep 100 µs a frame, window 30 frames. The unit test re-anchors 4 ms late
+  and checks the wait is < 300 µs by frame 90; it is 150 µs.
+- **Post at render:**
+  - A draw that closed the window now continues it when it has the post chain's shape:
+    1 RGBA16F target, no depth or MRT.
+    - At output size, it needs at least one stand-in input and one smaller RGBA16F
+      input.
+    - Below output size, it needs one of the two.
+  - Bloom's first pass (4c37ae6d+4b766f62) and CA (bb92a5b6+483f5dc1, 84b3a182+3c2b7974)
+    are kept out by name.
+  - What closed each window, by program, is counted (`g_post_end_by`) and goes into
+    snapshots with the fallback reasons.
+- **Sharpening in the present pass:** an RCAS 5-tap variant of the present shader, used
+  only at 1:1 texel mapping. The present pass draws the HUD, so it would sharpen the HUD
+  and halo it. It stays behind `BBHOST_SHARPEN_AT_PRESENT=1`, and FSR's own sharpening of
+  the scene stays the default.
+- **Overlay:**
+  - The 256 KiB vertex buffer overflowed on the reorganized menu with long notes, and
+    nothing was drawn (the F10 bug). It is now 1 MiB; on overflow it draws the whole
+    triangles that fit and logs once.
+  - The options' `wrap_note` caps notes at 3 lines.
+- **Menu:**
+  - `kPresentPace` and `kPostAtRender` are gone. Unknown keys in a saved file are
+    skipped.
+  - `pace_mode()` and `post_mode()` read only the environment.
+  - Restart labels come from the row's `restart` flag. The upscaler and quality are
+    flagged because the scene split is planned at boot.
+- **Snapshots (`host/perf_capture.cpp`):**
+  - A lock-free seqlock tap on `host_log_line` keeps the last 4096 lines (the fault
+    handler logs, so no mutex).
+  - The presenter notes each present (8192 entries).
+  - The capture thread `bb-perfsnap` keeps a ring of seconds: GPU busy, and
+    /proc/self/task CPU time by thread name. It also polls `<snapdir>/snap.request` every
+    250 ms and writes the file via `.part` and rename.
+  - The renderer publishes its post-at-render text at its next draw when asked.
+- **GPU sampler (gpu.cpp):**
+  - It reuses BBHOST_GPU_PROFILE=3's pass timestamps, with pools always made unless
+    `BBHOST_GPU_SAMPLE=0`. It is switched only in `begin_recording_locked`, so no pair
+    spans a switch.
+  - It arms once 10 s have passed and the last present interval was within 1.06× the
+    frame period. It runs for one flip, then collects the slots it marked (`sampled`).
+  - Those go to the sample, not to `profile_ns`, and are logged as `gpu sample:`.
+  - The pass timer runs for that frame too, for FSR's ms.
+- **Compiles:**
+  - `perf::note_compile` is called at:
+    - graphics pipeline builds (render.cpp);
+    - compute builds, where an optimizer rebuild on `own_cache` counts as a worker;
+    - compute precompile waits, which count as waited;
+    - translations, through a hook in translation_cache.h so the unit test needs no
+      perf code.
+  - "Waited" means it ran on the CP and not on a precompile worker
+    (`perf::set_worker_thread`).
+  - Startup logs whether the caches were kept or cleared for the translator stamp, and
+    the totals before the first in-game frame.
+- **Profile mode (`bbtest profile`):**
+  - Mesa's RGP trigger is `MESA_VK_TRACE_TRIGGER`. wsi_common.c checks it with access() at
+    each present, unlinks it and calls `capture_trace`.
+  - The file is written by ac_rgp.c to a fixed path,
+    `/tmp/<process>_<Y.m.d_H.M.S>[_frameN].rgp`, and "RGP capture saved to" goes to
+    stderr.
+  - bbhost creates the trigger after a snapshot (10 s debounce). A helper thread waits up
+    to 5 s for the driver to take it, then up to 45 s for a new /tmp/*.rgp to hold its
+    size for 1 s. It moves the file next to the snapshot's name in `rgp/`, falling back to
+    copy and remove across file systems.
+  - `BBHOST_SHADER_STATS` enables VK_KHR_pipeline_executable_properties. Every
+    library/link/LTO-relink/whole graphics pipeline and every compute pipeline then gets
+    `CAPTURE_STATISTICS`, built with `VK_NULL_HANDLE` instead of bbhost's cache (the flag
+    is in RADV's cache key; Mesa's disk cache still applies). One TSV line goes out per
+    executable.
+  - Host passes (present, overlay, FSR) are not covered.
+  - Without the variables none of this runs.
+- **Headless .rgp analysis:**
+  - RGP has no command-line analyzer, and the .rgp format (RDF chunks: SQTT data, code
+    object database, PSO correlation, queue events, written by Mesa's ac_rgp.c and
+    ac_sqtt.c) only gives timing after the SQTT tokens are decoded.
+  - The box can list a capture's chunks and code objects by following ac_rgp.c. For the
+    timing, open it in the RGP GUI, on the PC or in the box's desktop.
+- **Verified here:**
+  - 51/51 ctest (19 skipped as before: they need the game's files).
+  - `--stream-selftest`, `=2` with BBHOST_FSR4_FEATURES=1 (FSR 3.1 fallback) and `=20`:
+    pass, with the same 10 upstream SYNC-HAZARD lines as vk.1.
+  - bbtest snap and --show on synthetic files.
+  - lavapipe lacks VK_KHR_pipeline_executable_properties, so the shader-stats path logs
+    that and does nothing. RGP needs RADV.
+  - Neither ran on the hardware here.

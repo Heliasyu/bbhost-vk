@@ -4,6 +4,8 @@
 #include "host/foreign_hooks.h"
 #include "host/gpu_internal.h"
 #include "host/fsr4_pass.h"
+#include "host/perf_capture.h"
+#include "host/settings.h"
 #include "host/shader_patch.h"
 #include "host/translation_cache.h"
 
@@ -1188,7 +1190,10 @@ static void shader_caches_check_build() {
         std::ifstream in(stamp);
         std::getline(in, theirs);
     }
-    if (theirs == ours) return;
+    if (theirs == ours) {
+        host_log("gpu: shader caches match translator %s: kept (not cleared)", ours.c_str());
+        return;
+    }
     std::error_code ec;
     if (const char* e = std::getenv("BBHOST_KEEP_SHADER_CACHE"); e && e[0] == '1') {
         host_log("gpu: shader caches made by translator %s kept for translator %s (BBHOST_KEEP_SHADER_CACHE=1)",
@@ -1920,6 +1925,13 @@ bool init_locked() {
     // pipeline. A barrier ends every pass (BBHOST_PASS_BARRIERS=full, the
     // default), so a pass's pair is its own GPU time; draws' pairs overlap.
     g.profile_passes = g.profile && std::getenv("BBHOST_GPU_PROFILE")[0] == '3';
+    // rc2: the GPU sampler (sampler_begin_recording_locked): the timestamp
+    // pools are made whatever BBHOST_GPU_PROFILE says. BBHOST_GPU_SAMPLE=0 off.
+    g.profile_env = g.profile;
+    g.profile_pools = !g.profile && props.limits.timestampComputeAndGraphics && perf::enabled() && [] {
+        const char* e = std::getenv("BBHOST_GPU_SAMPLE");
+        return !(e && e[0] == '0');
+    }();
     // =3, or =1 with BBHOST_GPU_PROFILE_STATS=1: pipeline statistics beside
     // the pairs (gpu_internal.h profile_stats).
     if (g.profile_passes || (g.profile && !g.profile_gaps && std::getenv("BBHOST_GPU_PROFILE_STATS") &&
@@ -1983,6 +1995,14 @@ bool init_locked() {
         g.has_memory_budget = has("VK_EXT_memory_budget");
         // BBHOST_PIPELINE_STATS: the driver's statistics and disassembly of named pipelines (render.cpp).
         g.pipeline_stats = std::getenv("BBHOST_PIPELINE_STATS") && has("VK_KHR_pipeline_executable_properties");
+        // rc2, bbtest profile only: every pipeline's statistics (render.cpp shader_stats_note).
+        if (const char* e = std::getenv("BBHOST_SHADER_STATS"); e && *e) {
+            g.shader_stats = has("VK_KHR_pipeline_executable_properties");
+            g.pipeline_stats = g.pipeline_stats || g.shader_stats;
+            host_log(g.shader_stats ? "gpu: shader statistics of every pipeline into %s (bbtest profile; pipelines built without bbhost's pipeline cache)"
+                                    : "gpu: BBHOST_SHADER_STATS=%s: the device lacks VK_KHR_pipeline_executable_properties; no shader statistics",
+                     e);
+        }
 #if defined(VK_KHR_present_mode_fifo_latest_ready)
         // The present mode FIFO_LATEST_READY (window.cpp, vk_create_swapchain):
         // V-Sync with no queue of frames behind the display - at each refresh
@@ -2414,11 +2434,11 @@ bool init_locked() {
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         vkCreateFence(g.device, &fci, nullptr, &g.slots[k].fence);
         glitch_slot_init_locked(g.slots[k]);
-        if (g.profile) {
+        if (g.profile || g.profile_pools) {
             VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
             qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
             qci.queryCount = kMaxQueued * kStageSlots * 2;
-            if (vkCreateQueryPool(g.device, &qci, nullptr, &g.slots[k].qpool) != VK_SUCCESS) g.profile = false;
+            if (vkCreateQueryPool(g.device, &qci, nullptr, &g.slots[k].qpool) != VK_SUCCESS) g.profile = g.profile_env = g.profile_pools = false;
             if (g.profile_stats) {
                 VkQueryPoolCreateInfo sci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 sci.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
@@ -2667,6 +2687,89 @@ bool extract_program(std::uint64_t code_va, std::vector<std::uint32_t>& words, s
     return true;
 }
 
+// rc2, the GPU sampler: one frame every ~10 s timed pass by pass with the
+// BBHOST_GPU_PROFILE=3 machinery (a timestamp pair a render pass, named by
+// its first draw's program; each dispatch and host copy), for the
+// performance capture (host/perf_capture.h) and a `gpu sample:` log line.
+// Turned on and off only where a command buffer starts, so no pair spans a
+// switch. The frame's draws are recorded in place (no deferred packets)
+// while it is on; a frame after one over budget is not sampled (the sample
+// waits for a smooth one), nor a loading screen.
+struct Sampler {
+    enum State { kIdle, kArmed, kRunning, kCollecting } state = kIdle;
+    std::uint64_t flip = 0;
+    std::chrono::steady_clock::time_point last{};
+    int pending = 0;  // slots recorded while running, not collected yet
+    std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> ns;  // by name: ns, count
+    std::uint64_t span_ns = 0;
+};
+Sampler g_sampler;
+std::atomic<bool> g_sampler_running{false};
+
+void sampler_finish_locked() {
+    std::vector<std::pair<std::string, double>> top;
+    double timed = 0;
+    for (const auto& [name, v] : g_sampler.ns) {
+        top.emplace_back(name, static_cast<double>(v.first) / 1e6);
+        timed += static_cast<double>(v.first) / 1e6;
+    }
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    const std::size_t entries = top.size();
+    if (top.size() > 16) top.resize(16);
+    const double span = static_cast<double>(g_sampler.span_ns) / 1e6;
+    std::string list;
+    for (std::size_t i = 0; i < top.size() && i < 10; ++i) {
+        char b[128];
+        std::snprintf(b, sizeof(b), " %s=%.2f", top[i].first.c_str(), top[i].second);
+        list += b;
+    }
+    host_log("gpu sample: flip %llu: command buffers %.2f ms on the GPU, %.2f ms in %zu timed passes/dispatches; top:%s",
+             static_cast<unsigned long long>(g_sampler.flip), span, timed, entries, list.c_str());
+    perf::note_gpu_sample(g_sampler.flip, span, timed, entries, top);
+    g_sampler.ns.clear();
+    g_sampler.span_ns = 0;
+}
+
+void sampler_begin_recording_locked() {
+    if (!g.profile_pools) return;
+    const std::uint64_t flip = hle_video_flip_count();
+    const auto now = std::chrono::steady_clock::now();
+    switch (g_sampler.state) {
+        case Sampler::kIdle: {
+            if (now - g_sampler.last < std::chrono::seconds(10) || hle_video_loading()) return;
+            // Over budget: the last present interval past 1.06x the game's pace.
+            const std::int64_t last = perf::last_interval_ns();
+            const int fps = host_settings().frame_cap > 0 ? host_settings().frame_cap : 120;
+            if (last <= 0 || static_cast<double>(last) > 1.06e9 / static_cast<double>(fps)) return;
+            g_sampler.flip = flip + 1;
+            g_sampler.state = Sampler::kArmed;
+            return;
+        }
+        case Sampler::kArmed:
+            if (flip < g_sampler.flip) return;
+            if (flip > g_sampler.flip) {  // missed its start: next time
+                g_sampler.state = Sampler::kIdle;
+                return;
+            }
+            g.profile = g.profile_passes = true;
+            g_sampler_running.store(true, std::memory_order_relaxed);
+            g_sampler.state = Sampler::kRunning;
+            return;
+        case Sampler::kRunning:
+            if (flip == g_sampler.flip) return;
+            g.profile = g.profile_passes = false;
+            g_sampler_running.store(false, std::memory_order_relaxed);
+            g_sampler.state = Sampler::kCollecting;
+            [[fallthrough]];
+        case Sampler::kCollecting:
+            if (g_sampler.pending > 0) return;
+            sampler_finish_locked();
+            g_sampler.last = now;
+            g_sampler.state = Sampler::kIdle;
+            return;
+    }
+}
+
 void begin_recording_locked() {
     if (!g.recording) {
         if (stream_on()) {
@@ -2684,6 +2787,9 @@ void begin_recording_locked() {
         busy_begin_locked(g.slots[g.slot]);
         glitch_begin_recording_locked();
         occlusion_begin_recording_locked();
+        sampler_begin_recording_locked();
+        g.slots[g.slot].sampled = g.profile && !g.profile_env;
+        if (g.slots[g.slot].sampled) ++g_sampler.pending;
         if (g.profile) {
             Gpu::Slot& sl = g.slots[g.slot];
             rec().reset_query_pool(sl.qpool, 0, kQueriesPerSlot);
@@ -3110,15 +3216,33 @@ VkPipeline create_compute(VkShaderModule module, CsBuild how, const std::string&
                                                      : 0;
     VkPipeline p = VK_NULL_HANDLE;
     VkResult r;
+    const auto t_build = std::chrono::steady_clock::now();
+    // rc2: into the performance capture (an optimizer's background rebuild,
+    // own_cache, never holds a frame up; an inline build on the command
+    // processor does).
+    struct Noted {
+        const std::chrono::steady_clock::time_point& t0;
+        const std::string& name;
+        bool background, probe;
+        ~Noted() {
+            if (probe) return;  // a cache lookup (kOptimizedCached), not a compile
+            const std::uint64_t us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+            const bool worker = background || perf::on_worker_thread();
+            perf::note_compile("compute", name, us, worker, !worker);
+        }
+    } noted{t_build, watch, own_cache != VK_NULL_HANDLE, how == CsBuild::kOptimizedCached};
+    cpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     if (how == CsBuild::kOptimizedCached) {
-        r = vkCreateComputePipelines(g.device, PipelineCacheUse().cache, 1, &cpci, nullptr, &p);  // VK_PIPELINE_COMPILE_REQUIRED: not there
+        r = vkCreateComputePipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &cpci, nullptr, &p);  // VK_PIPELINE_COMPILE_REQUIRED: not there
     } else if (own_cache != VK_NULL_HANDLE) {
         CompilingScope compiling(watch, spirv);
-        r = vkCreateComputePipelines(g.device, own_cache, 1, &cpci, nullptr, &p);
+        r = vkCreateComputePipelines(g.device, shader_stats_cache(own_cache), 1, &cpci, nullptr, &p);
     } else {
         CompilingScope compiling(watch, spirv);
-        r = vkCreateComputePipelines(g.device, PipelineCacheUse().cache, 1, &cpci, nullptr, &p);
+        r = vkCreateComputePipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &cpci, nullptr, &p);
     }
+    if (g.shader_stats && r == VK_SUCCESS) shader_stats_note(p, how == CsBuild::kUnoptimized ? "compute-unoptimized" : "compute", watch);
     return r == VK_SUCCESS ? p : VK_NULL_HANDLE;
 }
 
@@ -3400,6 +3524,7 @@ Precompiled take_precompiled_compute(std::uint64_t key, const GpuDispatch& d, co
     if (waited) {
         g_cs_pre.waited += 1;
         g_cs_pre.wait_us += wait_us;
+        perf::note_compile("compute", name + " (the dispatch waited for its worker)", wait_us, false, true);
     }
     PrecompiledCompute::Entry& e = g_cs_pre.by_key[key];
     if (e.failed) return Precompiled::kBuildHere;  // the dispatch's own build reports the failure
@@ -4743,22 +4868,31 @@ void profile_end_locked() {
 void collect_profile_locked(Gpu::Slot& sl) {
     std::uint64_t span[2] = {};
     bool have_span = false;
-    if (g.profile && sl.span) {
+    const bool sampled = sl.sampled;  // rc2: the GPU sampler's, not BBHOST_GPU_PROFILE's
+    if ((g.profile || sampled) && sl.span) {
         if (vkGetQueryPoolResults(g.device, sl.qpool, kQueriesPerSlot - 2, 2, sizeof(span), span, 8,
                                   VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS &&
             span[1] > span[0]) {
-            g.cmdbuf_ns += static_cast<std::uint64_t>((span[1] - span[0]) * g.timestamp_period_ns);
-            ++g.cmdbuf_count;
+            if (sampled) {
+                g_sampler.span_ns += static_cast<std::uint64_t>((span[1] - span[0]) * g.timestamp_period_ns);
+            } else {
+                g.cmdbuf_ns += static_cast<std::uint64_t>((span[1] - span[0]) * g.timestamp_period_ns);
+                ++g.cmdbuf_count;
+            }
             have_span = true;
         }
     }
     sl.span = false;
+    if (sampled) {
+        sl.sampled = false;
+        if (g_sampler.pending > 0) --g_sampler.pending;
+    }
     const auto charge_gap = [&](const std::array<void*, 4>& sites, std::uint64_t from, std::uint64_t to) {
         auto& e = g.profile_gap_ns[sites];
         e.first += to > from ? static_cast<std::uint64_t>((to - from) * g.timestamp_period_ns) : 0;
         e.second += 1;
     };
-    if (!g.profile || sl.qnames.empty()) {
+    if (!(g.profile || sampled) || sl.qnames.empty()) {
         if (g.profile_gaps && have_span) charge_gap(sl.tail_gap, span[0], span[1]);
         sl.qnames.clear();
         sl.qgaps.clear();
@@ -4770,7 +4904,7 @@ void collect_profile_locked(Gpu::Slot& sl) {
                               VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         for (std::size_t i = 0; i < sl.qnames.size(); ++i) {
             const std::uint64_t dt = ts[i * 2 + 1] > ts[i * 2] ? ts[i * 2 + 1] - ts[i * 2] : 0;
-            auto& e = g.profile_ns[*sl.qnames[i]];
+            auto& e = sampled ? g_sampler.ns[*sl.qnames[i]] : g.profile_ns[*sl.qnames[i]];
             e.first += static_cast<std::uint64_t>(dt * g.timestamp_period_ns);
             e.second += 1;
         }
@@ -5545,7 +5679,7 @@ void host_gpu_flush() {
 // last call, "name=ms(count)" for the top eight.
 std::string host_gpu_profile_report() {
     std::lock_guard<GpuMutex> lock(g.mu);
-    if (!g.profile) return "";
+    if (!g.profile_env) return "";  // rc2: not the GPU sampler's frames
     std::vector<std::pair<std::string, std::pair<std::uint64_t, std::uint64_t>>> v(g.profile_ns.begin(), g.profile_ns.end());
     std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
     std::string out;
@@ -6036,6 +6170,7 @@ void host_gpu_set_loading(bool loading) {
 }
 
 void host_gpu_world_reached() { gpu::precompile_set_world_reached(); }
+bool host_gpu_sample_running() { return gpu::g_sampler_running.load(std::memory_order_relaxed); }
 std::size_t host_gpu_shader_backlog() { return gpu::translation_cache_cold() ? gpu::precompile_backlog() : 0; }
 
 std::string host_gpu_image_heap_report() {

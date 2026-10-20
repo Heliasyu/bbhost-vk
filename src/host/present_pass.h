@@ -21,6 +21,12 @@
 bool present_pass_init(VkDevice device, VkPhysicalDevice phys, VkFormat colour_format);
 void present_pass_shutdown(VkDevice device);
 bool present_pass_ready();
+// rc2, BBHOST_SHARPEN_AT_PRESENT=1 (debugging): FSR, having left its own
+// sharpening out, asks the presenter to sharpen (RCAS, `sharpness` 0..1).
+// Any thread; good for 100 ms (a frame without FSR shows plain). False when
+// there is no sharpening pipeline: the caller keeps FSR's own pass.
+bool present_pass_set_sharpen(float sharpness);
+bool present_sharpen_at_present();  // BBHOST_SHARPEN_AT_PRESENT=1
 
 // The game's display image and the region of it shown.
 struct PresentSource {

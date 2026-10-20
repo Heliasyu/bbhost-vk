@@ -8,6 +8,11 @@
 #include "host/shaders/motion_view_frag.spv.h"
 #include "log.h"
 
+#include <atomic>
+#include <cstdlib>
+#include <chrono>
+#include <cmath>
+
 namespace {
 
 VkDevice g_device = VK_NULL_HANDLE;
@@ -16,6 +21,10 @@ VkFormat g_format = VK_FORMAT_UNDEFINED;  // the swapchain's, the pipeline's att
 VkDescriptorSetLayout g_dsl = VK_NULL_HANDLE;
 VkPipelineLayout g_layout = VK_NULL_HANDLE;
 VkPipeline g_pipeline = VK_NULL_HANDLE;
+VkPipeline g_sharpen_pipeline = VK_NULL_HANDLE;  // rc2: present_sharpen.frag (BBHOST_SHARPEN_AT_PRESENT=1)
+std::atomic<float> g_sharpen_con{0.0f};          // the last request's, 0: none
+std::atomic<std::int64_t> g_sharpen_at{0};       // steady ns of that request (FSR's recording thread)
+std::int64_t steady_now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 VkSampler g_sampler = VK_NULL_HANDLE;
 VkDescriptorPool g_pool = VK_NULL_HANDLE;
 VkDescriptorSet g_set = VK_NULL_HANDLE;
@@ -54,12 +63,13 @@ bool build(VkDevice device) {
     dslci.pBindings = &b;
     if (vkCreateDescriptorSetLayout(device, &dslci, nullptr, &g_dsl) != VK_SUCCESS) return false;
 
-    VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4};
+    const VkPushConstantRange pcrs[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4},
+                                         {VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(float) * 4}};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &g_dsl;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pcr;
+    plci.pushConstantRangeCount = 2;
+    plci.pPushConstantRanges = pcrs;
     if (vkCreatePipelineLayout(device, &plci, nullptr, &g_layout) != VK_SUCCESS) return false;
 
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -135,6 +145,15 @@ bool build(VkDevice device) {
     gp.pDynamicState = &ds;
     gp.layout = g_layout;
     const VkResult r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_pipeline);
+    if (r == VK_SUCCESS) {  // rc2: its sharpening variant; its failure costs only that
+        if (VkShaderModule sfs = make_module(device, present_spv::kFragSharpen, sizeof(present_spv::kFragSharpen) / 4)) {
+            stages[1].module = sfs;
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_sharpen_pipeline) != VK_SUCCESS)
+                g_sharpen_pipeline = VK_NULL_HANDLE;
+            stages[1].module = fs;
+            vkDestroyShaderModule(device, sfs, nullptr);
+        }
+    }
     // The motion-vector view: blended (its alpha over the picture). Its
     // failure costs only the view.
     VkShaderModule mfs = make_module(device, k_motion_view_frag_spv, sizeof(k_motion_view_frag_spv) / 4);
@@ -194,6 +213,8 @@ void present_pass_shutdown(VkDevice device) {
     if (!device) return;
     if (g_source_view) vkDestroyImageView(device, g_source_view, nullptr);
     if (g_pipeline) vkDestroyPipeline(device, g_pipeline, nullptr);
+    if (g_sharpen_pipeline) vkDestroyPipeline(device, g_sharpen_pipeline, nullptr);
+    g_sharpen_pipeline = VK_NULL_HANDLE;
     if (g_motion_view) vkDestroyImageView(device, g_motion_view, nullptr);
     if (g_motion_pipeline) vkDestroyPipeline(device, g_motion_pipeline, nullptr);
     if (g_motion_pool) vkDestroyDescriptorPool(device, g_motion_pool, nullptr);
@@ -220,6 +241,27 @@ void present_pass_shutdown(VkDevice device) {
 }
 
 bool present_pass_ready() { return g_pipeline != VK_NULL_HANDLE; }
+
+bool present_sharpen_at_present() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_SHARPEN_AT_PRESENT");
+        const bool v = e && e[0] == '1';
+        if (v) host_log("present: BBHOST_SHARPEN_AT_PRESENT=1: FSR's sharpening is done in the presenting pass (the HUD is sharpened too)");
+        return v;
+    }();
+    return on;
+}
+
+bool present_pass_set_sharpen(float sharpness) {
+    if (sharpness <= 0.0f || !g_sharpen_pipeline) {
+        g_sharpen_con.store(0.0f);
+        return false;
+    }
+    const float s = sharpness > 1.0f ? 1.0f : sharpness;
+    g_sharpen_con.store(std::exp2(-(2.0f - 2.0f * s)));
+    g_sharpen_at.store(steady_now_ns());
+    return true;
+}
 
 bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, VkExtent2D extent, VkRect2D shown,
                         const PresentSource* src, const float clear[4]) {
@@ -286,8 +328,16 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
     ri.pColorAttachments = &att;
     vkCmdBeginRendering(cmd, &ri);
     if (src) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipeline);
+        // rc2: the sharpening variant only one texel a pixel (its taps are texel offsets).
+        // A request older than 100 ms: FSR has stopped upscaling (a menu, a load) - plain.
+        const float con = g_sharpen_con.load();
+        const bool sharpen = con > 0.0f && steady_now_ns() - g_sharpen_at.load() < 100000000 && g_sharpen_pipeline && shown.extent.width == src->w && shown.extent.height == src->h;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sharpen ? g_sharpen_pipeline : g_pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_set, 0, nullptr);
+        if (sharpen) {
+            const float pc[4] = {con, 0.0f, 0.0f, 0.0f};
+            vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
+        }
         const VkViewport vp{static_cast<float>(shown.offset.x), static_cast<float>(shown.offset.y), static_cast<float>(shown.extent.width),
                             static_cast<float>(shown.extent.height), 0.0f, 1.0f};
         vkCmdSetViewport(cmd, 0, 1, &vp);

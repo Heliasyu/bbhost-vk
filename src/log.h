@@ -7,8 +7,13 @@
 #include <unistd.h>
 #endif
 
+// bbhost-vk rc2: a tap on every line (host/perf_capture.cpp keeps the last
+// 30 s for its captures). Lock-free on the tap's side: the fault handler logs.
+inline void (*volatile g_host_log_tap)(const char* line, std::size_t len) = nullptr;
+
 // One write per line so lines from different threads do not interleave.
 inline void host_log_line(const char* line) {
+    if (auto* tap = g_host_log_tap) tap(line, std::strlen(line));
 #if defined(_WIN32)
     std::fputs(line, stderr);
 #else

@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -73,6 +74,7 @@ struct VideoPort {
 };
 
 std::mutex g_vo_mu;
+std::condition_variable g_vo_popped;  // rc2: the vblank completed a queued flip (hle_video_finish_flip waits on it)
 std::unordered_map<int, VideoPort> g_vo;
 int g_video_next = 1;
 std::once_flag g_vsync_once;
@@ -394,6 +396,7 @@ void vblank_tick(std::uint64_t vcount) {
             p.flip_queue.pop_front();
             p.pending = static_cast<int>(p.flip_queue.size());
             finish_flip_locked(p, req.buffer, req.arg);
+            g_vo_popped.notify_all();
             g_flips_done.store(p.flip_count);
             pacing_note_completed(req.present.arrived_ns);
             if (!req.shown) pacing_note_shown(req.present.arrived_ns);
@@ -875,13 +878,34 @@ void hle_video_finish_flip(int handle, int buffer, std::int64_t arg, bool record
         unsigned dw = 0, dh = 0;
         const bool show = g_present_on_arrival && recorded;
         {
-            std::lock_guard<std::mutex> lock(g_vo_mu);
+            std::unique_lock<std::mutex> lock(g_vo_mu);
             VideoPort* p = vo_get(handle);
             if (!p) {
                 return;
             }
+            // rc2, frame-latency limit: a full queue waits for the vblank to
+            // complete one (bounded) instead of discarding the oldest - a
+            // discarded flip never completed, so the game's flip arg skipped
+            // a frame. Past the bound the oldest completes now, in order.
             if (p->flip_queue.size() >= 4) {
-                p->flip_queue.pop_front();  // drop the oldest rather than stall the CP
+                static std::atomic<std::uint64_t> waits{0};
+                const std::uint64_t n = waits.fetch_add(1, std::memory_order_relaxed);
+                if (n == 0 || n % 600 == 0) {
+                    host_log("video: the flip queue was full; the command processor waited for the vblank (%llu times so far)",
+                             static_cast<unsigned long long>(n + 1));
+                }
+                g_vo_popped.wait_for(lock, std::chrono::milliseconds(34), [&] {
+                    VideoPort* q = vo_get(handle);
+                    return !q || q->flip_queue.size() < 4;
+                });
+                p = vo_get(handle);
+                if (!p) return;
+                while (p->flip_queue.size() >= 4) {
+                    const VideoPort::FlipReq old_req = p->flip_queue.front();
+                    p->flip_queue.pop_front();
+                    finish_flip_locked(*p, old_req.buffer, old_req.arg);
+                    g_flips_done.store(p->flip_count);
+                }
             }
             flip.on_arrival = show;
             p->flip_queue.push_back({buffer, arg, mark, gpu_need, flip, show});

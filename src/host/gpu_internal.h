@@ -236,6 +236,12 @@ struct Gpu {
     std::atomic<bool> vram_short{false};
     // VK_KHR_pipeline_executable_properties enabled, for BBHOST_PIPELINE_STATS (render.cpp)
     bool pipeline_stats = false;
+    // rc2, bbtest profile: BBHOST_SHADER_STATS=<file> - every pipeline is
+    // built with VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR and no pipeline
+    // cache of ours (the flag is in the driver's cache key), and its
+    // statistics are appended to that file (render.cpp shader_stats_note).
+    // Never set on a normal launch.
+    bool shader_stats = false;
     // shaderFloat16 and shaderInt16 enabled: the host's own shaders may do f16
     // math (the half-precision FSR 1, fsr.cpp).
     bool has_f16_math = false;
@@ -306,6 +312,7 @@ struct Gpu {
         std::array<void*, 4> tail_gap{};
         bool qreset = false;
         bool span = false;  // the command-buffer span pair was written
+        bool sampled = false;  // rc2: recorded during the GPU sampler's frame (gpu.cpp sampler_*)
         VkQueryPool stat_pool = VK_NULL_HANDLE;  // Gpu::profile_stats: one query per pair
         bool stat_open = false;                  // the last pair's statistics query is still active
         // The GPU busy meter (gpu_busy.cpp, on unless BBHOST_GPU_BUSY=0): a
@@ -446,6 +453,10 @@ struct Gpu {
     // =2 also charges the time between pairs to what was recorded in it
     // (profile_gap_ns, by recording sites).
     bool profile = false;
+    // rc2: BBHOST_GPU_PROFILE asked for (profile is also on for the sampler's
+    // one frame every ~10 s), and the sampler's query pools exist.
+    bool profile_env = false;
+    bool profile_pools = false;
     bool profile_gaps = false;
     bool profile_passes = false;  // BBHOST_GPU_PROFILE=3: a pair a render pass, not a draw (render.cpp)
     // BBHOST_GPU_PROFILE=3 (or =1 with BBHOST_GPU_PROFILE_STATS=1) where the
@@ -503,6 +514,12 @@ inline void draw_failed(DrawFail why) {
 extern std::atomic<bool> g_cache_divert;
 extern std::atomic<int> g_cache_users;
 extern std::atomic<std::uint64_t> g_cache_diverted;  // creations that took the side cache
+// rc2 (bbtest profile, g.shader_stats): the creation flag and the cache a
+// pipeline is built with, and its statistics into the shader-stats file.
+inline VkPipelineCreateFlags shader_stats_flags() { return g.shader_stats ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0; }
+inline VkPipelineCache shader_stats_cache(VkPipelineCache c) { return g.shader_stats ? VK_NULL_HANDLE : c; }
+void shader_stats_note(VkPipeline p, const char* kind, const std::string& name);
+
 struct PipelineCacheUse {
     VkPipelineCache cache = VK_NULL_HANDLE;
     bool main = false;

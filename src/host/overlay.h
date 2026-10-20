@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 // The host overlay: a 2D layer drawn over the frame the game presented, by the
 // code that already owns presentation. It is how the PC port adds what the PS4
 // build has no room for - the pointer, the text box that stands in for the
@@ -26,6 +28,9 @@ void host_overlay_tri(float x0, float y0, float x1, float y1, float x2, float y2
 void host_overlay_cursor(float x, float y);
 // Nothing committed to draw: one atomic load, no lock.
 bool host_overlay_empty();
+// rc2: the vertices of the list being built, and of the one presents draw (F10's log).
+std::size_t host_overlay_built_vertices();
+std::size_t host_overlay_shown_vertices();
 
 // Presenter side. `init` is safe to call repeatedly; `draw` records into a
 // command buffer that is already in dynamic rendering's expected layout and

@@ -5,6 +5,7 @@
 #include "host/gpu_internal.h"
 #include "host/pass_timer.h"
 #include "host/shaders/fsr4_sharpen.spv.h"
+#include "host/present_pass.h"
 #include "host/upscaler_inputs.h"
 #include "log.h"
 
@@ -364,6 +365,10 @@ bool fsr4_record_locked(VkCommandBuffer cmd, const UpscalerInputs& in, std::uint
         f.jitter[0] = p.jitter_x;
         f.jitter[1] = p.jitter_y;
         f.sharpen = p.sharpen && p.sharpness > 0.0f;
+        // rc2, BBHOST_SHARPEN_AT_PRESENT=1 (debugging): the presenter's pass
+        // sharpens instead (host/present_pass.h). Not the default: it would
+        // sharpen the HUD drawn after this, and halo its text.
+        if (f.sharpen && present_sharpen_at_present() && present_pass_set_sharpen(p.sharpness)) f.sharpen = false;
         f.sharpness = p.sharpness;
         f.sharpen_external = f.sharpen && !sharpen_amd() && make_sharpen();
         f.reset = p.reset;

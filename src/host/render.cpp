@@ -10,6 +10,7 @@
 #include "engine/scene_split_sites.h"
 #include "engine/gx_state.h"
 #include "host/gpu_internal.h"
+#include "host/perf_capture.h"
 #include "host/options.h"
 #include "core/host_clock.h"
 #include "host/shader_patch.h"
@@ -1332,13 +1333,14 @@ void mb_skip_materialize_locked() {
 // FSR's (menus, the Dream's other paths, loads), FSR has no inputs, or the
 // sizes are not output = target; and for good if FSR fails at the window's
 // end (the stand-in is copied in, the log says why).
-// v0.2.18-vk.1: BBHOST_POST_AT_RENDER when set, else the options' "Post-
-// processing at render size" (on); read at the first draw, after the options load.
+// rc2: permanent - no options switch any more (vk.1's "Post-processing at
+// render size" is gone from the menu and the launcher; a saved value is
+// ignored). BBHOST_POST_AT_RENDER=0 stays, for debugging.
 bool post_mode() {
     static const bool on = [] {
         const char* e = std::getenv("BBHOST_POST_AT_RENDER");
-        const bool v = e && *e ? e[0] != '0' : host_opt_get("post_at_render");
-        host_log("post-at-render: %s (%s)", v ? "on" : "off", e && *e ? "BBHOST_POST_AT_RENDER" : "the options' Post-processing at render size");
+        const bool v = !(e && e[0] == '0');
+        host_log("post-at-render: %s%s", v ? "on" : "off", v ? "" : " (BBHOST_POST_AT_RENDER=0)");
         return v;
     }();
     return on;
@@ -1372,11 +1374,33 @@ bool post_moved_ps(std::uint32_t ps) {
         case 0xbf368417u:  // #5 onto the DoF result
         case 0xd3c8bb21u:  // #6 the motion blur's 1080p velocity
         case 0xe0305cefu:  // #7-#8 the motion blur
+        // rc2: the Hunter's Dream's versions (vk1-dream, the window ended at
+        // its #2: the DoF, the pass after it and the motion blur ran at 4K)
+        case 0x88414cd6u:  // #2 A -> the DoF buffer
+        case 0x597cbbccu:  // #3 its blur
+        case 0x9e1cb278u:  // #4 the DoF composite
+        case 0xc3eff688u:  // #7-#8 the motion blur
             return true;
         default:
             return false;
     }
 }
+
+// rc2: programs that stay at the output size whatever their shape: the
+// bloom's first downsample (4c37ae6d+4b766f62 reads the chain's colour for
+// the bloom and must see the 4K picture FSR made, or the bloom shimmers) and
+// the chromatic aberration (dropped from the move: its offsets are in pixels).
+bool post_keep_out(const std::string& name) {
+    return name == "4c37ae6d+4b766f62" || name == "bb92a5b6+483f5dc1" || name == "84b3a182+3c2b7974";
+}
+// Programs that joined by their shape, logged once each (coverage in a
+// new area shows in the log, and in a snapshot).
+std::set<std::string> g_post_shape_seen;
+std::uint64_t g_post_by_shape = 0;
+std::map<std::string, std::uint64_t> g_post_end_by;  // what closed the window, by program (snapshots)
+
+// rc2: post at render's coverage for the performance capture (under g.mu).
+std::string post_coverage_text_locked();
 
 RtImage* post_resolve_locked(std::uint64_t base) {
     if (!g_pw.open || !base) return nullptr;
@@ -1437,12 +1461,33 @@ RtImage* post_shadow_locked(const RtImage& real) {
     return &made;
 }
 
+std::map<std::string, std::uint64_t> g_post_fallback_by;  // rc2: why frames fell back (snapshots)
 void post_fallback(const char* why) {
     ++g_post_stats.fallbacks;
+    if (g_post_fallback_by.size() < 64 || g_post_fallback_by.count(why)) ++g_post_fallback_by[why];
     if (std::strcmp(g_post_stats.last_fallback, why) != 0) {
         g_post_stats.last_fallback = why;
         host_log("post-at-render: this frame as before (flip %llu): %s", static_cast<unsigned long long>(hle_video_flip_count()), why);
     }
+}
+
+std::string post_coverage_text_locked() {
+    std::string o;
+    char b[256];
+    std::snprintf(b, sizeof(b),
+                  "on=%d frames=%llu redirected_draws=%llu joined_by_shape=%llu fallback_frames=%llu fsr_failed=%llu last_end=%s last_fallback=%s\n",
+                  post_mode() && g_post_on && !g_post_dead ? 1 : 0, static_cast<unsigned long long>(g_post_stats.frames),
+                  static_cast<unsigned long long>(g_post_stats.redirected), static_cast<unsigned long long>(g_post_by_shape),
+                  static_cast<unsigned long long>(g_post_stats.fallbacks), static_cast<unsigned long long>(g_post_stats.fsr_failed),
+                  *g_post_stats.last_end ? g_post_stats.last_end : "-", *g_post_stats.last_fallback ? g_post_stats.last_fallback : "-");
+    o += b;
+    o += "(totals since start)\nfallbacks by reason:";
+    for (const auto& [why, n] : g_post_fallback_by) o += " [" + why + "]=" + std::to_string(n);
+    o += "\nwindow closed by (program: frames):";
+    for (const auto& [name, n] : g_post_end_by) o += " " + name + "=" + std::to_string(n);
+    o += "\njoined by shape:";
+    for (const std::string& name : g_post_shape_seen) o += " " + name;
+    return o;
 }
 
 // At the scale pass: open the window, the scene copied into A's stand-in.
@@ -4431,6 +4476,69 @@ void write_pipeline_stats(VkPipeline p, const std::string& name) {
     host_log("render: pipeline %s: statistics and disassembly in build/pipeline-stats", name.c_str());
 }
 
+// rc2, bbtest profile (BBHOST_SHADER_STATS=<file>): one line a pipeline
+// executable - the guest shader hashes (the pipeline's name, the pass label
+// the GPU sampler and BBHOST_GPU_PROFILE use: "<vs>+<ps>", a compute shader's
+// own), the stage, the wave size and every statistic the driver reports
+// (RADV: SGPRs, VGPRs, spilled SGPRs/VGPRs, code size, LDS size, scratch,
+// subgroups per SIMD (the occupancy), instructions, latency ...). Tab-separated.
+void shader_stats_note_impl(VkPipeline p, const char* kind, const std::string& name) {
+    if (!g.shader_stats || !p) return;
+    static const auto props = reinterpret_cast<PFN_vkGetPipelineExecutablePropertiesKHR>(
+        vkGetDeviceProcAddr(g.device, "vkGetPipelineExecutablePropertiesKHR"));
+    static const auto stats = reinterpret_cast<PFN_vkGetPipelineExecutableStatisticsKHR>(
+        vkGetDeviceProcAddr(g.device, "vkGetPipelineExecutableStatisticsKHR"));
+    if (!props || !stats) return;
+    static std::mutex mu;
+    static FILE* f = [] {
+        FILE* out = std::fopen(std::getenv("BBHOST_SHADER_STATS"), "a");
+        if (out) {
+            std::fprintf(out, "# bbhost-vk shader statistics (bbtest profile; docs/vk/TESTING.md). t_s, kind, pipeline (the pass label), "
+                              "executable index, stage, subgroup size, then each driver statistic as name=value\n");
+            std::fflush(out);
+        } else {
+            host_log("gpu: could not open the shader-stats file %s", std::getenv("BBHOST_SHADER_STATS"));
+        }
+        return out;
+    }();
+    if (!f) return;
+    static const auto t_start = std::chrono::steady_clock::now();
+    VkPipelineInfoKHR pi{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
+    pi.pipeline = p;
+    std::uint32_t n = 0;
+    if (props(g.device, &pi, &n, nullptr) != VK_SUCCESS || n == 0) return;
+    std::vector<VkPipelineExecutablePropertiesKHR> execs(n, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+    props(g.device, &pi, &n, execs.data());
+    std::string out;
+    char buf[256];
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+    for (std::uint32_t i = 0; i < n; ++i) {
+        std::snprintf(buf, sizeof(buf), "%.3f\t%s\t%s\t%u\t%s\twave%u", t, kind, name.c_str(), i, execs[i].name, execs[i].subgroupSize);
+        out += buf;
+        VkPipelineExecutableInfoKHR ei{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+        ei.pipeline = p;
+        ei.executableIndex = i;
+        std::uint32_t ns = 0;
+        stats(g.device, &ei, &ns, nullptr);
+        std::vector<VkPipelineExecutableStatisticKHR> st(ns, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+        if (ns) stats(g.device, &ei, &ns, st.data());
+        for (const auto& s : st) {
+            switch (s.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%u", s.name, s.value.b32); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%lld", s.name, static_cast<long long>(s.value.i64)); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%llu", s.name, static_cast<unsigned long long>(s.value.u64)); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%g", s.name, s.value.f64); break;
+            default: buf[0] = 0; break;
+            }
+            out += buf;
+        }
+        out += "\n";
+    }
+    std::lock_guard<std::mutex> lk(mu);
+    std::fwrite(out.data(), 1, out.size(), f);
+    std::fflush(f);
+}
+
 VkPipeline create_library(VkGraphicsPipelineCreateInfo& gpci, VkGraphicsPipelineLibraryFlagsEXT flags, void* next) {
     VkGraphicsPipelineLibraryCreateInfoEXT li{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT};
     li.flags = flags;
@@ -4438,8 +4546,9 @@ VkPipeline create_library(VkGraphicsPipelineCreateInfo& gpci, VkGraphicsPipeline
     gpci.pNext = &li;
     gpci.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
     if (g_library_relink) gpci.flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;  // what the relink optimizes from
+    gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     VkPipeline p = VK_NULL_HANDLE;
-    return vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &p) == VK_SUCCESS ? p : VK_NULL_HANDLE;
+    return vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &p) == VK_SUCCESS ? p : VK_NULL_HANDLE;
 }
 
 // A vertex shader's pre-rasterization library, with a rect list's geometry
@@ -4830,6 +4939,7 @@ Precompiler& precompiler() {
         for (int i = 0; i < w->boot; ++i) {
             std::thread([w, i] {
                 t_pipeline_worker = true;
+                perf::set_worker_thread();
                 host_thread_set_name("bb-compile");
                 for (;;) {
                     PrecompileJob job;
@@ -5072,8 +5182,10 @@ void relink_pipeline(Precompiler& w, const PrecompileJob& job) {
     gpci.layout = job.layout;
     const bool want_stats = pipeline_stats_wanted(job.relink->name);
     if (want_stats) gpci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+    gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     VkPipeline p = VK_NULL_HANDLE;
-    const bool ok = vkCreateGraphicsPipelines(g.device, want_stats ? VK_NULL_HANDLE : PipelineCacheUse().cache, 1, &gpci, nullptr, &p) == VK_SUCCESS;
+    const bool ok = vkCreateGraphicsPipelines(g.device, want_stats ? VK_NULL_HANDLE : shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &p) == VK_SUCCESS;
+    if (ok && g.shader_stats) shader_stats_note(p, job.relink->lean ? "graphics-optimized" : "graphics-optimized~fallback", job.relink->name);
     if (ok && want_stats) {
         // A name has several pipelines (the no-fallback variant and the one with
         // the page-table paths, other fixed state): each gets its own file.
@@ -5806,8 +5918,10 @@ bool link_gfx_pipeline(GfxPipeline& pl, const GfxFixedState& f, const VertexInpu
     VkGraphicsPipelineCreateInfo gpci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gpci.pNext = &lci;
     gpci.layout = pl.layout;
+    gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     const auto t0 = std::chrono::steady_clock::now();
-    const bool ok = vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+    const bool ok = vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+    if (ok && g.shader_stats) shader_stats_note(pl.pipeline, "graphics-linked", pl.name);
     g_libs.link_us.fetch_add(pl_us_since(t0), std::memory_order_relaxed);
     g_libs.links.fetch_add(1, std::memory_order_relaxed);
     pl.library = ok;
@@ -5939,13 +6053,15 @@ bool create_gfx_pipeline(GfxPipeline& pl, const DrawState& s, const VertexInputP
     // whole, each took ~1.6 ms from a warm cache (50-165 ms cold), 14 of them in
     // the frame after a fight, and left the draw after it to set every dynamic
     // value again.
+    if (!linked) gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     bool created = linked ? link_gfx_pipeline(pl, f, vertex_input)
-                          : vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+                          : vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
     if (!created && ps_sized) {
         fragment_stage_unsized(stages.back());
-        created = vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+        created = vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
         fragment_stage_wave_refused(created);
     }
+    if (created && !linked && g.shader_stats) shader_stats_note(pl.pipeline, "graphics", pl.name);
     t_library_owner = owner;
     if (!created) {
         host_log("render: pipeline %s: vkCreateGraphicsPipelines failed", pl.name.c_str());
@@ -5954,6 +6070,8 @@ bool create_gfx_pipeline(GfxPipeline& pl, const DrawState& s, const VertexInputP
     }
     const auto ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     if (!t_pipeline_worker) g_pl_create_us.fetch_add(pl_us_since(t0), std::memory_order_relaxed);
+    // rc2: into the performance capture; one the command processor builds holds its frame up.
+    perf::note_compile("graphics", pl.name, pl_us_since(t0), t_pipeline_worker, !t_pipeline_worker);
     // Slow driver compiles, with what might make them slow: the stages'
     // SPIR-V sizes and whether this is the page-table fallback or the
     // no-fallback variant.
@@ -6131,6 +6249,7 @@ LeanBuilders& lean_builders() {
                     }
                     const LeanBuildJob& j = *job;
                     t_pipeline_worker = true;
+                    perf::set_worker_thread();
                     build_gfx_pipeline(*j.variant, j.s, j.vs_words, j.fetch_words, j.ps_words, j.vs_name, j.ps_name, j.vs_dims, j.ps_dims,
                                        j.vs_modes, j.ps_modes, true, j.has_vertex_input ? &j.vertex_input : nullptr);
                     std::lock_guard<std::mutex> lk(w->mu);
@@ -12496,10 +12615,53 @@ static bool draw_impl(const GpuDraw& d) {
     // test10, BBHOST_POST_AT_RENDER: inside the window, the moved programs draw
     // into their output-size targets' render-size stand-ins; any other
     // program closes it (FSR upscales the last stand-in first).
+    // rc2: a draw joins the window by what it does, not only by its program
+    // (the Dream's versions of the passes have other hashes, and an area
+    // never logged has its own). One RGBA16F colour target, no depth, no
+    // MRT, and either
+    //   - a smaller-than-output target that is not the render size, reading
+    //     the chain (a stand-in) or another such buffer: the DoF's
+    //     half-height buffers and their blurs. Render-size ones are left out:
+    //     the bloom's start writes 1080p from the chain's colour too; or
+    //   - an output-size target reading the chain *and* a smaller RGBA16F
+    //     buffer: the DoF composite (the chain + the DoF buffer) and the
+    //     motion blur (the chain + its 1080p velocity). A single-input pass
+    //     at 4K (the CA, a grade) closes the window as before.
+    auto post_joins_by_shape = [&]() -> bool {
+        if (!s.color[0] || s.depth || post_keep_out(pl.name)) return false;
+        for (int c = 1; c < 8; ++c)
+            if (s.color[c]) return false;
+        const RtImage& t = *s.color[0];
+        if (t.format != VK_FORMAT_R16G16B16A16_SFLOAT || t.layers != 1) return false;
+        int chain = 0, small = 0;
+        for (const StageImages::Image& im : stage_images[1].images) {
+            if (!im.resolved) continue;
+            const std::uint64_t base = tsharp_base(im.w);
+            if (!base || base == t.base) continue;
+            if (post_resolve_locked(base)) {
+                ++chain;
+                continue;
+            }
+            const RtImage* r = find_render_target(base);
+            if (r && !r->depth && r->format == VK_FORMAT_R16G16B16A16_SFLOAT && r->width < g_pw.ow && r->height < g_pw.oh) ++small;
+        }
+        bool ok = false;
+        if (t.width == g_pw.ow && t.height == g_pw.oh) ok = chain >= 1 && small >= 1;
+        else if (t.width < g_pw.ow && t.height < g_pw.oh && !(t.width == g_pw.rw && t.height == g_pw.rh)) ok = chain + small >= 1;
+        if (ok) {
+            ++g_post_by_shape;
+            if (g_post_shape_seen.size() < 64 && g_post_shape_seen.insert(pl.name).second)
+                host_log("post-at-render: %s joins by its shape (%ux%u target, %d chain input(s), %d smaller buffer(s); flip %llu)",
+                         pl.name.c_str(), t.width, t.height, chain, small, static_cast<unsigned long long>(hle_video_flip_count()));
+        }
+        return ok;
+    };
+    if (perf::post_wanted()) perf::publish_post(post_coverage_text_locked());  // rc2: a capture asked
     if (g_pw.open && pl.scale_pass != 1) {
         if (g_pw.flip != hle_video_flip_count()) {
             post_end_window_locked("the next frame");
-        } else if (!post_moved_ps(pl.orb_ps)) {
+        } else if (!post_moved_ps(pl.orb_ps) && !post_joins_by_shape()) {
+            if (g_post_end_by.size() < 64 || g_post_end_by.count(pl.name)) ++g_post_end_by[pl.name];
             post_end_window_locked(pl.name.c_str());
         } else if (s.color[0]) {
             RtImage& t = *s.color[0];
@@ -15469,8 +15631,23 @@ void precompile_set_loading(bool loading) {
     g_loading_now.store(loading);
     precompile_boost_update(loading ? "a loading screen" : "the loading screen gone");
 }
+// rc2 (gpu_internal.h): bbtest profile's shader statistics.
+void shader_stats_note(VkPipeline p, const char* kind, const std::string& name) { shader_stats_note_impl(p, kind, name); }
+
 void precompile_set_world_reached() {
     g_world_seen.store(true);
+    {  // rc2: how much the start built before the game could be played
+        const perf::CompileTotals c = perf::compile_totals();
+        host_log("precompile: before the first in-game frame: %llu graphics pipelines (%llu on the workers, %llu on the command "
+                 "processor), %llu compute (%llu, %llu), %llu shader translations (%llu, %llu); frames waited on %llu of them, %.1f ms; "
+                 "%zu still queued",
+                 static_cast<unsigned long long>(c.graphics_worker + c.graphics_cp), static_cast<unsigned long long>(c.graphics_worker),
+                 static_cast<unsigned long long>(c.graphics_cp), static_cast<unsigned long long>(c.compute_worker + c.compute_cp),
+                 static_cast<unsigned long long>(c.compute_worker), static_cast<unsigned long long>(c.compute_cp),
+                 static_cast<unsigned long long>(c.translate_worker + c.translate_cp), static_cast<unsigned long long>(c.translate_worker),
+                 static_cast<unsigned long long>(c.translate_cp), static_cast<unsigned long long>(c.waited), c.waited_us / 1000.0,
+                 precompile_backlog());
+    }
     precompile_boost_update("the first in-game frame");
 }
 

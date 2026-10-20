@@ -21,6 +21,10 @@
 //   - The grid drifts earlier when every frame of a window arrived well
 //     ahead of its slot. That keeps the added latency to about the arrivals'
 //     spread (a few hundred us), at most kCreepNs a frame.
+//   - rc2: vk1-dream's grid sat 3-4 ms behind the arrivals for seconds after
+//     every late frame (20 us a frame, decided every 120 frames: a 4 ms
+//     excess took ~200 frames to win back). Now decided every 30 frames and
+//     up to 100 us a frame: the same excess is gone in ~40 frames (1/3 s).
 //   - Under the pace (GPU-bound), every frame is late, so they pass straight
 //     through, as before.
 // Pure logic, no clocks (tests/present_pacer_test.cpp).
@@ -32,9 +36,9 @@ namespace temporal {
 
 class PresentPacer {
 public:
-    static constexpr std::int64_t kCreepNs = 20000;      // the grid's earliest move a frame
+    static constexpr std::int64_t kCreepNs = 100000;     // the grid's earliest move a frame
     static constexpr std::int64_t kKeepNs = 150000;      // the margin the earliest arrival keeps
-    static constexpr int kWindow = 120;                  // frames between creep decisions
+    static constexpr int kWindow = 30;                   // frames between creep decisions
 
     void set_period(std::int64_t ns) {
         if (ns != period_) {

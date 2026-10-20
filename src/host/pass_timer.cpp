@@ -83,7 +83,9 @@ bool pass_timer_on_locked() {
             g_text.clear();
         }
     }
-    return on;
+    // rc2: also the GPU sampler's frame, so a capture has FSR's and the
+    // sharpening's times with the overlay line off.
+    return on || host_gpu_sample_running();
 }
 
 std::int32_t pass_timer_begin_locked(VkCommandBuffer cmd, TimedPass pass, VkPipelineStageFlagBits stage) {

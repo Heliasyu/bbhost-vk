@@ -11,6 +11,18 @@
 #   bbtest mark [note...]   screenshot + last 30 s clip + a timestamped marker line
 #   bbtest clip             save the last 30 s (with --record)
 #   bbtest shot             one screenshot now
+#   bbtest snap [note...]   rc2: bbhost saves its last 30 s (frame times, drops,
+#                           GPU passes, compiles, settings, log) into the
+#                           session's snaps/ (the same as F11 in the game);
+#                           prints its summary. Without a session: the game
+#                           folder's snaps/.
+#   bbtest snap --show [file|folder...]   the summaries of saved snapshots
+#   bbtest profile [note] [--record] [--detach] [-- bbhost args...]
+#                           rc2: a session (phase "profile") with RADV's RGP
+#                           tracing armed: each F11 / bbtest snap also writes an
+#                           .rgp of the next frame into the session's rgp/ (one
+#                           every 10 s at most), and every pipeline's shader
+#                           statistics go to shader-stats.tsv
 #   bbtest status           what is running, and where the session is
 #   bbtest stop             stop the game and the helpers, bundle the session
 #
@@ -211,6 +223,7 @@ cmd_start() {
     [ -x "$GAME_DIR/bbhost" ] || { say "no ./bbhost in $GAME_DIR (set BBTEST_GAME_DIR)"; exit 1; }
     if [ "$detach" = 1 ]; then
         local args=(start "$phase")
+        [ "${BBTEST_PROFILE:-0}" = 1 ] && args=(profile "${BBTEST_PROFILE_NOTE:-}")
         [ "$record" = 1 ] && args+=(--record)
         [ "$capture" = 1 ] && args+=(--capture)
         setsid -f "$0" "${args[@]}" -- "$@" > /dev/null 2>&1 < /dev/null
@@ -223,7 +236,7 @@ cmd_start() {
     mkdir -p "$STATE"
     local s
     s="$ROOT/sessions/$(date +%Y%m%d-%H%M%S)-$phase"
-    mkdir -p "$s/shots" "$s/clips" "$s/mangohud" "$s/frames"
+    mkdir -p "$s/shots" "$s/clips" "$s/mangohud" "$s/frames" "$s/snaps"
     echo "$s" > "$STATE/session"
     echo "$phase" > "$STATE/phase"
     date +%s > "$STATE/started"
@@ -252,6 +265,21 @@ cmd_start() {
         export MANGOHUD_CONFIG="read_cfg,output_folder=$s/mangohud,autostart_log=1,log_interval=0,log_duration=0${MANGOHUD_CONFIG:+,$MANGOHUD_CONFIG}"
     elif [ "$mh" = 0 ]; then
         unset MANGOHUD
+    fi
+    # rc2: F11 / bbtest snap snapshots land in the session.
+    export BBHOST_SNAP_DIR="$s/snaps"
+    # rc2, bbtest profile: RADV's RGP tracing on a trigger file (Mesa:
+    # MESA_VK_TRACE, MESA_VK_TRACE_TRIGGER; the trace goes to /tmp, bbhost
+    # moves it into rgp/), and the shader statistics (BBHOST_SHADER_STATS).
+    if [ "${BBTEST_PROFILE:-0}" = 1 ]; then
+        mkdir -p "$s/rgp"
+        export MESA_VK_TRACE="rgp${MESA_VK_TRACE:+,$MESA_VK_TRACE}"
+        export MESA_VK_TRACE_TRIGGER="$s/rgp/trigger"
+        export BBHOST_RGP_DIR="$s/rgp"
+        export BBHOST_SHADER_STATS="$s/shader-stats.tsv"
+        rm -f "$s/rgp/trigger"
+        echo "profile:  MESA_VK_TRACE=$MESA_VK_TRACE MESA_VK_TRACE_TRIGGER=$MESA_VK_TRACE_TRIGGER note=${BBTEST_PROFILE_NOTE:-}" >> "$s/session.txt"
+        say "profile: F11 or bbtest snap also saves an RGP capture of the next frame into $s/rgp (one every 10 s)"
     fi
     if [ "$capture" = 1 ]; then
         export BBHOST_VK_CAPTURE=1
@@ -322,8 +350,16 @@ finish() {
         find "$GAME_DIR/logs" -maxdepth 1 -type f -newermt "@$started" -exec cp -p {} "$s/game-logs/" \; 2> /dev/null
         rmdir "$s/game-logs" 2> /dev/null || true
     fi
-    rm -f "$s/frames/capture.request"
-    rmdir "$s/clips" "$s/frames" "$s/mangohud" 2> /dev/null || true
+    rm -f "$s/frames/capture.request" "$s/snaps/snap.request" "$s/rgp/trigger"
+    # bbtest profile: an RGP trace bbhost could not move (or one from Mesa's
+    # own hotkey) still in /tmp from this session.
+    if [ -d "$s/rgp" ]; then
+        find /tmp -maxdepth 1 -type f -name '*.rgp' -newer "$s/session.txt" -user "$(id -u)" -exec mv -n {} "$s/rgp/" \; 2> /dev/null
+    fi
+    if [ -n "$(find "$s/snaps" -maxdepth 1 -name 'snap-*.txt' 2> /dev/null | head -1)" ]; then
+        snap_summaries "$s/snaps" > "$s/snaps/summary.txt"
+    fi
+    rmdir "$s/clips" "$s/frames" "$s/mangohud" "$s/snaps" "$s/rgp" 2> /dev/null || true
     {
         echo "stopped:  $(now)"
         # test6: the words alone matched 65 benign lines in test5 (the
@@ -357,6 +393,8 @@ finish() {
         echo "clips:    $(find "$s/clips" -type f -name '*.mp4' 2> /dev/null | wc -l)"
         echo "frames:   $(find "$s/frames" -type f -name '*.png' 2> /dev/null | wc -l)"
         echo "mangohud: $(find "$s/mangohud" -type f -name '*.csv' 2> /dev/null | wc -l) CSV"
+        echo "snaps:    $(find "$s/snaps" -maxdepth 1 -type f -name 'snap-*.txt' 2> /dev/null | wc -l) (summaries: snaps/summary.txt)"
+        [ -d "$s/rgp" ] && echo "rgp:      $(find "$s/rgp" -maxdepth 1 -type f -name '*.rgp' 2> /dev/null | wc -l) capture(s), $(du -sh "$s/rgp" 2> /dev/null | cut -f1); shader-stats.tsv $(wc -l < "$s/shader-stats.tsv" 2> /dev/null || echo 0) lines"
     } >> "$s/session.txt"
     echo "$(now) STOP" >> "$s/marks.log"
     rm -rf "$STATE"
@@ -410,6 +448,93 @@ cmd_mark() {
     alive "$(pid_of gsr)" && save_clip "mark-$t" > /dev/null 2>&1
     say "mark $t"
     notify "mark $t"
+}
+
+# rc2: one snapshot's summary (bbhost's snap-*.txt, docs/vk/TESTING.md).
+snap_summary() {
+    local f=$1
+    awk -v file="$(basename "$f")" '
+        function kv(line, key,   i, n, a, b) { n = split(line, a, " "); for (i = 1; i <= n; i++) { split(a[i], b, "="); if (b[1] == key) return b[2] } return "?" }
+        /^time: / && !time { time = substr($0, 7) }
+        /^trigger: / && !trig { trig = substr($0, 10) }
+        /^note: / && !note_seen { note = substr($0, 7); note_seen = 1 }
+        /^area: / && !area { area = substr($0, 7) }
+        /^summary: / { sum = $0 }
+        /^\[/ { sec = $1 }
+        sec == "[passes]" && /^sample: / { sample = $0 }
+        sec == "[passes]" && /^pass / { passes[++np] = $0 }
+        sec == "[upscaler]" && !/^#/ && !/^\[/ && NF { up = $0 }
+        sec == "[post_at_render]" && /^on=/ { post = $0 }
+        /^compiles: n=/ { comp = $0 }
+        sec == "[rgp]" && NF && !/^\[/ { rgp = $0 }
+        sec == "[compiles]" && /, waited, / { waits[++nw] = $0 }
+        END {
+            printf "== %s\n", file
+            printf "   %s, %s%s\n", time, trig, note != "" ? ": \"" note "\"" : ""
+            printf "   area: %s\n", area
+            printf "   avg %s fps, 1%% low %s, 0.1%% low %s; over 8.5 ms %s, over 9 ms %s, over 12 ms %s (max %s ms) of %s frames in %s s\n",
+                kv(sum, "avg_fps"), kv(sum, "low1"), kv(sum, "low01"), kv(sum, "over8.5"), kv(sum, "over9"), kv(sum, "over12"), kv(sum, "max_ms"), kv(sum, "frames"), kv(sum, "seconds")
+            printf "   dropped %s; the game waited for the presenter %s times (%s ms); loads %s; flip to present avg %s ms, max %s ms\n",
+                kv(sum, "drops"), kv(sum, "cp_waits"), kv(sum, "cp_wait_ms"), kv(sum, "loads"), kv(sum, "flip_to_present_avg_ms"), kv(sum, "flip_to_present_max_ms")
+            if (comp != "") printf "   %s (translations/pipeline compiles in the 30 s; waited = a frame waited)\n", comp
+            for (i = 1; i <= nw && i <= 5; i++) printf "     waited: %s\n", waits[i]
+            if (up != "") printf "   upscaler: %s\n", up
+            if (rgp != "") printf "   rgp: %s\n", rgp
+            if (post != "") printf "   post at render: %s\n", post
+            if (sample != "") printf "   GPU %s; top passes:\n", sample
+            for (i = 1; i <= np && i <= 10; i++) printf "     %s\n", passes[i]
+        }' "$f"
+}
+
+snap_summaries() {  # files and folders (their snap-*.txt, oldest first)
+    local a f
+    for a in "$@"; do
+        if [ -d "$a" ]; then
+            find "$a" -maxdepth 1 -type f -name 'snap-*.txt' 2> /dev/null | sort | while read -r f; do snap_summary "$f"; done
+        elif [ -f "$a" ]; then
+            snap_summary "$a"
+        else
+            say "no such snapshot: $a"
+        fi
+    done
+}
+
+cmd_snap() {
+    local s dir
+    s=$(session)
+    if [ "${1:-}" = "--show" ]; then
+        shift
+        if [ $# -eq 0 ]; then
+            if [ -n "$s" ]; then set -- "$s/snaps"; else set -- "$GAME_DIR/snaps"; fi
+        fi
+        snap_summaries "$@"
+        return 0
+    fi
+    if [ -n "$s" ]; then dir="$s/snaps"; else dir="$GAME_DIR/snaps"; fi
+    mkdir -p "$dir"
+    local note=${*:-} n0 f i
+    n0=$(find "$dir" -maxdepth 1 -type f -name 'snap-*.txt' 2> /dev/null | wc -l)
+    printf '%s\n' "$note" > "$dir/snap.request.part" && mv -f "$dir/snap.request.part" "$dir/snap.request"
+    [ -n "$s" ] && echo "$(now) SNAP ${note}" >> "$s/marks.log"
+    for i in $(seq 1 60); do
+        sleep 0.25
+        [ "$(find "$dir" -maxdepth 1 -type f -name 'snap-*.txt' 2> /dev/null | wc -l)" -gt "$n0" ] && break
+    done
+    f=$(find "$dir" -maxdepth 1 -type f -name 'snap-*.txt' -printf '%T@ %p\n' 2> /dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+    if [ "$(find "$dir" -maxdepth 1 -type f -name 'snap-*.txt' 2> /dev/null | wc -l)" -le "$n0" ]; then
+        say "asked; no snapshot in 15 s (is bbhost running from $GAME_DIR, rc2 or later, BBHOST_SNAP not 0?). The request waits in $dir/snap.request"
+        return 1
+    fi
+    [ -n "$s" ] && echo "$(now) SNAP-SAVED $(basename "$f")" >> "$s/marks.log"
+    snap_summary "$f"
+    notify "snapshot $(basename "$f")"
+}
+
+cmd_profile() {
+    local note=""
+    if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then note=$1; shift; fi
+    export BBTEST_PROFILE=1 BBTEST_PROFILE_NOTE="$note"
+    cmd_start profile "$@"
 }
 
 cmd_clip() {
@@ -468,7 +593,9 @@ case "${1:-}" in
     mark) shift; cmd_mark "$@" ;;
     clip) cmd_clip ;;
     shot) cmd_shot ;;
+    snap) shift; cmd_snap "$@" ;;
+    profile) shift; cmd_profile "$@" ;;
     status) cmd_status ;;
     stop) cmd_stop ;;
-    *) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

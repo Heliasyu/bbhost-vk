@@ -97,9 +97,8 @@ enum SettingId {
     kUpscaleJitter,
     kDebugMotionVectors,
     kDebugUpscalerTime,
-    // v0.2.18-vk.1: the test10/test11 frame-time features, as fallback switches.
-    kPresentPace,
-    kPostAtRender,
+    // rc2: vk.1's present_pace and post_at_render switches are gone: those
+    // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
 };
 
@@ -129,8 +128,8 @@ Setting g_set[kSettingCount] = {
     // Off, which ran the game at 60, read as 60 (host_options_load).
     {"frame_cap", "Frame rate", {"30", "60", "90", "120", "Uncapped"}, 0,
      "30 is the game's own pace; 60 and 90 run its logic at that rate; 120 and Uncapped step it by the frame time "
-     "(120: at most 120 fps; Uncapped: the display's refresh rate with V-Sync on, up to 240 off). Applies on the next run.",
-     false},
+     "(120: at most 120 fps; Uncapped: the display's refresh rate with V-Sync on, up to 240 off).",
+     true},
     // What reaches the screen, counted by the presenter (host/window.cpp).
     {"fps_counter", "FPS counter", {"Off", "On"}, 0,
      "Frames per second actually presented, in the top right corner.", false},
@@ -243,30 +242,30 @@ Setting g_set[kSettingCount] = {
     // code takes the place of a debug-only load-test step, so the debug menu's
     // LOAD TEST and DUNGEON MOVEMAP TEST crash while it is on.
     {"debug_camera", "Debug camera", {"Off", "On"}, 0,
-     "Requires a restart. Hold Interact (E) and press L3 (Left Ctrl) to cycle the free camera's modes.", true},
+     "Hold Interact (E) and press L3 (Left Ctrl) to cycle the free camera's modes.", true},
     // The PC enhancements: additions to the game itself, each read once at
     // start (main.cpp hands them to config_set_enhancements), all on unless
     // bbhost.toml's [world] says otherwise. Off, all three, is the game as it
     // shipped. (The Old Hunters, a fourth in v0.2.9, is the patch old-hunters.)
     {"change_appearance", "Hunter's Dream mirror", {"On", "Off"}, 0,
-     "Requires a restart. The Dream's mirror opens the appearance editor (the unused \"Put on Disguise\").", true},
+     "The Dream's mirror opens the appearance editor (the unused \"Put on Disguise\").", true},
     {"rebirth", "Rebirth at the Altar", {"On", "Off"}, 0,
-     "Requires a restart. With the Yharnam Stone, the Altar of Despair resets level and attributes.", true},
+     "With the Yharnam Stone, the Altar of Despair resets level and attributes.", true},
     {"five_players", "Five players", {"On", "Off"}, 0,
-     "Requires a restart. Two invaders in Mensis, Mergo's Loft, the Frontier and the DLC; all players need it.", true},
+     "Two invaders in Mensis, Mergo's Loft, the Frontier and the DLC; all players need it.", true},
     // bbhost-vk's upscaler (host/upscaler.h). FSR 1 is what bbhost always did:
     // the presenter's EASU + RCAS when the game renders smaller than the
     // window (host/fsr.cpp). Phase 1: with an upscaler on, the quality renders the
     // scene smaller than the output (engine/scene_split.h).
     {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"}, 1,
      "FSR 1 is bbhost's own. FSR 3.1 is temporal: it upscales the 3D scene from Upscaling quality's size using motion vectors (falls back to a bilinear copy if it cannot start). FSR 4.1.1 replays AMD's 4.1.1 upscaler from assets built once from your own DLL (tools/fsr4cap); without them it is FSR 3.1.",
-     false},
+     true},
     // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
     {"upscale_quality", "Upscaling quality",
      {"Native AA", "Quality", "Balanced", "Performance", "Ultra Performance"}, 0,
      "Render scale for FSR 3.1 / 4.1.1: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. "
      "The 3D scene renders at this share of the Resolution setting; menus, text and post-processing stay at the Resolution. Native AA (and Upscaler Off) is stock.",
-     false},
+     true},
     // 0..1 like FSR 3's sharpness; 0.8 is RCAS at 0.2 stops, what FSR 1 uses.
     {"upscale_sharpness", "Upscaling sharpness", {"0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"}, 8,
      "How much FSR 3.1 sharpens (its RCAS pass; 0 turns it off). 0.8 matches FSR 1 as bbhost ships it; FSR 1 itself keeps its own sharpening.", false},
@@ -283,27 +282,41 @@ Setting g_set[kSettingCount] = {
     {"debug_upscaler_time", "Show upscaler GPU time", {"Off", "On"}, 0,
      "Debug: the GPU time of FSR 3.1's dispatch and of the presenter's passes (the upscale, the whole present) under the FPS counter, and in the log.",
      false},
-    // host/temporal/present_pacer.h (BBHOST_PRESENT_PACE wins when set).
-    {"present_pace", "Even frame pacing", {"On", "Off"}, 0,
-     "Holds each frame to an even slot at the frame rate (adds up to a few ms of latency). Off presents each frame as soon as it is ready. Applies on the next run.",
-     false},
-    // host/render.cpp's post at render (BBHOST_POST_AT_RENDER wins when set).
-    {"post_at_render", "Post-processing at render size", {"On", "Off"}, 0,
-     "FSR 3.1 / 4.1.1 below Native AA: depth of field, fog and motion blur run at the render size and FSR upscales after them (~0.7 ms at 4K). Off is the older order, if a picture looks wrong. Applies on the next run.",
-     false},
 };
 
+// rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
+// UPSCALING and the resolution were apart, and the menu ran to eight
+// sections). Optimizations have no rows: they are permanent, and the
+// capture (F11 / bbtest snap) shows how they do.
 const Row g_rows[] = {
     {Row::Header, "DISPLAY"},
+    {Row::Option, nullptr, kResolution},
     {Row::Option, nullptr, kWindowMode},
     {Row::Option, nullptr, kVsync},
     {Row::Option, nullptr, kFrameCap},
+    {Row::Option, nullptr, kUpscaler},
+    {Row::Option, nullptr, kUpscaleQuality},
+    {Row::Option, nullptr, kUpscaleSharpness},
+    {Row::Option, nullptr, kUpscaleReactive},
+    {Row::Option, nullptr, kUpscaleJitter},
     {Row::Option, nullptr, kFpsCounter},
-    {Row::Option, nullptr, kPresentPace},
+    {Row::Header, "GRAPHICS & EFFECTS"},
+    {Row::Option, nullptr, kMotionBlur},
+    {Row::Option, nullptr, kDepthOfField},
+    {Row::Option, nullptr, kChromaticAberration},
+    {Row::Option, nullptr, kBloom},
+    {Row::Option, nullptr, kFog},
+    {Row::Option, nullptr, kAntiAlias},
+    {Row::Option, nullptr, kSsao},
+    {Row::Option, nullptr, kAoStrength},
+    {Row::Option, nullptr, kVignette},
+    {Row::Option, nullptr, kSaturation},
+    {Row::Option, nullptr, kShadowDistance},
+    {Row::Option, nullptr, kModelDetail},
+    {Row::Header, "CAMERA & CONTROLS"},
     {Row::Option, nullptr, kFov},
     {Row::Option, nullptr, kCameraDistance},
     {Row::Option, nullptr, kCameraHeight},
-    {Row::Header, "INPUT"},
     {Row::Option, nullptr, kMouseMenu},
     {Row::Option, nullptr, kMouseCamera},
     {Row::Option, nullptr, kMouseSens},
@@ -312,40 +325,15 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kMouseAutoRotation},
     {Row::Option, nullptr, kDrawCursor},
     {Row::Option, nullptr, kButtonPrompts},
-    {Row::Header, "GRAPHICS"},
-    {Row::Option, nullptr, kSsao},
-    {Row::Option, nullptr, kMotionBlur},
-    {Row::Option, nullptr, kAntiAlias},
-    {Row::Option, nullptr, kDepthOfField},
-    {Row::Option, nullptr, kChromaticAberration},
-    {Row::Option, nullptr, kBloom},
-    {Row::Option, nullptr, kVignette},
-    {Row::Option, nullptr, kShadowDistance},
-    {Row::Option, nullptr, kAoStrength},
-    {Row::Option, nullptr, kSaturation},
-    {Row::Option, nullptr, kFog},
-    {Row::Option, nullptr, kModelDetail},
-    {Row::Option, nullptr, kResolution},
-    {Row::Header, "UPSCALING"},
-    {Row::Option, nullptr, kUpscaler},
-    {Row::Option, nullptr, kUpscaleQuality},
-    {Row::Option, nullptr, kUpscaleSharpness},
-    {Row::Option, nullptr, kUpscaleReactive},
-    {Row::Option, nullptr, kUpscaleJitter},
-    {Row::Option, nullptr, kPostAtRender},
-    {Row::Option, nullptr, kDebugMotionVectors},
-    {Row::Option, nullptr, kDebugUpscalerTime},
-    {Row::Header, "PC ENHANCEMENTS"},
+    {Row::Header, "GAME"},
     {Row::Option, nullptr, kChangeAppearance},
     {Row::Option, nullptr, kRebirth},
     {Row::Option, nullptr, kFivePlayers},
-    {Row::Header, "STARTUP"},
     {Row::Option, nullptr, kSkipLogos},
-    {Row::Option, nullptr, kDebugCamera},
     // The private server's account. No passwords: link this PC to
     // the account signed into on the website with Discord, or make one held
     // by this PC with a recovery code. The token is kept in the options file.
-    {Row::Header, "ACCOUNT"},
+    {Row::Header, "ONLINE & ACCOUNT"},
     {Row::Info, nullptr, -1, 0},
     {Row::Info, nullptr, -1, 1},
     {Row::Action, "Link with Discord", -1, 0},
@@ -355,11 +343,14 @@ const Row g_rows[] = {
     {Row::Action, "Recover account", -1, 2},
     {Row::Action, "Website sign-in code", -1, 3},
     {Row::Action, "Sign out", -1, 4},
-    {Row::Header, "UPDATES"},
     {Row::Info, nullptr, -1, 10},
     {Row::Info, nullptr, -1, 11},
     {Row::Action, "Check for updates", -1, 10},
     {Row::Action, "Open the release page", -1, 11},
+    {Row::Header, "DEBUG"},
+    {Row::Option, nullptr, kDebugMotionVectors},
+    {Row::Option, nullptr, kDebugUpscalerTime},
+    {Row::Option, nullptr, kDebugCamera},
     {Row::Close, "Close"},
 };
 constexpr int kRowCount = static_cast<int>(sizeof(g_rows) / sizeof(g_rows[0]));
@@ -1203,6 +1194,42 @@ void host_options_frame(float display_w, float display_h) {
 }
 
 namespace {
+// `text` broken at spaces into lines no wider than `width` at `scale`; at
+// most `max_lines`, the last ending in "..." when there was more.
+std::vector<std::string> wrap_note(const char* text, float width, float scale, std::size_t max_lines) {
+    std::vector<std::string> out;
+    std::string line, word;
+    const std::string all(text);
+    bool cut = false;
+    auto fits = [&](const std::string& t) { return host_overlay_text_width(scale, t.c_str()) <= width; };
+    std::size_t i = 0;
+    while (i <= all.size()) {
+        const std::size_t j = std::min(all.find(' ', i), all.size());
+        word = all.substr(i, j - i);
+        i = j + 1;
+        if (word.empty()) continue;
+        const std::string tried = line.empty() ? word : line + " " + word;
+        if (fits(tried) || line.empty()) {
+            line = tried;
+            continue;
+        }
+        out.push_back(line);
+        line = word;
+        if (out.size() == max_lines) {
+            cut = true;
+            break;
+        }
+    }
+    if (!cut && !line.empty()) out.push_back(line);
+    if (out.size() > max_lines) out.resize(max_lines), cut = true;
+    if (cut && !out.empty()) {
+        std::string& last = out.back();
+        while (!last.empty() && !fits(last + "...")) last.pop_back();
+        last += "...";
+    }
+    return out;
+}
+
 void options_panel_frame(float display_w, float display_h) {
     edit_poll();
     // Tall enough for every row: headers take 32 px, rows 40, and the note and
@@ -1216,17 +1243,19 @@ void options_panel_frame(float display_w, float display_h) {
     // view, and a hint says there is more above or below.
     float rows_h = 0.0f;
     for (const Row& r : g_rows) rows_h += r.kind == Row::Header ? 32.0f : 40.0f;
-    const float room = display_h - 20.0f - 178.0f;
+    const float room = display_h - 20.0f - 206.0f;
     const float fit = 1.0f;
     const bool scrolls = rows_h > room && room > 0.0f;
-    const float pw = 860.0f, ph = std::fmin(78.0f + rows_h + 100.0f, display_h - 20.0f);
+    // rc2: the foot holds the note wrapped to three lines and the key guide.
+    constexpr float kFoot = 128.0f;
+    const float pw = 860.0f, ph = std::fmin(78.0f + rows_h + kFoot, display_h - 20.0f);
     const float px = (display_w - pw) * 0.5f, py = (display_h - ph) * 0.5f;
     static int g_scroll = 0;  // the first row drawn
     if (!scrolls) {
         g_scroll = 0;
     } else {
         auto height = [](int r) { return g_rows[r].kind == Row::Header ? 32.0f : 40.0f; };
-        const float avail = ph - 78.0f - 100.0f - 24.0f;  // less the two hints
+        const float avail = ph - 78.0f - kFoot - 24.0f;  // less the two hints
         // A header just above the selection comes along, so a section never
         // starts with its title out of view.
         int top = g_sel;
@@ -1314,7 +1343,7 @@ void options_panel_frame(float display_w, float display_h) {
     const float text_dy = (g_row_h - 22.0f) * 0.5f;  // 0.8 text is about 22 px: centred in the row
     g_row_x = px + 16.0f;
     g_row_w = pw - 32.0f;
-    const float y_end = py + ph - 100.0f;
+    const float y_end = py + ph - kFoot;
     if (scrolls && g_scroll > 0) {
         host_overlay_text(px + 40.0f, y, 0.55f, 0x7a6a44ffu, "^ more above");
         y += 24.0f;
@@ -1382,7 +1411,7 @@ void options_panel_frame(float display_w, float display_h) {
         }
         if (s.restart && !(row.setting == kResolution && res_live(s.index))) {
             host_overlay_text(px + 40.0f + host_overlay_text_width(0.8f, s.label) + 14.0f, y + text_dy + 4.0f,
-                              0.52f, 0x7a6a44ffu, "(requires restart)");
+                              0.52f, 0x7a6a44ffu, "(restart required)");
         }
         y += 40.0f * fit;
     }
@@ -1411,9 +1440,26 @@ void options_panel_frame(float display_w, float display_h) {
         const int f = g_rows[g_sel].field;
         note = f >= 10 ? kUpdateNotes[f - 10] : kNotes[f];
     }
-    host_overlay_rect(px + 28.0f, py + ph - 76.0f, pw - 56.0f, 1.0f, 0x6a5a34ffu);
+    host_overlay_rect(px + 28.0f, py + ph - 108.0f, pw - 56.0f, 1.0f, 0x6a5a34ffu);
     if (note) {
-        host_overlay_text(px + 28.0f, py + ph - 64.0f, 0.62f, 0x9a9a9affu, note);
+        // rc2: wrapped to the panel, at most three lines (the last cut with
+        // "..."). One line ran off the panel, and its glyphs - drawn whether
+        // on screen or not - took the overlay past its vertex buffer.
+        const auto lines = wrap_note(note, pw - 56.0f, 0.62f, 3);
+        for (std::size_t i = 0; i < lines.size(); ++i)
+            host_overlay_text(px + 28.0f, py + ph - 98.0f + 20.0f * static_cast<float>(i), 0.62f, 0x9a9a9affu, lines[i].c_str());
+    }
+    // rc2: each selection change in the log with the overlay's size (the
+    // F10 bug was a selection that took the vertices past the buffer).
+    {
+        static int last_sel = -1;
+        if (g_sel != last_sel) {
+            last_sel = g_sel;
+            const Row& r = g_rows[g_sel];
+            host_log("options: selected %s (overlay %zu vertices so far this frame, %zu last frame)",
+                     r.setting >= 0 ? g_set[r.setting].key : r.text ? r.text : "(info)", host_overlay_built_vertices(),
+                     host_overlay_shown_vertices());
+        }
     }
     host_overlay_text(px + 28.0f, py + ph - 34.0f, 0.62f, 0x7a7a7affu,
                       "Arrows move and change   Enter toggles   Click sets   Esc or F10 closes");
@@ -1552,6 +1598,16 @@ void host_opt_set_index(const char* key, int index) {
         save();
         return;
     }
+}
+
+std::string host_options_dump() {
+    std::string out;
+    for (int id = 0; id < kSettingCount; ++id) {
+        const Setting& st = g_set[id];
+        const std::size_t i = static_cast<std::size_t>(st.index);
+        out += std::string(st.key) + " = " + (i < st.values.size() ? st.values[i] : "?") + "\n";
+    }
+    return out;
 }
 
 void host_options_save_now() {

@@ -489,8 +489,10 @@ gcn::TranslateResult translate_cached(const gcn::Program& prog, const gcn::Trans
     const bool paths = use == TranslationUse::kPaths;
     if (!g_tc.ready.load(std::memory_order_acquire) || !g_tc.on) {
         if (g_tc_enabled && !g_tc.ready.load(std::memory_order_acquire)) g_tc.early.fetch_add(1, std::memory_order_relaxed);
+        const auto t_un = std::chrono::steady_clock::now();
         gcn::TranslateResult t = gcn::translate(prog, o);
         if (paths) t.spirv = {};
+        if (auto hook = g_translation_compile_hook) hook(paths ? "(paths)" : "", us_since(t_un));
         return t;
     }
     const auto t0 = std::chrono::steady_clock::now();
@@ -512,6 +514,8 @@ gcn::TranslateResult translate_cached(const gcn::Program& prog, const gcn::Trans
     g_tc.miss_us.fetch_add(us, std::memory_order_relaxed);
     g_window_misses.fetch_add(1, std::memory_order_relaxed);
     g_window_miss_us.fetch_add(us, std::memory_order_relaxed);
+    // rc2: into the performance capture (a cache hit is not a compile).
+    if (auto hook = g_translation_compile_hook) hook(paths ? "(paths)" : "", us);
     Writer w;
     write_result(w, t, !paths);
     store(key, w);

@@ -30,6 +30,8 @@ full-desktop shot to that monitor), `notify-send`.
 | `bbtest mark [note]` | Screenshot, the last 30 s clip (with `--record`), and a timestamped `MARK` line in `marks.log` and `bbhost.log`. With `--capture`, bbhost also writes the presented frame as a PNG into `frames/`. |
 | `bbtest clip` | Saves the last 30 s of video into `clips/` (with `--record`). |
 | `bbtest shot` | One screenshot now. |
+| `bbtest snap [note]` | (rc2) bbhost saves its last 30 s into the session's `snaps/`, the same as **F11** in the game, and bbtest prints the summary. Without a session it goes to the game folder's `snaps/`. `bbtest snap --show [file or folder]` summarizes saved ones. |
+| `bbtest profile [note] [--record] [--detach] [-- args]` | (rc2) A session (phase `profile`) with RADV's RGP tracing armed. Each F11 or `bbtest snap` also saves an `.rgp` of the next frame into `rgp/` (one every 10 s at most), and every pipeline's shader statistics go to `shader-stats.tsv`. See "Profiling session" below. |
 | `bbtest status` | The session folder and what is running. |
 | `bbtest stop` | Quits the game (SIGTERM; killed after 10 s), stops the helpers and bundles the session. Quitting the game normally does the same. |
 
@@ -53,6 +55,9 @@ swapchain images.
 - `clips/`: the replay clips. `frames/`: bbhost's own presented-frame PNGs.
 - `mangohud/`: MangoHud's CSV (every frame's frame time).
 - `game-logs/`: files bbhost wrote into the game folder's `logs/` during the session.
+- `snaps/` (rc2): the F11 / `bbtest snap` snapshots and `summary.txt`.
+- `rgp/`, `shader-stats.tsv` (rc2, `bbtest profile` only): the RGP captures with
+  `captures.tsv`, and the shader statistics.
 
 ## MangoHud and goverlay
 bbtest starts the game with `MANGOHUD=1` and
@@ -74,7 +79,7 @@ The same way, `bbtest clip` on another key is handy with `--record`. Marks
 show a short notification when `notify-send` exists.
 
 ## bbhost's own debug switches (bbhost-vk)
-- **Show Upscaler GPU Time** (F10 -> UPSCALING, System -> PC Upscaling, or the
+- **Show Upscaler GPU Time** (F10 -> DEBUG since rc2, System -> PC Upscaling, or the
   setup window): the presenter's passes timed with Vulkan timestamps
   (`present`, and `upscale` or `one pass`), shown under the FPS counter and
   logged every 300 frames as `present-timer: GPU ms a frame ...`. Stock
@@ -92,6 +97,98 @@ show a short notification when `notify-send` exists.
   The log's `scene-split:` lines say the render size, the scale pass and, at
   start, every patched site's original bytes; `heap:` lines come before and
   after each size change, `yebis: restart N` with each YEBIS restart.
+
+## Performance snapshots (rc2): F11 and `bbtest snap`
+- Press **F11** in the game, or run `bbtest snap "what you saw"`. bbhost writes
+  `snap-<YYYYmmdd>-<HHMMSS>-<map>.txt` (the map id, e.g. `m24_00_00_00`, or `menu`). It goes
+  to the session's `snaps/`, or to the game folder's `snaps/` without a session.
+- The top-left corner shows "Saving a snapshot..." and then
+  "Snapshot saved (N fps avg, 1% low M): name" for 3 s.
+- The file is written on a background thread, from what is kept in memory. Saving it adds
+  no frame spike.
+- One file is ~0.3-1.5 MB of text. It holds the last 30 s:
+  - every frame's time, flip-to-present delay, drops and command-processor waits;
+  - the GPU busy % and the busiest threads' CPU ms every second;
+  - the newest GPU sample's top passes. The sampler times one frame pass by pass every
+    ~10 s and skips a frame after one over budget;
+  - FSR and sharpening ms;
+  - post-at-render coverage and fallback reasons;
+  - every shader translation or pipeline compile: ms, the command processor or a worker,
+    and whether the frame waited;
+  - the area, the settings and BBHOST_/MANGOHUD/RADV_ variables, and the log.
+- The first lines (`summary:`) carry the numbers. `bbtest snap --show` prints them for
+  every snapshot in a session: avg, 1% and 0.1% lows, frames over 8.5/9/12 ms, drops, the
+  top 10 passes, the area and compiles. `bbtest stop` writes them to `snaps/summary.txt`.
+- Debugging switches (no menu entries): `BBHOST_SNAP=0` (off), `BBHOST_SNAP_DIR=<dir>`,
+  `BBHOST_GPU_SAMPLE=0` (no sampler), `BBHOST_FRAME_LATENCY=0` (vk.1's frame replacing),
+  `BBHOST_SHARPEN_AT_PRESENT=1` (sharpen in the present pass, HUD included),
+  `BBHOST_PRESENT_PACE=0`, `BBHOST_POST_AT_RENDER=0`.
+
+## vk.1-rc2 checks (~15 min)
+FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
+
+1. Run `bbtest start vk1-rc2`.
+2. Check the menu: open F10. The sections should be DISPLAY, GRAPHICS & EFFECTS, CAMERA &
+   CONTROLS, GAME, ONLINE & ACCOUNT, DEBUG.
+   - Frame rate, Upscaler and Upscaling quality say "(restart required)".
+   - There are no pacing or post-processing switches.
+   - Scroll every row. The menu must never go blank, and long notes wrap.
+3. Set **Upscaling sharpness 0.8**.
+   - **Hunter's Dream, ~3 min:** walk the paths and turn the camera. Press F11 at every
+     dip or stutter, and once when it is smooth.
+   - **Cathedral Ward, ~4 min:** do the same.
+   - **Central Yharnam or Forbidden Woods, ~4 min:** do the same.
+4. Set **sharpness 0.5**. Revisit one area for ~3 min and press F11 there once while
+   smooth.
+   - Look at the HUD and the edges of text. There should be no halos at either
+     sharpness.
+5. Run `bbtest stop`, then send the session folder: `snaps/` with `summary.txt`,
+   `session.txt` and `bbhost.log`.
+   - The log's `present: ... command processor waited ...` lines should show 0 drops.
+   - `post-at-render: joined by shape` lines list the new passes.
+   - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
+     once at start.
+
+## Profiling session (rc2): `bbtest profile`
+For RADV (Mesa 25.1+ has RGP on RDNA4/GFX12; Mesa 26.2.4 here) and AMD's Radeon GPU
+Profiler (RGP) to open the captures.
+
+1. Run `bbtest profile "dream dips"` (add `--detach` to start from a shortcut).
+   - This is a normal session plus `MESA_VK_TRACE=rgp`,
+     `MESA_VK_TRACE_TRIGGER=<session>/rgp/trigger`, `BBHOST_RGP_DIR=<session>/rgp` and
+     `BBHOST_SHADER_STATS=<session>/shader-stats.tsv`.
+2. Play to the spot. At a dip, press **F11**, or run `bbtest snap "note"`.
+   - bbhost writes the 30 s snapshot as usual and creates the trigger file. RADV then
+     traces the next frame.
+   - That frame takes much longer, a visible hitch of a second or more, while RADV writes
+     `/tmp/bbhost.bin_<date>_<time>....rgp`. Mesa always writes to /tmp; TMPDIR does not
+     change it.
+   - bbhost waits for the file and moves it to `rgp/<snapshot name>.rgp`. It adds a line
+     to `rgp/captures.tsv` (time, rgp, snapshot, area, note, MiB) and a `[rgp]` section to
+     the snapshot, and the banner says "GPU capture saved".
+   - At most one GPU capture is taken every 10 s. A snapshot inside that window says
+     `[rgp] skipped`.
+   - The log says when the driver did not take the trigger (`rgp: the driver did not take
+     the trigger in 5 s`) or no file appeared (`rgp: no capture file appeared`).
+   - The hitch shows in the next snapshot if it is taken within 30 s. Wait ~30 s between
+     a GPU capture and a snapshot you want clean, or read the log lines in it.
+3. File sizes:
+   - **An .rgp is ~50-500 MB.** It holds a frame's SQTT with instruction timing. RADV
+     grows its 32 MiB-per-SE buffer and retries the next frame when it is too small.
+   - Keep /tmp roomy: with /tmp on tmpfs the trace sits in RAM until it is moved.
+   - `shader-stats.tsv` is a few MB: one line per pipeline executable, with the time, the
+     kind, the pipeline (the pass label the GPU sampler and snapshots use, `<vs>+<ps>`
+     guest hashes or a compute shader's name), the stage, the wave size and every RADV
+     statistic as name=value (SGPRs, VGPRs, spilled SGPRs/VGPRs, code size, LDS size,
+     scratch, subgroups per SIMD, instructions, latency...).
+4. Expect more compile stutter early in a profile session. Pipelines are built with the
+   capture-statistics flag and without bbhost's pipeline cache (the flag is part of the
+   driver's cache key), so they compile once more. Mesa's own disk cache keeps them for
+   the next profile session.
+   - A normal launch never sets the flag and is unchanged. Normal launches don't read the
+     profile session's cache entries, and don't lose theirs.
+5. Run `bbtest stop`. It also moves any `.rgp` left in /tmp from this session into `rgp/`.
+   Send `rgp/`, `snaps/`, `shader-stats.tsv` and `bbhost.log`.
 
 ## v0.2.18-vk.1 defaults check (~3 min)
 
