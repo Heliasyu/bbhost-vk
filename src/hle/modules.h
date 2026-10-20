@@ -67,6 +67,10 @@ struct GuestMapInfo {
 };
 void hle_kernel_snapshot_maps(std::vector<GuestMapInfo>& out);
 std::uint64_t hle_kernel_maps_generation();  // changes whenever the map list does
+// rc6: host mappings made from here on are memfds (the GPU side imports
+// them as dma-bufs, host/gpu.cpp), and the memfd behind one (-1: anonymous).
+void hle_kernel_host_maps_shared(bool on);
+int hle_kernel_host_map_fd(std::uint64_t va);
 std::uint64_t hle_kernel_map_host(std::uint64_t len);  // host read/write memory in the GPU page table; 0 on failure
 std::uint64_t hle_kernel_gpu_alias(std::uint64_t va);  // direct memory's GPU alias of a CPU address; 0 when none
 std::uint64_t hle_kernel_mappings_of(std::uint64_t va);

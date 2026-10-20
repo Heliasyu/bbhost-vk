@@ -56,6 +56,7 @@
 #include "log.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -309,6 +310,52 @@ __attribute__((target("mwaitx"))) std::uint64_t mwaitx_until(std::uint64_t done,
     return published;
 }
 #endif
+
+// rc6: the wait loop times itself (spin, replay) with the time-stamp
+// counter instead of clock_gettime: four vDSO reads around every block, ~20 ns
+// each, became four RDTSCs. Only where the counter is invariant and the
+// kernel's own clock source is the TSC (so it is synchronized across cores);
+// the ticks become nanoseconds at the reports, by the counter's rate measured
+// against CLOCK_MONOTONIC since the recorder started. BBHOST_RECORDER_TSC=0
+// (or no usable TSC): clock_gettime as before; =2: the TSC whatever the
+// kernel's clock source (a test).
+std::atomic<bool> g_wait_tsc{false};  // set once at the recorder's start
+std::uint64_t g_tsc_base = 0, g_ns_base = 0;
+bool tsc_usable() {
+#if defined(__x86_64__) && !defined(_WIN32)
+    const char* e = std::getenv("BBHOST_RECORDER_TSC");
+    if (e && e[0] == '0') return false;
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!__get_cpuid(0x80000000u, &a, &b, &c, &d) || a < 0x80000007u) return false;
+    if (!__get_cpuid(0x80000007u, &a, &b, &c, &d) || !(d & (1u << 8))) return false;  // invariant TSC
+    if (e && e[0] == '2') return true;  // BBHOST_RECORDER_TSC=2: whatever the kernel's clock source (a test)
+    char src[32] = {};
+    if (FILE* f = std::fopen("/sys/devices/system/clocksource/clocksource0/current_clocksource", "r")) {
+        if (!std::fgets(src, sizeof(src), f)) src[0] = 0;
+        std::fclose(f);
+    }
+    return std::strncmp(src, "tsc", 3) == 0;
+#else
+    return false;
+#endif
+}
+inline std::uint64_t wait_clock() {
+#if defined(__x86_64__)
+    if (g_wait_tsc.load(std::memory_order_relaxed)) return __rdtsc();
+#endif
+    return host_clock_monotonic_ns();
+}
+// Wait-clock ticks to nanoseconds.
+std::uint64_t wait_ns(std::uint64_t ticks) {
+#if defined(__x86_64__)
+    if (!g_wait_tsc.load(std::memory_order_relaxed)) return ticks;
+    const std::uint64_t ns = host_clock_monotonic_ns() - g_ns_base, tsc = __rdtsc() - g_tsc_base;
+    if (ns < 1000000 || !tsc) return 0;  // under a millisecond since the start: no rate yet (and nothing to report)
+    return static_cast<std::uint64_t>(static_cast<double>(ticks) * static_cast<double>(ns) / static_cast<double>(tsc));
+#else
+    return ticks;
+#endif
+}
 
 int g_mode = [] {
     const char* e = std::getenv("BBHOST_RECORDER");
@@ -619,6 +666,13 @@ void replay_block(const Block& b) {
 void recorder_thread() {
     host_thread_set_name("bb-record");
     host_thread_set_class(HostThreadClass::GpuFeed, "bb-record");  // with the command processor it serves
+    g_ns_base = host_clock_monotonic_ns();
+#if defined(__x86_64__)
+    g_tsc_base = __rdtsc();
+#endif
+    g_wait_tsc.store(tsc_usable());
+    host_log("recorder: its wait loop timed with %s", g_wait_tsc.load() ? "the TSC (rc6; BBHOST_RECORDER_TSC=0: clock_gettime)"
+                                                                  : "clock_gettime (no invariant TSC as the kernel's clock source, or BBHOST_RECORDER_TSC=0)");
     const int spin = g_recorder_spin;
 #if defined(__x86_64__)
     {
@@ -650,7 +704,7 @@ void recorder_thread() {
         if (published == done) {
             // Draws come in bursts a few microseconds apart: spin through
             // those, sleep through the gaps between frames.
-            const std::uint64_t t0 = host_clock_monotonic_ns();
+            const std::uint64_t t0 = wait_clock();
 #if defined(__x86_64__)
             if (g_use_mwaitx) {
                 published = mwaitx_until(done, __rdtsc() + g_spin_tsc);
@@ -662,7 +716,7 @@ void recorder_thread() {
                     published = g_published.load(std::memory_order_acquire);
                 }
             }
-            add_relaxed(g_spin_ns, host_clock_monotonic_ns() - t0);
+            add_relaxed(g_spin_ns, wait_clock() - t0);  // wait-clock ticks (wait_ns)
             if (published == done) {
                 add_relaxed(g_sleeps, 1);
                 g_sleeping.store(true, std::memory_order_seq_cst);
@@ -671,7 +725,7 @@ void recorder_thread() {
                 continue;
             }
         }
-        const std::uint64_t t1 = host_clock_monotonic_ns();
+        const std::uint64_t t1 = wait_clock();
         while (done < published) {
             replay_block(g_blocks[done % kBlocks]);
             g_last_block.store(done, std::memory_order_relaxed);
@@ -689,7 +743,7 @@ void recorder_thread() {
             write_combine_fence();
             g_done.store(done, std::memory_order_release);
         }
-        add_relaxed(g_replay_ns, host_clock_monotonic_ns() - t1);
+        add_relaxed(g_replay_ns, wait_clock() - t1);
     }
 }
 
@@ -950,11 +1004,15 @@ std::string cpu_section() {
     std::string out = host_cpu_placement_section();
     char b[768];
     std::snprintf(b, sizeof(b),
-                  "\nrecorder_wait: mode=%s pauses=%d tsc=%llu wait_ms=%.1f replay_ms=%.1f sleeps=%llu mwaitx=%llu mwaitx_woken=%llu "
-                  "(totals since start; rc5: BBHOST_RECORDER_MWAITX=0 spins with PAUSE; bb-record's CPU in [seconds] is what it saves)",
-                  g_use_mwaitx ? "mwaitx" : "pause", g_recorder_spin, static_cast<unsigned long long>(g_spin_tsc), g_spin_ns.load() / 1e6,
-                  g_replay_ns.load() / 1e6, static_cast<unsigned long long>(g_sleeps.load()), static_cast<unsigned long long>(g_own.mwaitx.load()),
-                  static_cast<unsigned long long>(g_own.mwaitx_woken.load()));
+                  "\nrecorder_wait: mode=%s pauses=%d tsc=%llu wait_ms=%.1f replay_ms=%.1f sleeps=%llu mwaitx=%llu mwaitx_woken=%llu clock=%s "
+                  "(totals since start; rc5: BBHOST_RECORDER_MWAITX=0 spins with PAUSE; bb-record's CPU in [seconds] is what it saves; "
+                  "rc6 clock: what times the wait, BBHOST_RECORDER_TSC=0)",
+                  g_use_mwaitx ? "mwaitx" : "pause", g_recorder_spin, static_cast<unsigned long long>(g_spin_tsc), wait_ns(g_spin_ns.load()) / 1e6,
+                  wait_ns(g_replay_ns.load()) / 1e6, static_cast<unsigned long long>(g_sleeps.load()), static_cast<unsigned long long>(g_own.mwaitx.load()),
+                  static_cast<unsigned long long>(g_own.mwaitx_woken.load()), g_wait_tsc.load() ? "tsc" : "clock_gettime");
+    out += b;
+    host_log_async_line(b, sizeof(b));
+    out += "\n";
     out += b;
     static GpuStats prev{};
     const GpuStats now = host_gpu_stats();
@@ -1000,7 +1058,7 @@ std::string recorder_report() {
     const std::uint64_t queries = op(Op::kResetQueries) + op(Op::kBeginQuery) + op(Op::kEndQuery) + op(Op::kCopyQueryResults) + op(Op::kTimestamp);
     const std::uint64_t submits = op(Op::kEndSubmit) + op(Op::kForeignSubmit) + op(Op::kBegin);
     const std::uint64_t draws = op(Op::kDrawState);
-    const std::uint64_t spin = g_spin_ns.load(), replay = g_replay_ns.load(), sleeps = g_sleeps.load();
+    const std::uint64_t spin = wait_ns(g_spin_ns.load()), replay = wait_ns(g_replay_ns.load()), sleeps = g_sleeps.load();
     const StreamStats& s = g_stream_stats;
     const std::uint64_t eb_ns = s.endbegin_ns.load(), eb_n = s.endbegin_n.load(), r_ns = s.retire_ns.load(), r_n = s.retires.load(),
                         f_ns = s.fence_ns.load(), subs = s.submits.load();

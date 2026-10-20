@@ -42,6 +42,7 @@
 #include <linux/udmabuf.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #endif
 
@@ -556,13 +557,36 @@ VkResult host_span(Chunk& c, void* ptr, std::uint64_t size) {
 // memfd's pages instead, 64 MiB at most (the module's size_limit_mb), and a
 // longer span is a sparse buffer with its pieces bound in order, so it keeps
 // one range of device addresses.
-constexpr std::uint64_t kDmabufPiece = 64ull << 20;
+// rc6: the pieces as large as the module allows, up to 1 GiB (a direct-memory
+// chunk): every piece is one more buffer object in each submission's list,
+// which the kernel validates and RADV sorts (BO sort 9.7% of bb-submit in the
+// rc5 profile, with 8 GiB of direct memory in 64 MiB pieces). The module's
+// default stays 64 MiB; `echo 1024 | sudo tee
+// /sys/module/udmabuf/parameters/size_limit_mb` before the game (or
+// `options udmabuf size_limit_mb=1024` in /etc/modprobe.d) gives 1 GiB pieces.
+// BBHOST_DMABUF_PIECE_MB caps it (64: as before).
+std::uint64_t g_dmabuf_piece = 64ull << 20;
+void choose_dmabuf_piece() {
+    long mb = 64;
+    if (FILE* f = std::fopen("/sys/module/udmabuf/parameters/size_limit_mb", "r")) {
+        if (std::fscanf(f, "%ld", &mb) != 1) mb = 64;
+        std::fclose(f);
+    }
+    long cap = 1024;
+    if (const char* e = std::getenv("BBHOST_DMABUF_PIECE_MB"); e && *e) cap = std::strtol(e, nullptr, 10);
+    long piece = 64;
+    while (piece * 2 <= std::min(mb, cap) && piece * 2 <= 1024) piece *= 2;
+    g_dmabuf_piece = static_cast<std::uint64_t>(piece) << 20;
+    host_log("gpu: dma-buf pieces of %ld MiB (udmabuf size_limit_mb %ld%s)", piece, mb,
+             piece < 1024 && mb < 1024 ? "; 1024 lets 1 GiB pieces make fewer buffer objects per submission (docs/vk/TESTING.md, rc6)"
+                                       : "");
+}
 
 // [offset, offset + size) of direct memory as one dma-buf import, of a memory
 // type in `bits`. VK_NULL_HANDLE when it cannot be made.
-VkDeviceMemory dmabuf_memory(std::uint64_t offset, std::uint64_t size, std::uint32_t bits) {
+VkDeviceMemory dmabuf_memory(int memfd, std::uint64_t offset, std::uint64_t size, std::uint32_t bits) {
     udmabuf_create uc{};
-    uc.memfd = static_cast<__u32>(hle_kernel_dmem_fd());
+    uc.memfd = static_cast<__u32>(memfd);
     uc.flags = UDMABUF_FLAGS_CLOEXEC;
     uc.offset = offset;
     uc.size = size;
@@ -606,8 +630,9 @@ VkDeviceMemory dmabuf_memory(std::uint64_t offset, std::uint64_t size, std::uint
 // [offset, offset + size) of direct memory into c as dma-buf imports: a
 // buffer bound to one, or a sparse buffer over several. Under the GPU lock,
 // as every use of the renderer's queue is: the sparse binds go on it.
-VkResult dmabuf_span(Chunk& c, std::uint64_t offset, std::uint64_t size) {
-    const bool sparse = size > kDmabufPiece;
+VkResult dmabuf_span(Chunk& c, std::uint64_t offset, std::uint64_t size, int memfd = -1) {
+    if (memfd < 0) memfd = hle_kernel_dmem_fd();
+    const bool sparse = size > g_dmabuf_piece;
     if (sparse && !g.dmabuf_sparse) {
         static std::atomic<int> said{0};
         if (said.fetch_add(1) < 4)
@@ -627,15 +652,15 @@ VkResult dmabuf_span(Chunk& c, std::uint64_t offset, std::uint64_t size) {
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(g.device, c.buffer, &req);
     // Spans are whole 64 KiB pages, so the pieces meet the binding alignment.
-    if (req.size != size || (sparse && kDmabufPiece % req.alignment)) {
+    if (req.size != size || (sparse && g_dmabuf_piece % req.alignment)) {
         host_log("gpu: a buffer over %llu bytes of direct memory wants %llu (alignment %llu)", static_cast<unsigned long long>(size),
                  static_cast<unsigned long long>(req.size), static_cast<unsigned long long>(req.alignment));
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     std::vector<VkSparseMemoryBind> binds;
-    for (std::uint64_t at = 0; at < size; at += kDmabufPiece) {
-        const std::uint64_t n = std::min(kDmabufPiece, size - at);
-        const VkDeviceMemory m = dmabuf_memory(offset + at, n, req.memoryTypeBits);
+    for (std::uint64_t at = 0; at < size; at += g_dmabuf_piece) {
+        const std::uint64_t n = std::min(g_dmabuf_piece, size - at);
+        const VkDeviceMemory m = dmabuf_memory(memfd, offset + at, n, req.memoryTypeBits);
         if (!m) return VK_ERROR_INVALID_EXTERNAL_HANDLE;
         c.pieces.push_back(m);
         binds.push_back({at, n, m, 0, 0});
@@ -728,9 +753,39 @@ void choose_dmem_import() {
             return;
         }
         g.dmem_dmabuf = true;
+        choose_dmabuf_piece();
         const VkResult d = dmabuf_span(c, 0, 1ull << gcn::kPageShift);
         free_import(c);
         if (d == VK_SUCCESS) {
+            // rc6: the host's own GPU mappings (the GX table ring) as memfds
+            // too, imported the same way (import_anon). BBHOST_HOST_MAP_DMABUF=0:
+            // anonymous memory and a host-pointer import, as before.
+            // Only once a memfd of its own has gone in that way (the probe),
+            // and where the ring's 128 MiB fits a piece or sparse binding
+            // joins several: a failed import would leave the ring unmapped.
+            const char* e = std::getenv("BBHOST_HOST_MAP_DMABUF");
+            bool shared = !(e && e[0] == '0');
+            const char* why = "BBHOST_HOST_MAP_DMABUF=0";
+            if (shared && !g.dmabuf_sparse && g_dmabuf_piece < (128ull << 20)) {
+                shared = false;
+                why = "no sparse binding to join dma-bufs";
+            }
+            if (shared) {
+                shared = false;
+                why = "the probe of a memfd of its own failed";
+                const long fd = syscall(SYS_memfd_create, "bb-probe", 1 | 2 /* MFD_CLOEXEC | MFD_ALLOW_SEALING */);
+                if (fd >= 0) {
+                    if (ftruncate(static_cast<int>(fd), 1 << 20) == 0 && fcntl(static_cast<int>(fd), F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) == 0) {
+                        Chunk probe;
+                        shared = dmabuf_span(probe, 0, 1 << 20, static_cast<int>(fd)) == VK_SUCCESS;
+                        free_import(probe);
+                    }
+                    close(static_cast<int>(fd));
+                }
+            }
+            hle_kernel_host_maps_shared(shared);
+            host_log("gpu: the host's own GPU mappings (the GX table ring) %s", shared ? "as memfds, imported as dma-bufs (rc6)"
+                                                                                     : (std::string("stay anonymous, host-pointer imports: ") + why).c_str());
             host_log("gpu: the driver refuses direct memory as a host pointer (%d); importing it as dma-bufs (/dev/udmabuf)%s", r,
                      g.dmabuf_sparse ? "" : ", 64 MiB at most: no sparse binding");
             return;
@@ -971,6 +1026,31 @@ const Chunk* import_anon(std::uint64_t va, std::uint64_t len) {
         return &it->second;
     }
     Chunk c;
+#if !defined(_WIN32)
+    // rc6: a host mapping with a memfd behind it (the GX table ring where
+    // direct memory goes in as dma-bufs; hle_kernel_map_host) goes in the same
+    // way: no userptr for amdgpu to check at every submission.
+    if (g.dmem_dmabuf) {
+        if (const int fd = hle_kernel_host_map_fd(va); fd >= 0) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const VkResult r = dmabuf_span(c, 0, len, fd);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (r == VK_SUCCESS) {
+                VkBufferDeviceAddressInfo bai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+                bai.buffer = c.buffer;
+                c.address = vkGetBufferDeviceAddress(g.device, &bai);
+                c.size = len;
+                host_log("gpu: host mapping 0x%llx (%llu KiB) imported as %s in %.0f ms (rc6; BBHOST_HOST_MAP_DMABUF=0: as a host pointer)",
+                         static_cast<unsigned long long>(va), static_cast<unsigned long long>(len >> 10),
+                         c.pieces.empty() ? "a dma-buf" : "dma-bufs in a sparse buffer", ms);
+                return &(g.anon_imports[va] = c);
+            }
+            host_log("gpu: host mapping 0x%llx (%llu KiB) as a dma-buf failed (%d); trying it as a host pointer", static_cast<unsigned long long>(va),
+                     static_cast<unsigned long long>(len >> 10), r);
+            free_import(c);
+        }
+    }
+#endif
     void* ptr = reinterpret_cast<void*>(static_cast<std::uintptr_t>(va));
     VkMemoryHostPointerPropertiesEXT hp{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     if (g.get_host_pointer_props(g.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr, &hp) != VK_SUCCESS) {
