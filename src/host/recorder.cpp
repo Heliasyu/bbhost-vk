@@ -46,6 +46,8 @@
 
 #include "host/gpu_internal.h"
 #include "host/stream_ops.h"
+#include "host/perf_capture.h"
+#include "host/gpu.h"
 
 #include <algorithm>
 #include "core/host_clock.h"
@@ -60,7 +62,9 @@
 #include <unordered_map>
 
 #if defined(__x86_64__)
+#include <cpuid.h>
 #include <immintrin.h>
+#include <x86intrin.h>
 #endif
 
 #if !defined(_WIN32)
@@ -248,6 +252,7 @@ Counts g_counts;
 // producer touches per draw.
 struct alignas(64) RecorderOwn {
     std::atomic<std::uint64_t> spin_ns{0}, replay_ns{0}, sleeps{0};
+    std::atomic<std::uint64_t> mwaitx{0}, mwaitx_woken{0};  // rc5: MWAITX waits, and those that ended with work
     std::atomic<std::uint32_t> last_kind{0xffff};
     std::atomic<std::uint64_t> last_block{0}, last_serial{~0ull};
 };
@@ -259,6 +264,51 @@ std::atomic<std::uint32_t>& g_last_kind = g_own.last_kind;
 std::atomic<std::uint64_t>& g_last_block = g_own.last_block;
 std::atomic<std::uint64_t>& g_last_serial = g_own.last_serial;
 inline void add_relaxed(std::atomic<std::uint64_t>& c, std::uint64_t n) { c.store(c.load(std::memory_order_relaxed) + n, std::memory_order_relaxed); }
+
+// rc5: the recorder's wait for the next block without burning its core. In
+// rc4's heaviest scene 72% of bb-record's ~870 ms/s was its spin (`recorder
+// spin 1656 ms, replay 611 ms` a window) - 4,000 PAUSEs before every sleep -
+// which took its SMT sibling's issue slots and the package's boost budget.
+// AMD's user-mode MONITORX/MWAITX (Zen and later; CPUID 8000_0001h ECX bit
+// 29) arms a monitor on g_published's cache line and stops the core until a
+// store to that line, or the TSC timer, ends it, in C0 (no C-state, hints
+// 0xF0), so it wakes about as fast as the spin saw the store. The window is
+// the same as the spin's: 4,000 PAUSEs timed once at start, in TSC ticks.
+// After it the recorder sleeps on the futex as before. Without MONITORX (Intel,
+// older CPUs) the PAUSE loop is unchanged. BBHOST_RECORDER_MWAITX=0: the PAUSE
+// loop everywhere. Log label `recorder: wait`, snapshot [cpu] `recorder_wait:`.
+bool g_use_mwaitx = false;
+std::uint64_t g_spin_tsc = 0;  // the spin's length in TSC ticks (mwaitx only)
+bool cpu_has_mwaitx() {
+#if defined(__x86_64__)
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!__get_cpuid(0x80000000u, &a, &b, &c, &d) || a < 0x80000001u) return false;
+    if (!__get_cpuid(0x80000001u, &a, &b, &c, &d)) return false;
+    return (c & (1u << 29)) != 0;
+#else
+    return false;
+#endif
+}
+#if defined(__x86_64__)
+// Until g_published moves past `done` or `deadline` (TSC) passes; the value
+// it last read.
+__attribute__((target("mwaitx"))) std::uint64_t mwaitx_until(std::uint64_t done, std::uint64_t deadline) {
+    std::uint64_t published = g_published.load(std::memory_order_acquire);
+    while (published == done) {
+        _mm_monitorx(const_cast<std::atomic<std::uint64_t>*>(&g_published), 0, 0);
+        published = g_published.load(std::memory_order_acquire);  // a store before the monitor was armed
+        if (published != done) break;
+        const std::uint64_t now = __rdtsc();
+        if (now >= deadline) break;
+        const std::uint64_t left = deadline - now;
+        add_relaxed(g_own.mwaitx, 1);
+        _mm_mwaitx(2u /* the timer in EBX */, 0xf0u /* stay in C0 */, static_cast<unsigned>(std::min<std::uint64_t>(left, 0xffffffffu)));
+        published = g_published.load(std::memory_order_acquire);
+    }
+    if (published != done) add_relaxed(g_own.mwaitx_woken, 1);
+    return published;
+}
+#endif
 
 int g_mode = [] {
     const char* e = std::getenv("BBHOST_RECORDER");
@@ -570,6 +620,30 @@ void recorder_thread() {
     host_thread_set_name("bb-record");
     host_thread_set_class(HostThreadClass::GpuFeed, "bb-record");  // with the command processor it serves
     const int spin = g_recorder_spin;
+#if defined(__x86_64__)
+    {
+        const char* e = std::getenv("BBHOST_RECORDER_MWAITX");
+        g_use_mwaitx = !(e && e[0] == '0') && spin > 0 && cpu_has_mwaitx();
+        if (g_use_mwaitx) {
+            // The PAUSE loop's length on this CPU, the best of three.
+            std::uint64_t best = ~0ull;
+            for (int k = 0; k < 3; ++k) {
+                const std::uint64_t a = __rdtsc();
+                for (int i = 0; i < spin; ++i) cpu_relax();
+                best = std::min<std::uint64_t>(best, __rdtsc() - a);
+            }
+            g_spin_tsc = std::max<std::uint64_t>(best, 1000);
+        }
+        if (g_use_mwaitx) {
+            host_log("recorder: wait for the next block with MONITORX/MWAITX for %llu TSC ticks (%d pauses' worth), then the futex "
+                     "(rc5; BBHOST_RECORDER_MWAITX=0: the PAUSE loop)",
+                     static_cast<unsigned long long>(g_spin_tsc), spin);
+        } else {
+            host_log("recorder: wait for the next block with %d pauses, then the futex (%s)", spin,
+                     cpu_has_mwaitx() ? (spin > 0 ? "BBHOST_RECORDER_MWAITX=0" : "BBHOST_RECORDER_SPIN=0") : "no MONITORX on this CPU");
+        }
+    }
+#endif
     std::uint64_t done = g_done.load(std::memory_order_acquire);
     for (;;) {
         std::uint64_t published = g_published.load(std::memory_order_acquire);
@@ -577,9 +651,16 @@ void recorder_thread() {
             // Draws come in bursts a few microseconds apart: spin through
             // those, sleep through the gaps between frames.
             const std::uint64_t t0 = host_clock_monotonic_ns();
-            for (int i = 0; i < spin && published == done; ++i) {
-                cpu_relax();
-                published = g_published.load(std::memory_order_acquire);
+#if defined(__x86_64__)
+            if (g_use_mwaitx) {
+                published = mwaitx_until(done, __rdtsc() + g_spin_tsc);
+            } else
+#endif
+            {
+                for (int i = 0; i < spin && published == done; ++i) {
+                    cpu_relax();
+                    published = g_published.load(std::memory_order_acquire);
+                }
             }
             add_relaxed(g_spin_ns, host_clock_monotonic_ns() - t0);
             if (published == done) {
@@ -861,12 +942,48 @@ StreamTestCounts stream_test_counts() {
 
 VkCommandBuffer g_cmd() { return in_place(__builtin_return_address(0)); }
 
+// rc5: the snapshot's [cpu] section - the placement and the timer slack
+// (core/host_clock.h), the recorder's wait, and the command processor's cost
+// per draw (its phases, host_gpu_stats), since start and since the previous
+// snapshot (two snapshots in a row at one spot: the second's is that window).
+std::string cpu_section() {
+    std::string out = host_cpu_placement_section();
+    char b[768];
+    std::snprintf(b, sizeof(b),
+                  "\nrecorder_wait: mode=%s pauses=%d tsc=%llu wait_ms=%.1f replay_ms=%.1f sleeps=%llu mwaitx=%llu mwaitx_woken=%llu "
+                  "(totals since start; rc5: BBHOST_RECORDER_MWAITX=0 spins with PAUSE; bb-record's CPU in [seconds] is what it saves)",
+                  g_use_mwaitx ? "mwaitx" : "pause", g_recorder_spin, static_cast<unsigned long long>(g_spin_tsc), g_spin_ns.load() / 1e6,
+                  g_replay_ns.load() / 1e6, static_cast<unsigned long long>(g_sleeps.load()), static_cast<unsigned long long>(g_own.mwaitx.load()),
+                  static_cast<unsigned long long>(g_own.mwaitx_woken.load()));
+    out += b;
+    static GpuStats prev{};
+    const GpuStats now = host_gpu_stats();
+    const auto per_draw = [](const GpuStats& a, const GpuStats& z, int ph) {
+        const std::uint64_t d = a.draw_calls - z.draw_calls;
+        return d ? static_cast<double>(a.phase_ns[ph] - z.phase_ns[ph]) / static_cast<double>(d) : 0.0;
+    };
+    const GpuStats zero{};
+    std::snprintf(b, sizeof(b),
+                  "\ncp_cost: draws=%llu exec_ns_per_draw=%.0f draw_ns_per_draw=%.0f bind_ns_per_draw=%.0f prefetch_ns_per_draw=%.0f "
+                  "since_last_snapshot: draws=%llu exec_ns_per_draw=%.0f draw_ns_per_draw=%.0f bind_ns_per_draw=%.0f prefetch_ns_per_draw=%.0f "
+                  "(rc5: the command processor's phases per draw - ThinLTO and the draw-path changes show here)",
+                  static_cast<unsigned long long>(now.draw_calls), per_draw(now, zero, kPhaseExec), per_draw(now, zero, kPhaseDraw),
+                  per_draw(now, zero, kPhaseBind), per_draw(now, zero, kPhasePrefetch), static_cast<unsigned long long>(now.draw_calls - prev.draw_calls),
+                  per_draw(now, prev, kPhaseExec), per_draw(now, prev, kPhaseDraw), per_draw(now, prev, kPhaseBind),
+                  per_draw(now, prev, kPhasePrefetch));
+    prev = now;
+    out += b;
+    return out;
+}
+const bool g_cpu_section = (perf::add_section("cpu", cpu_section), true);
+
 std::string recorder_report() {
     if (!g_blocks) return std::string();
     struct Last {
         Counts c;
         std::uint64_t spin = 0, replay = 0, sleeps = 0, endbegin_ns = 0, endbegin_n = 0, retire_ns = 0, retires = 0, fence_ns = 0, submits = 0;
         std::uint64_t flip = 0;
+        std::uint64_t mwaitx = 0, mwaitx_woken = 0;  // rc5
     };
     static Last last;
     const Counts& c = g_counts;
@@ -893,14 +1010,15 @@ std::string recorder_report() {
         "recorder: %llu draws replayed; %llu drains, %llu of them waited; %llu waits for a free packet. This window: %llu blocks "
         "(%llu draws), %llu ops (fill %llu, barrier %llu, copy %llu, pass %llu, query %llu, begin/submit %llu, other %llu); drains %llu "
         "(%llu waited, %llu us); submitted-waits %llu (%llu us); waits for a free block %llu / packet %llu; recorder spin %llu ms, "
-        "replay %llu ms, sleeps %llu%s",
+        "replay %llu ms, sleeps %llu%s; rc5 wait %s: mwaitx %llu (%llu ended by a block)",
         ull(g_pk_done.load()), ull(c.drains), ull(c.drain_waits), ull(c.packet_waits), ull(c.blocks - l.blocks), ull(draws), ull(all),
         ull(fills), ull(barriers), ull(copies), ull(passes), ull(queries), ull(submits),
         ull(all - fills - barriers - copies - passes - queries - submits - draws), ull(c.drains - l.drains), ull(c.drain_waits - l.drain_waits),
         ull((c.drain_ns - l.drain_ns) / 1000), ull(c.submitted_waits - l.submitted_waits), ull((c.submitted_wait_ns - l.submitted_wait_ns) / 1000),
         ull(c.full_waits - l.full_waits), ull(c.packet_waits - l.packet_waits), ull((spin - last.spin) / 1000000),
         ull((replay - last.replay) / 1000000), ull(sleeps - last.sleeps),
-        g_mode == kModeOff ? " (recorder off)" : g_mode == kModeInline ? " (inline)" : stream_on() ? "" : " (BBHOST_STREAM_SUBMIT=0)");
+        g_mode == kModeOff ? " (recorder off)" : g_mode == kModeInline ? " (inline)" : stream_on() ? "" : " (BBHOST_STREAM_SUBMIT=0)",
+        g_use_mwaitx ? "mwaitx" : "pause", ull(g_own.mwaitx.load() - last.mwaitx), ull(g_own.mwaitx_woken.load() - last.mwaitx_woken));
     // What a submission costs on its way, wherever it runs.
     const std::uint64_t ns = subs - last.submits;
     if (n > 0 && static_cast<std::size_t>(n) < sizeof(buf)) {
@@ -937,6 +1055,8 @@ std::string recorder_report() {
     last.fence_ns = f_ns;
     last.submits = subs;
     last.flip = flip;
+    last.mwaitx = g_own.mwaitx.load();
+    last.mwaitx_woken = g_own.mwaitx_woken.load();
     return out;
 }
 

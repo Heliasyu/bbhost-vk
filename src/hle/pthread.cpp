@@ -5,6 +5,7 @@
 #include "hle/hle.h"
 #include "hle/platform.h"
 #include "hle/sync.h"
+#include "core/host_clock.h"
 #include "core/portable.h"
 #include "core/thunk.h"
 #include "core/tls_rewrite.h"
@@ -345,6 +346,10 @@ void* thread_tramp(void* p) {
     if (b->name[0]) {
         host_thread_set_name(b->name);
     }
+    // rc5: the game's render thread joins the hot chain (core/host_clock.h);
+    // any other guest thread takes the process's own mask back, in case the
+    // thread that made it was placed (the main thread is).
+    host_thread_place(std::strcmp(b->name, "GXRenderThread") == 0 ? HostPlace::Hot : HostPlace::Any, b->name);
     using Fn = void*(GUEST_ABI*)(void*);  // the guest's thread function
     // scePthreadExit longjmps back here from inside HLE (host FS, host
     // stack); hle_setjmp_raw has no same-stack check.

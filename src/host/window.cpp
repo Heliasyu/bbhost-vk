@@ -753,10 +753,15 @@ std::int64_t pace_slot(std::int64_t now) {
 }
 
 // Until the slot: sleep, then spin the last 0.3 ms. How long it waited.
+// rc5: the last 0.15 ms when this thread's timer slack is 1 ns
+// (host_thread_set_class set it; core/host_clock.h): its sleeps then wake a
+// few microseconds late, not ~55 us. bb-present's CPU in the `present: per
+// frame:` line shows the difference.
 std::int64_t pace_until(std::int64_t until) {
     const std::int64_t t0 = pace_now_ns();
     std::int64_t now = t0;
-    if (until - now > 400000) std::this_thread::sleep_for(std::chrono::nanoseconds(until - now - 300000));
+    static const std::int64_t spin_ns = host_tight_timers_on() ? 150000 : 300000;
+    if (until - now > spin_ns + 100000) std::this_thread::sleep_for(std::chrono::nanoseconds(until - now - spin_ns));
     while ((now = pace_now_ns()) < until) {
 #if defined(__x86_64__)
         __builtin_ia32_pause();

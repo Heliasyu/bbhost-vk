@@ -1,5 +1,45 @@
 # Changelog (bbhost-vk)
 
+## vk.1-rc5 (2026-10-20, test build "build 4", branch `phase-5-test-release`; not released)
+
+CPU headroom for heavy Old Yharnam (bb-cp0 ~91% of a core, bb-record ~87%, in rc4's
+`010838`). Plan with the evidence and the ranked next steps: docs/vk/DEVLOG.md (rc5). Rule
+as before: permanent, chosen automatically, no menu or launcher switch; each `BBHOST_*=0`
+is rc4's behaviour. The translator is unchanged (fingerprint cbb93a8a…): no shader cache
+rebuild.
+
+- **Recorder wait with MONITORX/MWAITX.** bb-record spun 4,000 PAUSEs before every sleep
+  (`recorder spin 1656 ms, replay 611 ms` a window: 72% of the thread). On AMD (CPUID
+  8000_0001h ECX[29]) it now arms a monitor on the published-block counter and waits in
+  C0 for the same length (TSC ticks, calibrated at start), then sleeps on the futex as
+  before. Elsewhere the PAUSE loop is unchanged. Log `recorder: wait for the next block`;
+  the 300-flip line `rc5 wait mwaitx: mwaitx N (M ended by a block)`; [cpu]
+  `recorder_wait:`. `BBHOST_RECORDER_MWAITX=0`.
+- **CCD-aware placement.** With two or more L3 domains of six or more CPUs (the 5950X's
+  CCDs): the main thread, GXRenderThread, bb-cp0, bb-record, bb-submit, bb-present and
+  bb-vblank share one whole CCD (larger L3, then prefcore ranking / CPPC / max frequency);
+  bb-compile (in game, not while booting or loading), bb-cs-optimize, bb-tablemask and
+  bb-lean use the other; every other thread keeps the whole mask. Log `placement:`;
+  [cpu] `placement:`. `BBHOST_AFFINITY=0`.
+- **Timer slack 1 ns** on the timing threads (Linux's default 50 us made every sleep wake
+  ~55 us late). With it set, the limiter's learnt margin floor goes 300 → 150 us and the
+  presenter's spin 300 → 150 us. Log `timer slack:`; [cpu] `timer_slack:`.
+  `BBHOST_TIMER_SLACK=0` (also restores both floors).
+- **ThinLTO** for the bbhost executable (clang + lld). The decomp sources are built
+  without it (byte-identical objects). Build option `-DBBHOST_THINLTO=OFF`.
+- **Page tables in ReBAR video memory** when a host-visible video-memory heap over 1 GiB
+  exists (else system memory, as before). The same bytes; the walks' loads stop crossing
+  PCIe. Log `page tables:`; [walks] `page_tables:`. `BBHOST_TABLES_VRAM=0`.
+- The lazily started TableMask and LeanBuilder workers are named `bb-tablemask` and
+  `bb-lean` (they inherited `bb-cp0`, the menu's "bb-cp0=2885 ms/s").
+- The motion-blur diagnostic stops searching every draw's pipeline name once it has
+  logged (CPU audit C3).
+- **[cpu]** (new F11 section): `placement:`, `timer_slack:`, `recorder_wait:` and
+  `cp_cost:` (the command processor's exec/draw/bind/prefetch ns per draw, since start
+  and since the previous snapshot).
+- `tools/cpuprofile.sh` and `tools/perf_cpu_summary.py` (from the CPU audit): a perf
+  profile of the running game, shipped beside the build (TESTING.md).
+
 ## vk.1-rc4 (2026-10-20, test build "build 3", branch `phase-5-test-release`; not released)
 
 Rule as in rc3: optimizations are permanent (no menu or launcher switch); `BBHOST_*`

@@ -694,6 +694,86 @@ void choose_dmem_import() {
     host_log("gpu: the driver refuses direct memory as a host pointer (%d) - nothing will draw", r);
 }
 
+// rc5 (GPU audit #3): the page tables (the L1, the sink's L2 and every L2)
+// in video memory the CPU can map (ReBAR) instead of system memory. Each
+// translated walk is two dependent loads of these tables; from system memory
+// both cross PCIe after every submission's cache invalidation (RADV's
+// preamble invalidates L2 and the vector/scalar caches at the start of every
+// submission, so CPU writes made before a submission are seen by it whatever
+// the memory type - the same rule as today). The CPU only writes them
+// (write-combined, as before); the one read, page_in_gpu_table_locked, is the
+// draw capture's. The same bytes, so the picture is bit-identical.
+// Only with a host-visible video-memory heap over 1 GiB (ReBAR): a 256 MiB
+// BAR is left to the driver. BBHOST_TABLES_VRAM=0 puts them back in system
+// memory. Log label `page tables:`, snapshot [gpu_memory] `page_tables:`.
+std::atomic<std::uint32_t> g_tables_vram{0}, g_tables_sys{0};
+std::uint32_t tables_vram_type(std::uint32_t type_bits) {
+    static const bool off = [] {
+        const char* e = std::getenv("BBHOST_TABLES_VRAM");
+        return e && e[0] == '0';
+    }();
+    if (off) return UINT32_MAX;
+    const VkMemoryPropertyFlags want =
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (std::uint32_t i = 0; i < g.mem_props.memoryTypeCount; ++i) {
+        const VkMemoryType& t = g.mem_props.memoryTypes[i];
+        if (!(type_bits & (1u << i)) || (t.propertyFlags & want) != want) continue;
+        // Not the host-cached kind (none on RADV for video memory, but read
+        // the flags rather than assume) and not protected memory.
+        if (t.propertyFlags & (VK_MEMORY_PROPERTY_PROTECTED_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) continue;
+        if (g.mem_props.memoryHeaps[t.heapIndex].size <= (1ull << 30)) continue;
+        return i;
+    }
+    return UINT32_MAX;
+}
+bool create_table_buffer(DevBuffer& b, std::uint64_t size) {
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = size;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VkBuffer buf = VK_NULL_HANDLE;
+    if (vkCreateBuffer(g.device, &bci, nullptr, &buf) == VK_SUCCESS) {
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(g.device, buf, &req);
+        const std::uint32_t type = tables_vram_type(req.memoryTypeBits);
+        if (type != UINT32_MAX) {
+            VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+            flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+            VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            mai.pNext = &flags;
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = type;
+            VkDeviceMemory mem = VK_NULL_HANDLE;
+            void* map = nullptr;
+            if (vkAllocateMemory(g.device, &mai, nullptr, &mem) == VK_SUCCESS) {
+                if (vkBindBufferMemory(g.device, buf, mem, 0) == VK_SUCCESS && vkMapMemory(g.device, mem, 0, VK_WHOLE_SIZE, 0, &map) == VK_SUCCESS &&
+                    map) {
+                    VkBufferDeviceAddressInfo bai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+                    bai.buffer = buf;
+                    b.buffer = buf;
+                    b.memory = mem;
+                    b.map = map;
+                    b.size = size;
+                    b.address = vkGetBufferDeviceAddress(g.device, &bai);
+                    if (g_tables_vram.fetch_add(1, std::memory_order_relaxed) == 0) {
+                        host_log("page tables: in video memory the CPU maps (memory type %u, heap %u of %llu MiB; rc5, "
+                                 "BBHOST_TABLES_VRAM=0 puts them in system memory)",
+                                 type, g.mem_props.memoryTypes[type].heapIndex,
+                                 static_cast<unsigned long long>(g.mem_props.memoryHeaps[g.mem_props.memoryTypes[type].heapIndex].size >> 20));
+                    }
+                    return true;
+                }
+                vkFreeMemory(g.device, mem, nullptr);
+            }
+        }
+        vkDestroyBuffer(g.device, buf, nullptr);
+    }
+    if (!create_dev_buffer(b, size, true)) return false;
+    if (g_tables_sys.fetch_add(1, std::memory_order_relaxed) == 0) host_log("page tables: in system memory (no ReBAR heap, or BBHOST_TABLES_VRAM=0)");
+    return true;
+}
+
+
 void fill_sink(DevBuffer& t) {
     auto* e = static_cast<std::uint64_t*>(t.map);
     for (std::uint32_t k = 0; k < gcn::kL2Entries; ++k) e[k] = g.sink.address;
@@ -706,7 +786,7 @@ bool set_page_locked(std::uint64_t va, std::uint64_t dev) {
     auto it = g.l2.find(i1);
     if (it == g.l2.end()) {
         DevBuffer t;
-        if (!create_dev_buffer(t, gcn::kL2Entries * 8, true)) return false;
+        if (!create_table_buffer(t, gcn::kL2Entries * 8)) return false;
         fill_sink(t);
         it = g.l2.emplace(i1, t).first;
         static_cast<std::uint64_t*>(g.l1.map)[i1] = t.address;
@@ -1579,6 +1659,7 @@ void start_hang_watchdog() {
     std::call_once(once, [] {
         std::thread([] {
             host_thread_set_name("bb-hangdog");
+            host_thread_place(HostPlace::Any, "bb-hangdog");
             std::uint64_t seen = 0;
             auto since = std::chrono::steady_clock::now();
             bool said = false;
@@ -2679,8 +2760,8 @@ bool init_locked() {
         return false;
     }
     bindless_dummies_locked(g.dummy_view, g.dummy_view, g.dummy_sampler);  // slot 0 of the global arrays
-    if (!create_dev_buffer(g.l1, gcn::kL1Entries * 8, true) || !create_dev_buffer(g.sink, 1ull << gcn::kPageShift, false) ||
-        !create_dev_buffer(g.sink_l2, gcn::kL2Entries * 8, true)) {
+    if (!create_table_buffer(g.l1, gcn::kL1Entries * 8) || !create_dev_buffer(g.sink, 1ull << gcn::kPageShift, false) ||
+        !create_table_buffer(g.sink_l2, gcn::kL2Entries * 8)) {
         host_log("gpu: page table buffers failed");
         return false;
     }
@@ -3404,6 +3485,7 @@ std::uint64_t cs_us_since(std::chrono::steady_clock::time_point t0) {
 // bb-cs-optimize: the optimized builds, behind everything else.
 void cs_optimize_thread(int index) {
     host_thread_set_name("bb-cs-optimize");
+    host_thread_place(HostPlace::Cold, "bb-cs-optimize");  // rc5: off the hot chain's CPUs
     static const int delay_ms = [] {
         const char* d = std::getenv("BBHOST_CS_OPTIMIZE_DELAY_MS");
         return d ? std::atoi(d) : 0;
@@ -4691,6 +4773,7 @@ void start_memory_reserve() {
     const bool keeper = env("BBHOST_MEMORY_KEEPER", 1) != 0;
     std::thread([=] {
         host_thread_set_name("bb-reserve");
+        host_thread_place(HostPlace::Any, "bb-reserve");  // rc5: not the hot mask of the thread that made it
         // The heap's blocks are of the memory type its first image asked for.
         std::uint32_t type = UINT32_MAX;
         const auto make_staging = [&](std::uint64_t upto) {
@@ -7072,3 +7155,13 @@ void host_gpu_report() {
     if (occlusion_on()) host_log("%s", occlusion_report(true).c_str());
     render_report();
 }
+
+namespace gpu {
+// rc5: the snapshot line for create_table_buffer (gpu_internal.h).
+std::string page_tables_line() {
+    char b[160];
+    std::snprintf(b, sizeof(b), "page_tables: vram=%u system=%u", g_tables_vram.load(std::memory_order_relaxed),
+                  g_tables_sys.load(std::memory_order_relaxed));
+    return b;
+}
+}  // namespace gpu

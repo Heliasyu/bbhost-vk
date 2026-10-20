@@ -635,6 +635,8 @@ std::uint32_t alloc_params_slot_locked(const gcn::StageParams& params, VkDescrip
 VkDescriptorSet alloc_set_locked(VkDescriptorSetLayout layout = VK_NULL_HANDLE);  // the shared layout when null
 bool rebuild_page_tables();
 bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool cached = false);  // cached: host-cached memory, for readbacks
+// rc5: the snapshot [walks] line `page_tables: vram= system=` (where the page tables were put; gpu.cpp create_table_buffer).
+std::string page_tables_line();
 std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags want);
 bool extract_program(std::uint64_t code_va, std::vector<std::uint32_t>& words, std::string& name);
 // A GX shader creator ran (render.cpp; host_gpu_note_shader_created).

@@ -609,7 +609,13 @@ void limiter_note_sleep(std::int64_t asked_us, std::int64_t took_us) {
         }
     }
     t.late_p99_us = second;
-    t.margin_us = std::clamp<std::int64_t>(second + 200, 300, 2000);
+    // rc5: with the 1 ns timer slack (host_tight_timers_on) a sleep wakes
+    // within a few tens of microseconds, not ~55 us late, so the margin is
+    // the second-latest plus 100 us, at least 150 us (it was plus 200, at least
+    // 300): about 0.15 ms a frame less spinning on the main thread. The
+    // margin is still learnt: late sleeps raise it at once.
+    const bool tight = host_tight_timers_on();
+    t.margin_us = std::clamp<std::int64_t>(second + (tight ? 100 : 200), tight ? 150 : 300, 2000);
     t.shown_margin_us.store(t.margin_us, std::memory_order_relaxed);
     t.shown_late_p99_us.store(second, std::memory_order_relaxed);
 }
@@ -1046,6 +1052,15 @@ GUEST_ABI std::int64_t frame_manager_hook(std::uint64_t, const std::uint64_t* sa
     const bool converted = g_game_fps != 30;
     if (g_source == Source::Ours) {
         note_main_frame_work(saved[5]);
+        // rc5: the game's main thread (the limiter's) - the timer slack its
+        // sleeps need to wake on time, and the hot chain's CPUs
+        // (core/host_clock.h). Once.
+        static const bool placed = [] {
+            host_thread_tight_timers("the game's main thread (frame limiter)");
+            host_thread_place(HostPlace::Hot, "the game's main thread");
+            return true;
+        }();
+        (void)placed;
         RealClock clock;
         g_fast_target = converted && (g_bench_uncapped || loading_fast_now());
         sprj_flipper_update(f, clock, pace_target());

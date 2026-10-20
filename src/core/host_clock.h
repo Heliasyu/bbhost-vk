@@ -51,6 +51,29 @@ enum class HostThreadClass {
 };
 void host_thread_set_class(HostThreadClass c, const char* who);
 
+// rc5 (Linux; no-ops elsewhere). host_thread_set_class also does both of
+// these for its threads.
+// The calling thread's timer slack to 1 ns (prctl PR_SET_TIMERSLACK): its
+// timed sleeps wake when asked instead of up to 50 us later, Linux's default
+// (every limiter and vblank sleep woke ~55 us late in rc3/rc4's logs).
+// True when it is set. BBHOST_TIMER_SLACK=0 leaves the default. Log label
+// `timer slack:`, snapshot [cpu] `timer_slack:`.
+bool host_thread_tight_timers(const char* who);
+// The tight timers are on for this process (the spin floors that assume them).
+bool host_tight_timers_on();
+// CCD-aware placement: on a CPU with two or more L3 domains (a Ryzen's CCDs)
+// of at least six CPUs each, the hot chain - the game's main and render
+// threads, the command processors, the recorder, bb-submit, bb-present,
+// bb-vblank - runs on one domain's whole mask (the larger L3, then the best
+// preferred-core ranking), the shader compilers on the others while in game.
+// Any: the process's own mask (what a thread made by a hot thread resets to).
+// A failure is counted and ignored. BBHOST_AFFINITY=0 turns it off. Log label
+// `placement:`, snapshot [cpu] `placement:`.
+enum class HostPlace { Hot, Cold, Any };
+void host_thread_place(HostPlace p, const char* who);
+// What placement and the timer slack did, for the snapshot's [cpu] section.
+std::string host_cpu_placement_section();
+
 // A call counter for entries many guest threads hit at once, raw (no thunk,
 // no host thread-locals): sixteen cache lines, one picked by the caller's
 // stack address (each thread has its own stack), so two threads rarely bump

@@ -350,6 +350,24 @@ set_source_files_properties(${BBHOST_DECOMP_SOURCES} PROPERTIES COMPILE_OPTIONS 
 # (every CPU that runs the eboot has AVX).
 set_property(SOURCE src/decomp/camera/follow_camera.cpp APPEND PROPERTY COMPILE_OPTIONS -mavx)
 
+# rc5: ThinLTO for bbhost's own sources (the command processor's draw path in
+# render.cpp calls across gpu.cpp, recorder.cpp, buffer_shadow.cpp and
+# textures.cpp; LTO inlines across them). The decomp sources stay out of it
+# (-fno-lto): they are guest-facing, built without the stack protector and
+# with -ffp-contract=off for bit-exact floating point, and nothing from
+# another file may be inlined into them. No -march: the release stays
+# portable and its floating point unchanged. -DBBHOST_THINLTO=OFF builds as
+# rc4 did.
+if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  option(BBHOST_THINLTO "ThinLTO for the bbhost executable (clang + lld)" ON)
+  if(BBHOST_THINLTO)
+    target_compile_options(bbhost PRIVATE -flto=thin)
+    target_link_options(bbhost PRIVATE -flto=thin -Wl,--thinlto-jobs=all)
+    set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-lto)
+    message(STATUS "bbhost: ThinLTO on (BBHOST_THINLTO=OFF turns it off)")
+  endif()
+endif()
+
 if(MSVC)
   target_compile_options(bbhost PRIVATE /W4)
 else()

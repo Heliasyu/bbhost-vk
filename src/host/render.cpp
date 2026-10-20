@@ -1487,6 +1487,7 @@ std::string walk_section() {
                   static_cast<unsigned long long>(g_walk_pl.soffset_bound.load()),
                   static_cast<unsigned long long>(g_walk_pl.soffset_bound_sites.load()));
     out += b;
+    out += "\n" + page_tables_line() + " (rc5: tables in ReBAR video memory; BBHOST_TABLES_VRAM=0 puts them in system memory)";
     std::lock_guard<std::mutex> lk(g_walk_pl.mu);
     for (const std::string& n : g_walk_pl.post_names) out += "\npost_vs_walks: " + n;
     return out;
@@ -2823,6 +2824,11 @@ TableMaskWorkers& table_mask_workers() {
         auto* w = new TableMaskWorkers;  // never destroyed: its threads run until exit
         for (int i = 0; i < 4; ++i) {
             std::thread([w] {
+                // rc5: named (they inherited "bb-cp0", whose [seconds] CPU
+                // they were counted in: rc4's 2885 ms "bb-cp0" second), and
+                // off the hot chain's CPUs (core/host_clock.h).
+                host_thread_set_name("bb-tablemask");
+                host_thread_place(HostPlace::Cold, "bb-tablemask");
                 for (;;) {
                     TableMaskJob job;
                     {
@@ -4991,6 +4997,11 @@ Precompiler& precompiler() {
                 t_pipeline_worker = true;
                 perf::set_worker_thread();
                 host_thread_set_name("bb-compile");
+                // rc5: in game the other L3 domain's CPUs, so a compile burst
+                // neither takes the hot chain's cores nor evicts its L3; while
+                // starting and loading (g_precompile_boost) every CPU, as
+                // before (core/host_clock.h).
+                int placed = -1;
                 for (;;) {
                     PrecompileJob job;
                     {
@@ -5014,6 +5025,13 @@ Precompiler& precompiler() {
                             w->busy_since = std::chrono::steady_clock::now();
                             w->burst_jobs = 0;
                             std::fill(std::begin(w->burst_type), std::end(w->burst_type), 0);
+                        }
+                    }
+                    {
+                        const int want = g_precompile_boost.load(std::memory_order_relaxed) ? 0 : 1;
+                        if (want != placed) {
+                            placed = want;
+                            host_thread_place(want ? HostPlace::Cold : HostPlace::Any, "bb-compile");
                         }
                     }
                     while (!g.ok) std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -6290,6 +6308,8 @@ LeanBuilders& lean_builders() {
         auto* w = new LeanBuilders;  // never destroyed: its threads run until exit
         for (int i = 0; i < 2; ++i) {
             std::thread([w] {
+                host_thread_set_name("bb-lean");  // rc5: as bb-tablemask
+                host_thread_place(HostPlace::Cold, "bb-lean");
                 for (;;) {
                     std::unique_ptr<LeanBuildJob> job;
                     {
@@ -12549,8 +12569,11 @@ static bool draw_impl(const GpuDraw& d) {
     // test7c: where the motion blur's two draws a frame write (see the
     // texture lines for what they read), to tell whether skipping them while
     // it is off leaves the same picture.
-    if (s.color[0] && pl.name.find("+e0305cef") != std::string::npos) {
-        static std::atomic<int> logged{0};
+    // rc5 (CPU audit C3): the name search ran for every draw with a colour
+    // target although only the first 8 log; it stops once they have.
+    static std::atomic<int> mb_logged{0};
+    if (s.color[0] && mb_logged.load(std::memory_order_relaxed) < 8 && pl.name.find("+e0305cef") != std::string::npos) {
+        std::atomic<int>& logged = mb_logged;
         if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
             const RtImage& t = *s.color[0];
             host_log("render: motion blur %s draws into 0x%llx %ux%u format %d", pl.name.c_str(), static_cast<unsigned long long>(t.base),

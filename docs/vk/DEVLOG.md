@@ -2017,3 +2017,79 @@ inferred:
     rc4 alike.
 - None of it ran on the hardware. The blit ride, the reset order and the inline fetch
   shader can only be judged there.
+
+## 2026-10-20 (Tue), vk.1-rc5 ("build 4"): CPU headroom for the command-processor chain
+
+Built overnight, pre-authorised; the plan with every item's saving, risk, effort and
+evidence is docs/vk/RC5_PLAN.md (also the session's `rc5/PLAN.md`), summarised here.
+
+### What rc4's data says (heavy Old Yharnam, `snap-20261020-010838`)
+- 114.4 fps avg, 1% low 81.9; bb-cp0 880-970 ms/s, bb-record 830-940, bbhost.bin ~650,
+  bb-submit ~420. cp-backlog at its cap (10).
+- The CP: `exec=2279 draw=1809 bind=1252 prefetch=228 pipeline=24` ms per 2.6 s with
+  438k draws: ~5.2 us exec and ~2.9 us bind per draw. That is the CPU limit.
+- bb-record: `recorder spin 1656 ms, replay 611 ms` a window: 72% spin.
+- GPU idle with work queued 75 ms/s: ~50 ms/s directly after each game submission
+  (b33f77 = host_gpu_submit), ~45-55 us each whatever the span before: a per-command-
+  buffer boundary cost (RADV's end-of-cmdbuf flushes), ~0.5 ms/frame. Not addressed here
+  (next list, #4).
+- Pacing: every sleep ~55 us late (Linux's 50 us timer slack); limiter spin 0.17 ms/frame.
+- blit_ride `rode 29487 alone 7322 missed 1553`: as designed (alone = the frame's
+  submission had already gone; missed = a race with a 344 us vkQueueSubmit).
+- The menu's "bb-cp0=2885 ms/s": TableMask (x4) and LeanBuilder (x2) workers, started
+  lazily from bb-cp0, inherited its name (perf_capture sums CPU by name). Accounting only.
+
+### Landed
+1. **Recorder wait: MONITORX/MWAITX** (CPU audit M3). recorder.cpp `mwaitx_until`: monitor
+   on `g_published`, re-check, `mwaitx` with the TSC timer (hints 0xF0: C0, ECX bit 1:
+   timer) for the length the 4,000 PAUSEs took (best of 3 at start, at least 1,000
+   ticks); then the futex as before. Gated on CPUID 8000_0001h ECX[29].
+   Expected: ~0.4-0.6 core freed.
+2. **Placement** (M1). core/host_clock.cpp: L3 domains from sysfs, hot = larger L3, then
+   prefcore ranking / CPPC highest_perf / max frequency, then lowest CPU; only with ≥2
+   domains of ≥6 CPUs; whole-domain masks. Hot: `host_thread_set_class` callers (bb-cp0,
+   bb-record, bb-submit, bb-present, bb-vblank), the game's main thread (the SprjFlipper
+   hook, first call) and GXRenderThread (pthread.cpp `thread_tramp`). Cold: bb-compile in
+   game (re-placed per job, the whole mask while booting/loading), bb-cs-optimize,
+   bb-tablemask, bb-lean. Everything else is reset to the whole mask, because a thread
+   inherits its creator's. Expected: 0-0.7 ms/frame of cp0/record.
+3. **Timer slack** (M2): `prctl(PR_SET_TIMERSLACK, 1)` on the same timing threads; with it,
+   the limiter's margin `clamp(second + 100, 150, 2000)` (was +200, 300) and the presenter's
+   spin 150 us (was 300). Expected ~0.3 ms/frame less spinning on two threads.
+4. **ThinLTO** (CMakeLists.txt, `BBHOST_THINLTO`, ON with clang): `-flto=thin` for the bbhost
+   target, `--thinlto-jobs=all`, `-fno-lto` on the decomp sources. The 15 decomp objects
+   built with and without the LTO flags have identical code (objdump). Binary 93.7 MB
+   (rc4 96.3). Expected 2-8% CPU in the CP and recorder.
+5. **Page tables in ReBAR VRAM** (GPU audit #3): gpu.cpp `create_table_buffer`. RADV's
+   per-submission preamble invalidates L2/vector/scalar caches, so CPU writes made before
+   a submission are seen exactly as with system memory; the CPU never reads them except
+   the draw capture. Expected 0.02-0.10 ms/frame GPU.
+6. Worker names `bb-tablemask`, `bb-lean`; C3 (the motion-blur name search per draw).
+7. **[cpu]** snapshot section: placement, timer slack, recorder wait, CP cost per draw.
+
+### Left out (reasons in PLAN.md)
+GPU #1 compute constant buffers (hazard rules, needs a game test), #2/#10 (translator →
+cache rebuild), #6/#7 (corruption risk without an image comparison), async FSR, submit
+batching, blit ride changes, M6, M5, C1/C2 (need the profile), -march, frame pointers, PGO.
+PS wave32 and params WC stay env A/Bs.
+
+### Next build, ranked by measured cost
+1. The CP's bind section (2.9 us/draw ≈ 4 ms/frame): profile with `tools/cpuprofile.sh`,
+   then exact-key caching of per-stage descriptor resolution and set lookups across draws.
+2. Splitting bb-cp0's draw work across threads (per pass) or parallel recording.
+3. GPU #1 compute constant buffers (0.15-0.30 ms).
+4. The per-command-buffer boundary (~0.5 ms/frame GPU idle).
+5. PGO. 6. Tess walks (with other translator work). 7. Merging small post passes.
+
+### Verified here (box, lavapipe; no MONITORX on this Xeon, one L3 domain)
+- Clean CI build (CI_PORTABLE=1, BBHOST_RELEASE=ON, ThinLTO on): 53/53 ctest (19 skipped as
+  before), also with `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`.
+- `--stream-selftest`, `=2` with BBHOST_FSR4_FEATURES=1, and `=20`, with the validation
+  layer and synchronization validation: pass, 0 differences, the same 10 upstream
+  SYNC-HAZARD lines; the known `UNASSIGNED-Threading-MultipleThreads` fence message as
+  before. `=2` again with `BBHOST_TABLES_VRAM=0 BBHOST_TIMER_SLACK=0 BBHOST_AFFINITY=0`:
+  pass.
+- The page tables went into lavapipe's device-local host-visible heap (`page tables: in
+  video memory`), so that path ran; the MWAITX path and the placement could not run here
+  (PAUSE fallback, `placement: off: one L3 domain`).
+- Translator fingerprint unchanged: cbb93a8ae24af3169f3cf6d437c1ac69.

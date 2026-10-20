@@ -1,6 +1,7 @@
 // Textures and samplers for the renderer: T#/S# words resolved from the
 // stage's user data become Vulkan images (untiled on upload) and samplers.
 // Render targets sampled as textures alias the render target image.
+#include "core/host_clock.h"
 #include "host/gpu_internal.h"
 
 #if !defined(_WIN32)
@@ -911,6 +912,7 @@ private:
                 char name[16];
                 std::snprintf(name, sizeof(name), "bb-texprep%u", i);
                 host_thread_set_name(name);
+                host_thread_place(HostPlace::Any, name);  // rc5: not the hot mask of the thread that made it
                 for (;;) {
                     std::shared_ptr<TexturePrep> p;
                     {

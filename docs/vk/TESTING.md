@@ -149,6 +149,71 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## Snapshot additions (rc5)
+- **[cpu]** (new):
+  - `placement: on= domains= hot= cold= by= hot_threads= cold_threads= reset_threads=
+    failed=` (and `why=` when off). `hot` is the CCD the main thread, GXRenderThread,
+    bb-cp0, bb-record, bb-submit, bb-present and bb-vblank share; `cold` the compilers'.
+  - `timer_slack: threads= failed=`
+  - `recorder_wait: mode=mwaitx|pause pauses= tsc= wait_ms= replay_ms= sleeps= mwaitx=
+    mwaitx_woken=` (totals since start).
+  - `cp_cost: draws= exec_ns_per_draw= draw_ns_per_draw= bind_ns_per_draw=
+    prefetch_ns_per_draw=`, then the same `since_last_snapshot:`. rc4's heavy Old Yharnam
+    (from its log): exec ~5,200, draw ~4,100, bind ~2,860 ns per draw.
+- **[walks]** gains `page_tables: vram= system=` (tables made in ReBAR video memory / in
+  system memory).
+- **[seconds]**: the lazily started workers show as `bb-tablemask` and `bb-lean`, no longer
+  as `bb-cp0`.
+- New log labels: `recorder: wait for the next block …`, the 300-flip recorder line's
+  `rc5 wait …`, `placement:`, `timer slack:`, `page tables:`.
+- Debugging variables (no menu entries; each `=0` is rc4's behaviour):
+  - `BBHOST_RECORDER_MWAITX=0` (the PAUSE loop)
+  - `BBHOST_AFFINITY=0` (no placement)
+  - `BBHOST_TIMER_SLACK=0` (the default 50 us slack and rc4's 300 us floors)
+  - `BBHOST_TABLES_VRAM=0` (page tables in system memory)
+  - build option `-DBBHOST_THINLTO=OFF`
+- A/B-only, unchanged defaults (try one at a time at the same spot, F11 each):
+  - `BBHOST_PS_WAVE32=32`: pixel shaders in wave32 (the GPU audit's #8; unknown sign);
+  - `BBHOST_PARAMS_WC=1`: the params ring write-combined (#4; may cost CPU).
+
+## vk.1-rc5 checks (~10-15 min)
+FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual. The translator did not
+change, so the shader caches stay; no rebuild stutter is expected.
+
+1. Run `bbtest start vk1-rc5`.
+2. Check the log's start: `placement: 2 L3 domains; the hot chain on CPUs …` (expect one
+   CCD, e.g. `0-7,16-23` or `8-15,24-31`), `timer slack: … set to 1 ns`, `recorder: wait
+   for the next block with MONITORX/MWAITX for N TSC ticks`, `page tables: in video memory
+   the CPU maps`.
+3. **Hunter's Dream, ~4 min:** the usual route; F11 at every dip and once when smooth.
+4. **Old Yharnam, ~6 min:** the usual route, with an F11 at rc4's `010838` spot (heavy
+   outdoors) and another ~15 s later. Compare with rc4:
+   - [seconds] `bb-record` (rc4 830-940 ms/s; expect roughly 250-450) and `bb-cp0`;
+   - [cpu] `cp_cost: since_last_snapshot` (rc4 exec ~5,200 ns/draw);
+   - `pacing:` `late avg` (rc4 54-55 us; expect a few us) and the limiter spin;
+   - avg, 1% low and `over8.5` in the snapshot header.
+5. Watch for: stutter or uneven pacing (the floors), a hitch when a compile starts (the
+   placement), or anything else unlike rc4. Nothing in the picture changed; if it looks
+   different, note where and press F11.
+6. Run `bbtest stop`, then send the session folder.
+7. Only if something looked wrong, or as an A/B at the `010838` spot: repeat once with each
+   of `BBHOST_RECORDER_MWAITX=0`, `BBHOST_AFFINITY=0`, `BBHOST_TIMER_SLACK=0`,
+   `BBHOST_TABLES_VRAM=0`, F11 each time.
+
+## CPU profile (rc5): `cpuprofile.sh`
+For the next build's CP work (bb-cp0's ~2.9 us/draw bind section). It only reads perf
+samples of bbhost.bin, its /proc maps and thread names. `cpuprofile.sh` and
+`perf_cpu_summary.py` are next to the tarball (and in `tools/`); keep them in one folder.
+
+1. Once per session: `sudo pacman -S --needed perf zstd`, then
+   `sudo sysctl kernel.perf_event_paranoid=1 kernel.kptr_restrict=0`.
+2. `bbtest start cpuprof-oy`, go to Old Yharnam outside (the `010838` spot) and stay there.
+3. In a second terminal: `bash ./cpuprofile.sh ~/cpuprof-oy` (~3 min; the last step asks for
+   sudo for the scheduler trace; `CPUPROF_SCHED=0` skips it). Press F11 while it runs.
+4. `bbtest stop`. Send `~/cpuprof-oy.tar.zst` and the session folder (the `.data` files stay
+   on the PC).
+5. Afterwards: `sudo sysctl kernel.perf_event_paranoid=2`.
+
 ## Snapshot additions (rc4)
 - **[present]** gains `blit_ride:`: `rode` (the blit went in the flip's last game
   submission), `alone`, `missed` (offered, but that submission had already gone),
