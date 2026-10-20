@@ -1,5 +1,27 @@
 # Changelog (bbhost-vk)
 
+## Profiling kit instrumentation (2026-10-20, branch `phase-5-test-release`; debug only, not released)
+
+On top of rc5b (7b65cd0), for the measured profiling session before the next build
+(`bbprofile.sh`, docs/vk/TESTING.md "Profiling kit"). **Nothing changes unless a variable is
+set**: no default, picture or snapshot format changes; a normal build is the same build.
+
+- `BBHOST_FLIP_TRACE=1` (`BBHOST_FLIP_TRACE_MS`, default 11): per flip, the game thread's
+  submit and back-pressure, the command processor's pickup, walk and hand-off to video, the
+  present, the CP's jobs/busy/idle since the flip before, the main loop's last frame, and the
+  hot threads' run / run-queue time between presents (`/proc/self/task/*/schedstat`). A present
+  interval over the threshold logs `fliptrace: slow frame …` (three lines); snapshots gain a
+  `[flip_trace]` CSV section (only with the variable set). For the periodic ~12 ms frame (M4).
+- `BBHOST_FRAME_SLOW_MS` (default 33, as before): the main-loop frame length from which
+  `BBHOST_FRAME_STATS=1` logs that frame's waits by call site (`main loop: a N ms frame`).
+- `BBHOST_PARAMS_VRAM=1`: an A/B that puts the params ring in ReBAR video memory (the page
+  tables' rule); the CPU only writes it. Without such a heap, the default.
+- Build options `-DBBHOST_PGO_GENERATE=ON` (an instrumented binary that writes
+  `$BBHOST_PGO_DIR/bbhost-<pid>.profraw`, default `./pgo`, every 30 s and on exit, since bbhost
+  leaves through `_exit`) and `-DBBHOST_PGO_USE=<merged .profdata>`; both off by default, the
+  decomp sources stay out of both.
+- New test `flip_trace_test`.
+
 ## vk.1-rc5b (2026-10-20, test build "build 5", branch `phase-5-test-release`; not released)
 
 On top of rc5 ("build 4", df31b8b). Same rules: permanent, chosen automatically, no menu or

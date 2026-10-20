@@ -118,6 +118,7 @@ add_executable(bbhost
   src/host/audio.cpp
   src/host/frame_stats.cpp
   src/host/main_wait.cpp
+  src/host/flip_trace.cpp
   src/host/sampler.cpp
   src/host/foreign_hooks.cpp
   src/hle/runtime.cpp
@@ -368,6 +369,43 @@ if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   endif()
 endif()
 
+# Profiling kit: profile-guided optimisation of the bbhost executable (IR PGO,
+# which works with the ThinLTO above). Both off by default; a normal build is
+# unchanged.
+#   -DBBHOST_PGO_GENERATE=ON     an instrumented binary (-fprofile-generate) that
+#                                writes $BBHOST_PGO_DIR/bbhost-<pid>.profraw
+#                                (default ./pgo) every 30 s and at exit
+#                                (src/host/pgo_dump.cpp). For a profiling session
+#                                only: the CPU side runs slower.
+#   -DBBHOST_PGO_USE=<.profdata> the optimised build from the merged profile
+#                                (llvm-profdata merge -o bbhost.profdata *.profraw,
+#                                with the llvm-profdata of the clang that built
+#                                the instrumented binary).
+# The decomp sources stay out of both, as they stay out of LTO (bit-exact,
+# guest-facing; nothing instrumented on the game's stacks).
+if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  option(BBHOST_PGO_GENERATE "PGO-instrumented bbhost (-fprofile-generate; profiling sessions only)" OFF)
+  set(BBHOST_PGO_USE "" CACHE FILEPATH "a merged .profdata to build bbhost with (-fprofile-use)")
+  if(BBHOST_PGO_GENERATE AND BBHOST_PGO_USE)
+    message(FATAL_ERROR "BBHOST_PGO_GENERATE and BBHOST_PGO_USE are exclusive")
+  endif()
+  if(BBHOST_PGO_GENERATE)
+    target_compile_options(bbhost PRIVATE -fprofile-generate)
+    target_link_options(bbhost PRIVATE -fprofile-generate)
+    target_compile_definitions(bbhost PRIVATE BBHOST_PGO_GEN=1)
+    target_sources(bbhost PRIVATE src/host/pgo_dump.cpp)
+    set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-profile-generate)
+    message(STATUS "bbhost: PGO instrumentation on (BBHOST_PGO_GENERATE; profiles to \$BBHOST_PGO_DIR or ./pgo)")
+  elseif(BBHOST_PGO_USE)
+    if(NOT EXISTS "${BBHOST_PGO_USE}")
+      message(FATAL_ERROR "BBHOST_PGO_USE: no file ${BBHOST_PGO_USE}")
+    endif()
+    target_compile_options(bbhost PRIVATE -fprofile-use=${BBHOST_PGO_USE} -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+    set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-profile-instr-use)
+    message(STATUS "bbhost: PGO from ${BBHOST_PGO_USE}")
+  endif()
+endif()
+
 if(MSVC)
   target_compile_options(bbhost PRIVATE /W4)
 else()
@@ -521,6 +559,12 @@ if(UNIX)
   # The engine's classes by the names they register (tools/class_catalog.cpp).
   add_executable(class_catalog tools/class_catalog.cpp src/decomp/insn.cpp)
   target_link_libraries(class_catalog PRIVATE eboot_kit)
+  # Profiling kit: the per-flip trace (BBHOST_FLIP_TRACE) on simulated flips.
+  add_executable(flip_trace_test tests/flip_trace_test.cpp src/host/flip_trace.cpp)
+  target_include_directories(flip_trace_test PRIVATE src)
+  target_link_libraries(flip_trace_test PRIVATE pthread)
+  add_test(NAME flip_trace_test COMMAND flip_trace_test)
+  set_tests_properties(flip_trace_test PROPERTIES ENVIRONMENT "BBHOST_FLIP_TRACE=1")
   add_executable(sync_test tests/sync_test.cpp src/hle/sync.cpp src/host/main_wait.cpp src/core/futex.cpp)
   target_include_directories(sync_test PRIVATE src)
   target_link_libraries(sync_test PRIVATE pthread)

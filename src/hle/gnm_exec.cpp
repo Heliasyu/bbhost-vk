@@ -6,6 +6,7 @@
 #include "hle/common.h"
 #include "core/portable.h"
 #include "engine/yebis_bind.h"
+#include "host/flip_trace.h"
 #include "host/frame_stats.h"
 #include "hle/modules.h"
 #include "host/gpu.h"
@@ -1955,6 +1956,7 @@ void cp_thread(Queue* q, int id) {
             q->jobs.pop_front();
         }
         cpu_profile_tick(profile);
+        if (id == 0) fliptrace::cp_job_begin();  // BBHOST_FLIP_TRACE
         t_job_free_event = g_arena_monitor ? job.free_event : ~0ull;
         for (const auto& cb : job.cbs) note_command_buffer(reinterpret_cast<std::uintptr_t>(cb.first), cb.second);
         for (const auto& cb : job.ce_cbs) note_command_buffer(reinterpret_cast<std::uintptr_t>(cb.first), cb.second);
@@ -2024,6 +2026,7 @@ void cp_thread(Queue* q, int id) {
             more_queued = !q->jobs.empty();
         }
         if (every_job || !more_queued) host_gpu_submit();
+        if (id == 0) fliptrace::cp_job_end();
         if (job.done) {
             job.done();
         }

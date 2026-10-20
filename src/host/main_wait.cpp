@@ -52,6 +52,14 @@ const std::int64_t g_log_wait_ns = [] {
     const char* e = std::getenv("BBHOST_WAIT_LOG_MS");
     return static_cast<std::int64_t>(e ? std::atof(e) * 1e6 : 20e6);
 }();
+// BBHOST_FRAME_SLOW_MS (profiling kit; default 33): the main-loop frame
+// length from which the frame's waits by call site are logged below
+// (`main loop: a N ms frame`); 11 catches the periodic ~12 ms frame.
+const std::uint64_t g_slow_frame_us = [] {
+    const char* e = std::getenv("BBHOST_FRAME_SLOW_MS");
+    const double ms = e ? std::atof(e) : 33.0;
+    return static_cast<std::uint64_t>((ms > 0 ? ms : 33.0) * 1000.0);
+}();
 thread_local int t_log_waits = -1;  // -1: not looked up yet
 thread_local char t_thread_name[16];
 bool log_waits() {
@@ -180,7 +188,7 @@ void frame_stats_main_frame(std::uint64_t busy_us, std::uint64_t flip) {
     // A frame of two or more: what the main loop waited for in it (by call
     // site with BBHOST_HLE_COUNT) - streaming and compile hitches, not the
     // steady cost the per-second line shows.
-    if (busy_us > 33000) {
+    if (busy_us > g_slow_frame_us) {
         std::sort(g_frame_sites.begin(), g_frame_sites.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
         std::string top;
         {

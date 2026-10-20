@@ -2194,3 +2194,50 @@ programs translate with and without cb_ssbo (no regressions), all valid SPIR-V, 
 buffers (3 indexed, 4 pointers), every binding in 112-127. The dispatch path itself does
 not run on the box (no game): the layouts are created on lavapipe (`gpu: compute cb: …
 bound as storage buffers`), the selftests pass with it on and with BBHOST_CS_CB=0.
+
+---
+
+## 2026-10-20 (Tue), profiling kit for the next build: debug instrumentation (on rc5b)
+
+Goal: one guided ~30 min session on the PC (`bbprofile.sh`) whose data decides the next build's
+items by measurement (rc5plain ANALYSIS §6): the GPU idle with work queued (A/Bs), the periodic
+~12 ms frame (M4), where bb-cp0's ~5 µs/draw goes (DWARF profile), and PGO. Rule: debug-only,
+off unless its variable is set; no default, picture or snapshot-format change.
+
+### Checked first (at 7b65cd0)
+`BBHOST_TABLES_VRAM`, `BBHOST_PARAMS_WC`, `BBHOST_PS_WAVE32` (=32 requires wave32),
+`BBHOST_FRAME_STATS`, `BBHOST_FRAME_DETAIL`, `BBHOST_WAIT_LOG`, `BBHOST_WAIT_LOG_MS`,
+`BBHOST_HLE_COUNT`, `BBHOST_SNAP_DIR` (+ `snap.request`), `BBHOST_VK_CAPTURE(_DIR)`
+(+ `capture.request`) all exist. Missing: a params ring in VRAM, per-flip timestamps, a
+dump on frames over 11 ms (main_wait logged only frames over 33 ms), and any PGO build.
+bbhost leaves through `_exit` on the window close, SIGTERM and the exit flip, so the profile
+runtime's atexit write would never run.
+
+### Added
+- `src/host/flip_trace.{h,cpp}` (`BBHOST_FLIP_TRACE=1`, `BBHOST_FLIP_TRACE_MS`): hooks in
+  `hle_gnm_submit_flip` (game thread: submit, back-pressure; the flip's done callback on the
+  CP: before/after `hle_video_finish_flip`), `cp_thread` (queue 0: job taken / walked and
+  submitted, so CP busy vs idle between flips), `note_main_frame_work` (the main loop's frame)
+  and the presenter (matched by the flip's arrival: the newest flip whose CP end is not after
+  it). The presenter reads the hot threads' `schedstat` (7 preads a present) for run and
+  run-queue time per interval. A ring of 8192 flips under one mutex; ~4 short critical
+  sections a flip on the game/CP threads when on, one constant load and branch when off.
+  Snapshot `[flip_trace]` only when on.
+- `main_wait.cpp`: `BBHOST_FRAME_SLOW_MS` (default 33 = the old constant).
+- `gpu.cpp`: `BBHOST_PARAMS_VRAM=1` picks a DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT type on a
+  heap over 1 GiB for the params ring (the CPU only memcpys into it: alloc/rewrite_params_slot).
+  The default and `BBHOST_PARAMS_WC=1` paths choose exactly as before.
+- PGO: `-DBBHOST_PGO_GENERATE=ON` (IR PGO, `-fprofile-generate`, compatible with the ThinLTO
+  build) compiles `src/host/pgo_dump.cpp`: a `bb-pgo` thread writes the counters every 30 s
+  through `.tmp` + rename and once more from `exit_reports()` / the window-close path
+  (`pgo_dump_final`, signal-safe: a flag and nanosleep, ≤5 s). `-DBBHOST_PGO_USE=<profdata>`
+  for the optimised build. The decomp sources get `-fno-profile-generate` /
+  `-fno-profile-instr-use` (as they get `-fno-lto`). Not CS-IRPGO: that needs a second
+  instrumented session on top of the first profile; possible later with `-fcs-profile-generate`.
+- `tests/flip_trace_test.cpp`: 60 simulated flips, one 13 ms late: one slow-frame log with
+  the flip before it, 60 CSV rows, the late row's interval and CP walk.
+
+### Verified here
+ctest 55/55 (19 skipped as before, no game files); `--stream-selftest` passes with and
+without `BBHOST_PARAMS_VRAM=1` (lavapipe: `params ring: … in video memory the CPU maps`,
+0 differences). Build warnings: none new.

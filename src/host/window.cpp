@@ -11,6 +11,7 @@
 #include "engine/option_menu.h"
 #include "hle/modules.h"
 #include "host/bindings.h"
+#include "host/flip_trace.h"
 #include "host/options.h"
 #include "host/settings.h"
 #include "host/overlay.h"
@@ -1383,6 +1384,7 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
         split.priority = priority;
         perf::note_present(ns_of(t_presented), static_cast<std::int64_t>(flip.arrived_ns), g_present_dropped.load(std::memory_order_relaxed),
                            g_present_waits.load(std::memory_order_relaxed), g_present_wait_ns.load(std::memory_order_relaxed), split);
+        fliptrace::present(ns_of(t_presented), static_cast<std::int64_t>(flip.arrived_ns));  // BBHOST_FLIP_TRACE (off: returns)
         pacer_publish();
     }
     if (++presents % 300 == 0) {

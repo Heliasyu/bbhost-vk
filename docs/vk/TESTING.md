@@ -149,6 +149,42 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## Profiling kit (after rc5b): `bbprofile.sh`
+A guided ~30 min session that measures what the next build should target, with its own
+binaries (rc5b plus off-by-default debug instrumentation, and a PGO-instrumented one). The
+kit folder's README has the exact commands; `bbprofile.sh --help` the options. In short:
+`bash bbprofile.sh` from the kit folder; it asks for sudo once (perf, the sysctls below,
+`dmidecode`), swaps the game folder's `bbhost.bin` for each step and puts the original back
+at the end (also on Ctrl-C), and leaves one tarball `~/bbprofile-<date>-<time>.tar.gz`.
+Steps (each can be skipped; `--resume` continues a session):
+1. **A1 plain + CPU profile** at the heavy Old Yharnam spot: two snapshots (~60 s), then
+   `cpuprofile.sh` (perf stat, flat, DWARF call graphs of bb-cp0 and the hot chain, sched).
+2. **A2 `BBHOST_TABLES_VRAM=0`**, **A3 `BBHOST_PARAMS_VRAM=1`**, **A4 `BBHOST_PARAMS_WC=1`**:
+   ~60 s each at the same spot (the GPU idle with work queued).
+3. **M4**: `BBHOST_FLIP_TRACE=1 BBHOST_FRAME_STATS=1 BBHOST_FRAME_DETAIL=1
+   BBHOST_FRAME_SLOW_MS=11 BBHOST_WAIT_LOG=GXRender,bbhost.bin BBHOST_WAIT_LOG_MS=3
+   BBHOST_HLE_COUNT=1`, with `perf sched record -k CLOCK_MONOTONIC` (system-wide, 20 s),
+   then two presented-frame captures (`BBHOST_VK_CAPTURE=1`) as reference pictures.
+4. **PGO**: the instrumented binary, a few minutes in Old Yharnam and the Hunter's Dream; the
+   profiles land in the game folder's `pgo/`.
+5. **A5 `BBHOST_PS_WAVE32=32`** and an optional **plain again** (drift check).
+perf needs `kernel.perf_event_paranoid=1` and `kernel.kptr_restrict=0` for the session; the
+kit sets them and restores the values it found. Box side: `tools/bbprofile/bbprofile_analyze.py`.
+
+Debugging variables added for it (none changes anything unless set):
+- `BBHOST_FLIP_TRACE=1`, `BBHOST_FLIP_TRACE_MS=11`: the per-flip trace; log
+  `fliptrace: slow frame … at <s> monotonic: flip N: submit gap, main frame, back-pressure
+  (backlog), submit->CP pickup, CP walk (jobs, CP busy, idle), to video, video->present`,
+  then `the flip before:` and `threads run/run-queue ms …`; snapshot section `[flip_trace]`
+  (CSV, `base_steady_ns=` for lining it up with a perf trace).
+- `BBHOST_FRAME_SLOW_MS` (33): with `BBHOST_FRAME_STATS=1`, which main-loop frames get their
+  waits by call site logged.
+- `BBHOST_PARAMS_VRAM=1`: the params ring in ReBAR video memory (A/B; log `gpu: params ring:`).
+- PGO builds: `-DBBHOST_PGO_GENERATE=ON` (writes `$BBHOST_PGO_DIR`, default `./pgo`,
+  `bbhost-<pid>.profraw`, every `BBHOST_PGO_DUMP_S`=30 s and on exit; log `pgo:`), then
+  `llvm-profdata merge -o bbhost.profdata pgo/*.profraw` (the llvm-profdata of the clang that
+  built it) and `-DBBHOST_PGO_USE=$PWD/bbhost.profdata`.
+
 ## Snapshot additions (rc5b)
 - **[cpu]** gains `cp_split:` (since the previous snapshot) and `cp_split_total:` (since
   start): `sampled_draws=` and then ns per draw for each section of the command

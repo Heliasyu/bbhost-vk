@@ -35,6 +35,7 @@
 #include "host/audio.h"
 #include "host/foreign_hooks.h"
 #include "host/frame_stats.h"
+#include "host/pgo_dump.h"
 #include "host/win_crash.h"
 #include "host/window.h"
 #include "log.h"
@@ -133,6 +134,7 @@ void run_guest_start(GuestStart fn, void* argv, bool windowed) {
                 host_gpu_save_pipeline_cache_at_exit();
                 hle_kernel_memory_report();
                 host_window_stop();
+                pgo_dump_final();  // the PGO-instrumented build only (host/pgo_dump.h)
                 _exit(0);
             }
             if (fault_flip && hle_video_flip_count() >= fault_flip) {
@@ -331,6 +333,7 @@ void device_lost_exit(bool windowed) {
 }
 
 void exit_reports() {
+    pgo_dump_final();  // the PGO-instrumented build only (host/pgo_dump.h); first, while the process is whole
     hle_gx_scaleform_report();
     hle_gnm_cp_report();
     gx_resources_report();
@@ -881,6 +884,7 @@ int main(int argc, char** argv) {
 #else
     host_log("bbhost %s (%s, Linux x86-64)", BBHOST_VERSION, BBHOST_GIT_REV);
     log_cpu();
+    pgo_dump_start();  // the PGO-instrumented build only (host/pgo_dump.h)
     std::signal(SIGTERM, on_term);
     {
         struct sigaction sa{};

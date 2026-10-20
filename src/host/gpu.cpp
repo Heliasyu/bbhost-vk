@@ -2828,9 +2828,36 @@ bool init_locked() {
         const char* e = std::getenv("BBHOST_PARAMS_WC");
         return e && e[0] == '1';
     }();
-    mai.memoryTypeIndex = params_wc ? UINT32_MAX
-                                    : find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                                                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    // Profiling kit (an A/B, off unless set): BBHOST_PARAMS_VRAM=1 puts the
+    // ring in video memory the CPU maps (ReBAR, the page tables' rule: a
+    // host-visible device-local heap over 1 GiB), so every draw's params read
+    // stays off PCIe. The CPU only writes the ring (alloc/rewrite_params_slot
+    // memcpy into it, never a read), write-combined as with
+    // BBHOST_PARAMS_WC=1; the same bytes, so the same picture. Without such a
+    // heap it falls back to the default below.
+    static const bool params_vram = [] {
+        const char* e = std::getenv("BBHOST_PARAMS_VRAM");
+        return e && e[0] == '1';
+    }();
+    mai.memoryTypeIndex = UINT32_MAX;
+    if (params_vram) {
+        const VkMemoryPropertyFlags want =
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (std::uint32_t i = 0; i < g.mem_props.memoryTypeCount; ++i) {
+            const VkMemoryType& t = g.mem_props.memoryTypes[i];
+            if (!(req.memoryTypeBits & (1u << i)) || (t.propertyFlags & want) != want) continue;
+            if (t.propertyFlags & (VK_MEMORY_PROPERTY_PROTECTED_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) continue;
+            if (g.mem_props.memoryHeaps[t.heapIndex].size <= (1ull << 30)) continue;
+            mai.memoryTypeIndex = i;
+            break;
+        }
+        host_log("gpu: params ring: BBHOST_PARAMS_VRAM=1 %s", mai.memoryTypeIndex != UINT32_MAX ? "- in video memory the CPU maps (ReBAR)"
+                                                                                                 : "but no host-visible video-memory heap over 1 GiB; the default");
+    }
+    if (mai.memoryTypeIndex == UINT32_MAX && !params_wc) {
+        mai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                                       VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    }
     if (mai.memoryTypeIndex == UINT32_MAX) {
         mai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
