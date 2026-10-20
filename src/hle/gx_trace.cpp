@@ -40,6 +40,7 @@
 #include <immintrin.h>
 #include <new>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -5881,7 +5882,12 @@ std::string hle_gx_scaleform_last() {
     return out;
 }
 
+void native_periodic_report(std::uint64_t id, bool name_regions, bool at_exit);
+std::uint64_t native_report_last_id();
 void hle_gx_scaleform_report() {
+    // rc6: the periodic native-draw report once more at exit, with the slow
+    // reads' regions named from the process's map (no longer read in play).
+    if (const std::uint64_t last = native_report_last_id()) native_periodic_report(last - 1, true, true);
     if (g_sf_uniforms_placed.load()) {
         host_log("gx-scaleform: %llu uniform blocks taken at the call and read from there (BBHOST_SF_UNIFORMS)",
                  static_cast<unsigned long long>(g_sf_uniforms_placed.load()));
@@ -5903,6 +5909,312 @@ const GpuDispatch* hle_gx_dispatch_token(std::uint64_t id) { return dispatch_tok
 bool hle_gx_dispatch_pending() { return dispatch_pending_impl(); }
 void hle_gx_dispatch_check(const GpuDispatch& regs, const std::uint32_t* writers) { dispatch_check_impl(regs, writers); }
 
+
+// The periodic native-draw report (every 100,000 token draws): counters,
+// the calls still waiting for their token and the slow guest reads. rc6: it
+// ran inline on the command processor's thread, ~30 lines and a read of
+// /proc/self/maps: the periodic ~12 ms hitch of the rc5 profile. Now the
+// command processor only marks it due and the reporter thread (bb-gx-report)
+// writes it; `name_regions`: also name the slow reads' regions from the
+// process's map (at exit, or BBHOST_GX_REPORT_MAPS=1). `id`: the token that made
+// it due.
+void native_periodic_report(std::uint64_t id, bool name_regions, bool at_exit) {
+    {
+        std::size_t pending = 0;
+        std::string stale;
+        {
+            // Calls whose token has not come back within 20,000 later tokens, by caller.
+            // At exit the lock may belong to a thread that will never run
+            // again (the signal landed on it): skip this part then.
+            std::unique_lock<std::mutex> lk(g_native_mu, std::defer_lock);
+            if (at_exit) {
+                if (!lk.try_lock()) goto stale_done;
+            } else {
+                lk.lock();
+            }
+            pending = g_native_draws.size() + g_native_slot_pending.load();
+            std::map<std::tuple<std::uint64_t, int, std::uint64_t>, std::uint64_t> old;
+            for (const auto& [key, draw] : g_native_draws) {
+                if (key + 20000 < id) ++old[{bn(draw.ret), draw.kind, draw.ctx}];
+            }
+            for (const auto& [k, n] : old) {
+                if (stale.size() > 600) break;
+                appendf(stale, " %s from 0x%llx ctx 0x%llx: %llu;", kKindName[std::get<1>(k)], static_cast<ull>(std::get<0>(k)),
+                        static_cast<ull>(std::get<2>(k)), static_cast<ull>(n));
+            }
+        }
+    stale_done:
+        if (!stale.empty()) host_log("gx-native: calls whose token did not come back:%s", stale.c_str());
+        if (g_native_yebis) {
+            host_log("yebis: draws %llu, tokens written %llu (not written %llu), walked %llu, the draw packet after the token was "
+                     "the one it named %llu, a different draw %llu, token without a recorded draw %llu",
+                     static_cast<ull>(g_yebis_calls.load()), static_cast<ull>(g_yebis_tokens.load()),
+                     static_cast<ull>(g_yebis_unwritten.load()), static_cast<ull>(g_yebis_walked.load()),
+                     static_cast<ull>(g_yebis_matched.load()), static_cast<ull>(g_yebis_mismatched.load()),
+                     static_cast<ull>(g_yebis_unmatched.load()));
+            if (const std::uint64_t n = g_yebis_checked.load()) {
+                std::string fields;
+                for (int k = 0; k < 6; ++k) {
+                    appendf(fields, " %s %llu", kYebisField[k], static_cast<ull>(g_yebis_field_bad[k].load()));
+                }
+                host_log("yebis: inputs built from YEBIS's state checked against the registers its commit wrote: %llu draws, "
+                         "differing by field:%s",
+                         static_cast<ull>(n), fields.c_str());
+                for (int w = 0; w < 2; ++w) {
+                    std::string per;
+                    for (int i = 0; i < 16; ++i) {
+                        if (const std::uint64_t m = g_yebis_slot_bad[w][i].load()) {
+                            appendf(per, " s[%d]:%llu", i, static_cast<ull>(m));
+                        }
+                    }
+                    host_log("yebis:   %s user data differing by slot:%s", w ? "ps" : "vs", per.empty() ? " none" : per.c_str());
+                }
+            }
+            if (const std::uint64_t n = g_yebis_ns_n.load()) {
+                host_log("yebis: a flipped draw costs %llu ns reading the state and %llu ns building it, of which "
+                         "%llu ns is ours and %llu ns the guest's calls (sub_15f7840 itself %llu ns)",
+                         static_cast<ull>(g_yebis_ns_host.load() / n), static_cast<ull>(g_yebis_ns_builders.load() / n),
+                         static_cast<ull>(g_yebis_ns_native.load() / n), static_cast<ull>((g_yebis_ns_builders.load() - g_yebis_ns_native.load()) / n),
+                         static_cast<ull>(g_yebis_ns_build_only.load() / n));
+                std::string per;
+                for (int k = 0; k < 6; ++k) {
+                    appendf(per, " %s %llu;", kYebisCallName[k], static_cast<ull>(g_yebis_ns_call[k].load() / n));
+                }
+                host_log("yebis:   ns a draw by call:%s", per.c_str());
+                yebis_bind::report();
+            }
+            if (g_yebis_flipped.load() || g_yebis_flip_failed.load()) {
+                host_log("yebis: draws run from their token %llu, left to the method %llu",
+                         static_cast<ull>(g_yebis_flipped.load()), static_cast<ull>(g_yebis_flip_failed.load()));
+            }
+            if (g_native_yebis >= 2) {
+                std::string stages;
+                for (int k = 0; k < 8; ++k) {
+                    if (const std::uint64_t n = g_yebis_stage_seen[k].load()) {
+                        appendf(stages, " stage %d %llu", k, static_cast<ull>(n));
+                    }
+                }
+                host_log("yebis: stages bound:%s", stages.empty() ? " none" : stages.c_str());
+                for (int w = 0; w < 2; ++w) {
+                    std::string types, slots;
+                    for (int k = 0; k < 32; ++k) {
+                        if (const std::uint64_t n = g_yebis_desc[w][k].load()) {
+                            appendf(types, " 0x%x:%llu", k, static_cast<ull>(n));
+                        }
+                    }
+                    for (int k = 0; k < 16; ++k) {
+                        if (const std::uint64_t n = g_yebis_slots[w][k].load()) {
+                            appendf(slots, " s[%d]:%llu", k, static_cast<ull>(n));
+                        }
+                    }
+                    if (!types.empty()) {
+                        host_log("yebis: %s descriptors by type:%s; by user-data slot:%s", w ? "PS" : "VS and the rest",
+                                 types.c_str(), slots.c_str());
+                    }
+                }
+            }
+        }
+        if (const std::uint64_t n = g_clear_calls.load()) {
+            host_log("gx: deferred colour clears %llu, %llu slices", static_cast<ull>(n),
+                     static_cast<ull>(g_clear_slices.load()));
+        }
+        if (const std::uint64_t on_stack = g_safe_reads_stack.load()) {
+            host_log("gx: guest reads served from the reading thread's own stack %llu", static_cast<ull>(on_stack));
+        }
+        if (const std::uint64_t slow = g_safe_reads_slow.load()) {
+            host_log("gx: guest reads that needed host_read_safe %llu, %llu ms in them, %llu ns each, %.1f MiB",
+                     static_cast<ull>(slow), static_cast<ull>(g_safe_slow_ns.load() / 1000000),
+                     static_cast<ull>(g_safe_slow_ns.load() / slow), static_cast<double>(g_safe_slow_bytes.load()) / (1 << 20));
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> where;
+            for (int i = 0; i < kSlowBuckets; ++i) {
+                if (const std::uint64_t mb = g_slow_where[i].load()) {
+                    where.push_back({g_slow_count[i].load(), mb - 1});
+                }
+            }
+            std::sort(where.rbegin(), where.rend());
+            std::string top;
+            for (std::size_t i = 0; i < where.size() && i < 12; ++i) {
+                appendf(top, " 0x%llx:%llu", static_cast<ull>(where[i].second << 20), static_cast<ull>(where[i].first));
+            }
+            host_log("gx: those reads by megabyte (%zu distinct), most first:%s", where.size(), top.c_str());
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> sites;
+            for (int i = 0; i < kSlowBuckets; ++i) {
+                if (const std::uint64_t at = g_slow_from[i].load()) sites.push_back({g_slow_from_n[i].load(), at});
+            }
+            std::sort(sites.rbegin(), sites.rend());
+            // Offsets from safe_read itself, so addr2line can name them
+            // whatever the image was loaded at.
+            const std::uint64_t anchor = reinterpret_cast<std::uint64_t>(&safe_read);
+            std::string who;
+            for (std::size_t i = 0; i < sites.size() && i < 10; ++i) {
+                appendf(who, " safe_read%+lld:%llu", static_cast<long long>(sites[i].second - anchor),
+                        static_cast<ull>(sites[i].first));
+            }
+            host_log("gx: those reads by caller (%zu sites, offsets from safe_read):%s", sites.size(), who.c_str());
+            // What those megabytes are, from the process's own map: the
+            // point is to name the region so the read can stop being a
+            // system call, not to guess from the address.
+            // rc6: only at exit or with BBHOST_GX_REPORT_MAPS=1 - the read of
+            // /proc/self/maps (3,000+ mappings) was most of the periodic
+            // report's ~12 ms stall in the rc5 profile.
+#if !defined(_WIN32)
+            if (!name_regions) {
+            } else if (FILE* f = std::fopen("/proc/self/maps", "r")) {
+                char line[512];
+                while (std::fgets(line, sizeof(line), f)) {
+                    unsigned long long lo = 0, hi = 0;
+                    if (std::sscanf(line, "%llx-%llx", &lo, &hi) != 2) continue;
+                    for (std::size_t i = 0; i < where.size() && i < 6; ++i) {
+                        const std::uint64_t at = where[i].second << 20;
+                        if (at >= lo && at < hi) {
+                            std::string t(line);
+                            while (!t.empty() && (t.back() == '\n' || t.back() == ' ')) t.pop_back();
+                            host_log("gx:   0x%llx (%llu reads) is in %s", static_cast<ull>(at),
+                                     static_cast<ull>(where[i].first), t.c_str());
+                        }
+                    }
+                }
+                std::fclose(f);
+            }
+#endif
+        }
+        host_log("gx-native: tokens %llu, drawn from tokens %llu, awaiting their token %llu, not qualified %llu, token not "
+                 "written after the flushes %llu, token without a draw %llu, tokens failed %llu, stored past the ring %llu",
+                 static_cast<ull>(g_native_tokens.load()), static_cast<ull>(g_native_drawn.load()), static_cast<ull>(pending),
+                 static_cast<ull>(g_native_ineligible.load()), static_cast<ull>(g_native_late.load()),
+                 static_cast<ull>(g_native_unmatched.load()), static_cast<ull>(g_native_failed.load()),
+                 static_cast<ull>(g_native_overflow.load()));
+        host_log("gx-native: stage records' shader fields from the per-shader cache %llu, read from the object %llu; inputs' "
+                 "shader linkage from the per-thread cache %llu, worked out %llu (checked %llu, differing %llu)",
+                 static_cast<ull>(g_shader_info.load(0)), static_cast<ull>(g_shader_info.load(1)), static_cast<ull>(g_link_info.load(0)),
+                 static_cast<ull>(g_link_info.load(1)), static_cast<ull>(g_link_checked.load()), static_cast<ull>(g_link_differ.load()));
+        host_log("gx-native: register-file fields at tokens: DB_RENDER_CONTROL set %llu (clear bits %llu), depth clear not 0 "
+                 "%llu, stencil clear not 0 %llu, generic scissor narrower than the screen scissor %llu",
+                 static_cast<ull>(g_token_rc_set.load()),
+                 static_cast<ull>(g_token_rc_clear.load()), static_cast<ull>(g_token_depth_clear_set.load()),
+                 static_cast<ull>(g_token_stencil_clear_set.load()), static_cast<ull>(g_token_generic_narrows.load()));
+        {
+            std::string why;
+            for (int k = 0; k < kNativeSkips; ++k) {
+                if (const std::uint64_t n = g_native_skipped.load(k)) appendf(why, " %s %llu;", kNativeSkipName[k], static_cast<ull>(n));
+            }
+            host_log("gx-native: GX draws never offered a token:%s", why.empty() ? " none" : why.c_str());
+            std::string not_qualified;
+            for (int k = 0; k < kWhyCount; ++k) {
+                if (const std::uint64_t n = g_native_ineligible_why[k].load()) appendf(not_qualified, " %s %llu;", kIneligibleWhyName[k], static_cast<ull>(n));
+            }
+            host_log("gx-native: GX draws not qualified for a token:%s", not_qualified.empty() ? " none" : not_qualified.c_str());
+        }
+        const double tokens = static_cast<double>(std::max<std::uint64_t>(1, g_native_tokens.load()));
+        const auto per = [&](NativeCall c) { return static_cast<double>(g_native_call_dwords.load(c)) / tokens; };
+        host_log("gx-fill: fill calls %llu (colour clears by slice %llu, whole-resource %llu, layout refused %llu), tokens %llu, fills run %llu "
+                 "(%.1f MiB), tokens unmatched %llu, not written %llu%s",
+                 static_cast<ull>(g_fill_calls.load()), static_cast<ull>(g_fill_rtv_calls.load()), static_cast<ull>(g_fill_rtv_whole.load()),
+                 static_cast<ull>(g_fill_rtv_layout_failed.load()), static_cast<ull>(g_fill_tokens.load()), static_cast<ull>(g_fill_ranges.load()),
+                 static_cast<double>(g_fill_bytes.load()) / (1 << 20), static_cast<ull>(g_fill_unmatched.load()),
+                 static_cast<ull>(g_fill_unwritten.load()), g_native_fills ? "" : " (BBHOST_GX_NATIVE_FILLS=0)");
+        host_log("gx-upload: texture upload calls %llu, tokens %llu (%.1f MiB of rows), not 2D %llu, no T# in the registry %llu, refused %llu, "
+                 "unmatched %llu, not written %llu%s",
+                 static_cast<ull>(g_upload_calls.load()), static_cast<ull>(g_upload_tokens.load()), static_cast<double>(g_upload_bytes.load()) / (1 << 20),
+                 static_cast<ull>(g_upload_not_2d.load()), static_cast<ull>(g_upload_no_tsharp.load()), static_cast<ull>(g_upload_bad_args.load()),
+                 static_cast<ull>(g_upload_unmatched.load()), static_cast<ull>(g_upload_unwritten.load()), g_native_uploads ? "" : " (BBHOST_GX_NATIVE_UPLOADS=0)");
+        host_log("gx-copy-image: texture copy calls %llu, tokens %llu, not 1D/2D %llu, no T# %llu, formats differ %llu, refused %llu, "
+                 "unmatched %llu, not written %llu%s",
+                 static_cast<ull>(g_icopy_calls.load()), static_cast<ull>(g_icopy_tokens.load()), static_cast<ull>(g_icopy_not_2d.load()),
+                 static_cast<ull>(g_icopy_no_tsharp.load()), static_cast<ull>(g_icopy_format.load()), static_cast<ull>(g_icopy_bad.load()),
+                 static_cast<ull>(g_icopy_unmatched.load()), static_cast<ull>(g_icopy_unwritten.load()),
+                 g_native_image_copies ? "" : " (BBHOST_GX_NATIVE_IMAGE_COPIES=0)");
+        host_log("gx-upload: calls not taken by resource type: 1D %llu, 3D %llu, buffers %llu, other %llu", static_cast<ull>(g_upload_by_type[2].load()),
+                 static_cast<ull>(g_upload_by_type[4].load()), static_cast<ull>(g_upload_by_type[1].load()),
+                 static_cast<ull>(g_upload_by_type[0].load() + g_upload_by_type[5].load() + g_upload_by_type[6].load() + g_upload_by_type[7].load()));
+        host_log("gx-native: dwords a native draw writes to its command buffer: output-merger flush %.2f, input-assembly flush %.2f, "
+                 "rasterizer flush %.2f, bookkeeping %.2f, output-merger commit %.2f, token 4, post-draw %.2f, bookkeeping after %.2f; "
+                 "calls that moved to another chunk %llu; native draws that ran the output-merger flush %llu",
+                 per(kNcOmFlush), per(kNcIaFlush), per(kNcRsFlush), per(kNcBookkeeping), per(kNcOmCommit), per(kNcPostDraw),
+                 per(kNcBookkeepingAfter), static_cast<ull>(g_native_call_switches.load()),
+                 static_cast<ull>(g_native_om_flushes.load()));
+        if (g_native_regs) {
+            for (const NativeCall c : {kNcOmFlush, kNcOmCommit, kNcPostDraw}) {
+                std::vector<std::pair<std::uint64_t, int>> top;
+                for (int reg = 0; reg < 0x400; ++reg) {
+                    if (const std::uint64_t n = g_native_call_regs[c][reg].load()) top.emplace_back(n, reg);
+                }
+                std::sort(top.rbegin(), top.rend());
+                std::string regs, ops;
+                for (std::size_t i = 0; i < top.size() && i < 20; ++i) {
+                    appendf(regs, " 0x%03x %llu;", top[i].second, static_cast<ull>(top[i].first));
+                }
+                for (int op = 0; op < 0x100; ++op) {
+                    if (const std::uint64_t n = g_native_call_ops[c][op].load()) appendf(ops, " 0x%02x %llu;", op, static_cast<ull>(n));
+                }
+                host_log("gx-native: %s writes over %llu tokens, context registers:%s other packets:%s",
+                         c == kNcOmFlush ? "output-merger flush" : c == kNcOmCommit ? "output-merger commit" : "post-draw",
+                         static_cast<ull>(g_native_tokens.load()), regs.c_str(), ops.c_str());
+            }
+        }
+    }
+}
+
+namespace {
+std::atomic<std::uint64_t> g_report_native_due{0};  // the due token's id + 1
+std::atomic<bool> g_report_shadow_due{false};
+std::atomic<std::uint64_t> g_report_last_id{0};
+std::once_flag g_reporter_once;
+
+bool report_maps_env() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_GX_REPORT_MAPS");
+        return e && *e == '1';
+    }();
+    return on;
+}
+
+// BBHOST_GX_REPORT_INLINE=1: the reports on the command processor's thread,
+// as in rc5 (without the map read unless BBHOST_GX_REPORT_MAPS=1).
+bool report_inline_env() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_GX_REPORT_INLINE");
+        return e && *e == '1';
+    }();
+    return on;
+}
+
+void reporter_main() {
+    host_thread_set_name("bb-gx-report");
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (const std::uint64_t due = g_report_native_due.exchange(0, std::memory_order_acq_rel)) {
+            native_periodic_report(due - 1, report_maps_env(), false);
+        }
+        if (g_report_shadow_due.exchange(false, std::memory_order_acq_rel)) report_native();
+    }
+}
+
+void start_reporter() {
+    std::call_once(g_reporter_once, [] { std::thread(reporter_main).detach(); });
+}
+
+void post_native_report(std::uint64_t id) {
+    g_report_last_id.store(id + 1, std::memory_order_relaxed);
+    if (report_inline_env()) {
+        native_periodic_report(id, report_maps_env(), false);
+        return;
+    }
+    start_reporter();
+    g_report_native_due.store(id + 1, std::memory_order_release);
+}
+
+void post_shadow_report() {
+    if (report_inline_env()) {
+        report_native();
+        return;
+    }
+    start_reporter();
+    g_report_shadow_due.store(true, std::memory_order_release);
+}
+}  // namespace
+
+std::uint64_t native_report_last_id() { return g_report_last_id.load(std::memory_order_relaxed); }
 
 const GpuDrawInputs* hle_gx_native_token(std::uint64_t id, const std::uint32_t* sh, const std::uint32_t* ctx) {
     g_native_seen.fetch_add(1, std::memory_order_relaxed);
@@ -5988,228 +6300,7 @@ const GpuDrawInputs* hle_gx_native_token(std::uint64_t id, const std::uint32_t* 
             std::memset(t_native_in.vs_user, 0, sizeof(t_native_in.vs_user));
             std::memset(t_native_in.ps_user, 0, sizeof(t_native_in.ps_user));
         }
-        if (g_native_drawn.fetch_add(1, std::memory_order_relaxed) % 100000 == 99999) {
-            std::size_t pending = 0;
-            std::string stale;
-            {
-                // Calls whose token has not come back within 20,000 later tokens, by caller.
-                std::lock_guard<std::mutex> lk(g_native_mu);
-                pending = g_native_draws.size() + g_native_slot_pending.load();
-                std::map<std::tuple<std::uint64_t, int, std::uint64_t>, std::uint64_t> old;
-                for (const auto& [key, draw] : g_native_draws) {
-                    if (key + 20000 < id) ++old[{bn(draw.ret), draw.kind, draw.ctx}];
-                }
-                for (const auto& [k, n] : old) {
-                    if (stale.size() > 600) break;
-                    appendf(stale, " %s from 0x%llx ctx 0x%llx: %llu;", kKindName[std::get<1>(k)], static_cast<ull>(std::get<0>(k)),
-                            static_cast<ull>(std::get<2>(k)), static_cast<ull>(n));
-                }
-            }
-            if (!stale.empty()) host_log("gx-native: calls whose token did not come back:%s", stale.c_str());
-            if (g_native_yebis) {
-                host_log("yebis: draws %llu, tokens written %llu (not written %llu), walked %llu, the draw packet after the token was "
-                         "the one it named %llu, a different draw %llu, token without a recorded draw %llu",
-                         static_cast<ull>(g_yebis_calls.load()), static_cast<ull>(g_yebis_tokens.load()),
-                         static_cast<ull>(g_yebis_unwritten.load()), static_cast<ull>(g_yebis_walked.load()),
-                         static_cast<ull>(g_yebis_matched.load()), static_cast<ull>(g_yebis_mismatched.load()),
-                         static_cast<ull>(g_yebis_unmatched.load()));
-                if (const std::uint64_t n = g_yebis_checked.load()) {
-                    std::string fields;
-                    for (int k = 0; k < 6; ++k) {
-                        appendf(fields, " %s %llu", kYebisField[k], static_cast<ull>(g_yebis_field_bad[k].load()));
-                    }
-                    host_log("yebis: inputs built from YEBIS's state checked against the registers its commit wrote: %llu draws, "
-                             "differing by field:%s",
-                             static_cast<ull>(n), fields.c_str());
-                    for (int w = 0; w < 2; ++w) {
-                        std::string per;
-                        for (int i = 0; i < 16; ++i) {
-                            if (const std::uint64_t m = g_yebis_slot_bad[w][i].load()) {
-                                appendf(per, " s[%d]:%llu", i, static_cast<ull>(m));
-                            }
-                        }
-                        host_log("yebis:   %s user data differing by slot:%s", w ? "ps" : "vs", per.empty() ? " none" : per.c_str());
-                    }
-                }
-                if (const std::uint64_t n = g_yebis_ns_n.load()) {
-                    host_log("yebis: a flipped draw costs %llu ns reading the state and %llu ns building it, of which "
-                             "%llu ns is ours and %llu ns the guest's calls (sub_15f7840 itself %llu ns)",
-                             static_cast<ull>(g_yebis_ns_host.load() / n), static_cast<ull>(g_yebis_ns_builders.load() / n),
-                             static_cast<ull>(g_yebis_ns_native.load() / n), static_cast<ull>((g_yebis_ns_builders.load() - g_yebis_ns_native.load()) / n),
-                             static_cast<ull>(g_yebis_ns_build_only.load() / n));
-                    std::string per;
-                    for (int k = 0; k < 6; ++k) {
-                        appendf(per, " %s %llu;", kYebisCallName[k], static_cast<ull>(g_yebis_ns_call[k].load() / n));
-                    }
-                    host_log("yebis:   ns a draw by call:%s", per.c_str());
-                    yebis_bind::report();
-                }
-                if (g_yebis_flipped.load() || g_yebis_flip_failed.load()) {
-                    host_log("yebis: draws run from their token %llu, left to the method %llu",
-                             static_cast<ull>(g_yebis_flipped.load()), static_cast<ull>(g_yebis_flip_failed.load()));
-                }
-                if (g_native_yebis >= 2) {
-                    std::string stages;
-                    for (int k = 0; k < 8; ++k) {
-                        if (const std::uint64_t n = g_yebis_stage_seen[k].load()) {
-                            appendf(stages, " stage %d %llu", k, static_cast<ull>(n));
-                        }
-                    }
-                    host_log("yebis: stages bound:%s", stages.empty() ? " none" : stages.c_str());
-                    for (int w = 0; w < 2; ++w) {
-                        std::string types, slots;
-                        for (int k = 0; k < 32; ++k) {
-                            if (const std::uint64_t n = g_yebis_desc[w][k].load()) {
-                                appendf(types, " 0x%x:%llu", k, static_cast<ull>(n));
-                            }
-                        }
-                        for (int k = 0; k < 16; ++k) {
-                            if (const std::uint64_t n = g_yebis_slots[w][k].load()) {
-                                appendf(slots, " s[%d]:%llu", k, static_cast<ull>(n));
-                            }
-                        }
-                        if (!types.empty()) {
-                            host_log("yebis: %s descriptors by type:%s; by user-data slot:%s", w ? "PS" : "VS and the rest",
-                                     types.c_str(), slots.c_str());
-                        }
-                    }
-                }
-            }
-            if (const std::uint64_t n = g_clear_calls.load()) {
-                host_log("gx: deferred colour clears %llu, %llu slices", static_cast<ull>(n),
-                         static_cast<ull>(g_clear_slices.load()));
-            }
-            if (const std::uint64_t on_stack = g_safe_reads_stack.load()) {
-                host_log("gx: guest reads served from the reading thread's own stack %llu", static_cast<ull>(on_stack));
-            }
-            if (const std::uint64_t slow = g_safe_reads_slow.load()) {
-                host_log("gx: guest reads that needed host_read_safe %llu, %llu ms in them, %llu ns each, %.1f MiB",
-                         static_cast<ull>(slow), static_cast<ull>(g_safe_slow_ns.load() / 1000000),
-                         static_cast<ull>(g_safe_slow_ns.load() / slow), static_cast<double>(g_safe_slow_bytes.load()) / (1 << 20));
-                std::vector<std::pair<std::uint64_t, std::uint64_t>> where;
-                for (int i = 0; i < kSlowBuckets; ++i) {
-                    if (const std::uint64_t mb = g_slow_where[i].load()) {
-                        where.push_back({g_slow_count[i].load(), mb - 1});
-                    }
-                }
-                std::sort(where.rbegin(), where.rend());
-                std::string top;
-                for (std::size_t i = 0; i < where.size() && i < 12; ++i) {
-                    appendf(top, " 0x%llx:%llu", static_cast<ull>(where[i].second << 20), static_cast<ull>(where[i].first));
-                }
-                host_log("gx: those reads by megabyte (%zu distinct), most first:%s", where.size(), top.c_str());
-                std::vector<std::pair<std::uint64_t, std::uint64_t>> sites;
-                for (int i = 0; i < kSlowBuckets; ++i) {
-                    if (const std::uint64_t at = g_slow_from[i].load()) sites.push_back({g_slow_from_n[i].load(), at});
-                }
-                std::sort(sites.rbegin(), sites.rend());
-                // Offsets from safe_read itself, so addr2line can name them
-                // whatever the image was loaded at.
-                const std::uint64_t anchor = reinterpret_cast<std::uint64_t>(&safe_read);
-                std::string who;
-                for (std::size_t i = 0; i < sites.size() && i < 10; ++i) {
-                    appendf(who, " safe_read%+lld:%llu", static_cast<long long>(sites[i].second - anchor),
-                            static_cast<ull>(sites[i].first));
-                }
-                host_log("gx: those reads by caller (%zu sites, offsets from safe_read):%s", sites.size(), who.c_str());
-                // What those megabytes are, from the process's own map: the
-                // point is to name the region so the read can stop being a
-                // system call, not to guess from the address.
-#if !defined(_WIN32)
-                if (FILE* f = std::fopen("/proc/self/maps", "r")) {
-                    char line[512];
-                    while (std::fgets(line, sizeof(line), f)) {
-                        unsigned long long lo = 0, hi = 0;
-                        if (std::sscanf(line, "%llx-%llx", &lo, &hi) != 2) continue;
-                        for (std::size_t i = 0; i < where.size() && i < 6; ++i) {
-                            const std::uint64_t at = where[i].second << 20;
-                            if (at >= lo && at < hi) {
-                                std::string t(line);
-                                while (!t.empty() && (t.back() == '\n' || t.back() == ' ')) t.pop_back();
-                                host_log("gx:   0x%llx (%llu reads) is in %s", static_cast<ull>(at),
-                                         static_cast<ull>(where[i].first), t.c_str());
-                            }
-                        }
-                    }
-                    std::fclose(f);
-                }
-#endif
-            }
-            host_log("gx-native: tokens %llu, drawn from tokens %llu, awaiting their token %llu, not qualified %llu, token not "
-                     "written after the flushes %llu, token without a draw %llu, tokens failed %llu, stored past the ring %llu",
-                     static_cast<ull>(g_native_tokens.load()), static_cast<ull>(g_native_drawn.load()), static_cast<ull>(pending),
-                     static_cast<ull>(g_native_ineligible.load()), static_cast<ull>(g_native_late.load()),
-                     static_cast<ull>(g_native_unmatched.load()), static_cast<ull>(g_native_failed.load()),
-                     static_cast<ull>(g_native_overflow.load()));
-            host_log("gx-native: stage records' shader fields from the per-shader cache %llu, read from the object %llu; inputs' "
-                     "shader linkage from the per-thread cache %llu, worked out %llu (checked %llu, differing %llu)",
-                     static_cast<ull>(g_shader_info.load(0)), static_cast<ull>(g_shader_info.load(1)), static_cast<ull>(g_link_info.load(0)),
-                     static_cast<ull>(g_link_info.load(1)), static_cast<ull>(g_link_checked.load()), static_cast<ull>(g_link_differ.load()));
-            host_log("gx-native: register-file fields at tokens: DB_RENDER_CONTROL set %llu (clear bits %llu), depth clear not 0 "
-                     "%llu, stencil clear not 0 %llu, generic scissor narrower than the screen scissor %llu",
-                     static_cast<ull>(g_token_rc_set.load()),
-                     static_cast<ull>(g_token_rc_clear.load()), static_cast<ull>(g_token_depth_clear_set.load()),
-                     static_cast<ull>(g_token_stencil_clear_set.load()), static_cast<ull>(g_token_generic_narrows.load()));
-            {
-                std::string why;
-                for (int k = 0; k < kNativeSkips; ++k) {
-                    if (const std::uint64_t n = g_native_skipped.load(k)) appendf(why, " %s %llu;", kNativeSkipName[k], static_cast<ull>(n));
-                }
-                host_log("gx-native: GX draws never offered a token:%s", why.empty() ? " none" : why.c_str());
-                std::string not_qualified;
-                for (int k = 0; k < kWhyCount; ++k) {
-                    if (const std::uint64_t n = g_native_ineligible_why[k].load()) appendf(not_qualified, " %s %llu;", kIneligibleWhyName[k], static_cast<ull>(n));
-                }
-                host_log("gx-native: GX draws not qualified for a token:%s", not_qualified.empty() ? " none" : not_qualified.c_str());
-            }
-            const double tokens = static_cast<double>(std::max<std::uint64_t>(1, g_native_tokens.load()));
-            const auto per = [&](NativeCall c) { return static_cast<double>(g_native_call_dwords.load(c)) / tokens; };
-            host_log("gx-fill: fill calls %llu (colour clears by slice %llu, whole-resource %llu, layout refused %llu), tokens %llu, fills run %llu "
-                     "(%.1f MiB), tokens unmatched %llu, not written %llu%s",
-                     static_cast<ull>(g_fill_calls.load()), static_cast<ull>(g_fill_rtv_calls.load()), static_cast<ull>(g_fill_rtv_whole.load()),
-                     static_cast<ull>(g_fill_rtv_layout_failed.load()), static_cast<ull>(g_fill_tokens.load()), static_cast<ull>(g_fill_ranges.load()),
-                     static_cast<double>(g_fill_bytes.load()) / (1 << 20), static_cast<ull>(g_fill_unmatched.load()),
-                     static_cast<ull>(g_fill_unwritten.load()), g_native_fills ? "" : " (BBHOST_GX_NATIVE_FILLS=0)");
-            host_log("gx-upload: texture upload calls %llu, tokens %llu (%.1f MiB of rows), not 2D %llu, no T# in the registry %llu, refused %llu, "
-                     "unmatched %llu, not written %llu%s",
-                     static_cast<ull>(g_upload_calls.load()), static_cast<ull>(g_upload_tokens.load()), static_cast<double>(g_upload_bytes.load()) / (1 << 20),
-                     static_cast<ull>(g_upload_not_2d.load()), static_cast<ull>(g_upload_no_tsharp.load()), static_cast<ull>(g_upload_bad_args.load()),
-                     static_cast<ull>(g_upload_unmatched.load()), static_cast<ull>(g_upload_unwritten.load()), g_native_uploads ? "" : " (BBHOST_GX_NATIVE_UPLOADS=0)");
-            host_log("gx-copy-image: texture copy calls %llu, tokens %llu, not 1D/2D %llu, no T# %llu, formats differ %llu, refused %llu, "
-                     "unmatched %llu, not written %llu%s",
-                     static_cast<ull>(g_icopy_calls.load()), static_cast<ull>(g_icopy_tokens.load()), static_cast<ull>(g_icopy_not_2d.load()),
-                     static_cast<ull>(g_icopy_no_tsharp.load()), static_cast<ull>(g_icopy_format.load()), static_cast<ull>(g_icopy_bad.load()),
-                     static_cast<ull>(g_icopy_unmatched.load()), static_cast<ull>(g_icopy_unwritten.load()),
-                     g_native_image_copies ? "" : " (BBHOST_GX_NATIVE_IMAGE_COPIES=0)");
-            host_log("gx-upload: calls not taken by resource type: 1D %llu, 3D %llu, buffers %llu, other %llu", static_cast<ull>(g_upload_by_type[2].load()),
-                     static_cast<ull>(g_upload_by_type[4].load()), static_cast<ull>(g_upload_by_type[1].load()),
-                     static_cast<ull>(g_upload_by_type[0].load() + g_upload_by_type[5].load() + g_upload_by_type[6].load() + g_upload_by_type[7].load()));
-            host_log("gx-native: dwords a native draw writes to its command buffer: output-merger flush %.2f, input-assembly flush %.2f, "
-                     "rasterizer flush %.2f, bookkeeping %.2f, output-merger commit %.2f, token 4, post-draw %.2f, bookkeeping after %.2f; "
-                     "calls that moved to another chunk %llu; native draws that ran the output-merger flush %llu",
-                     per(kNcOmFlush), per(kNcIaFlush), per(kNcRsFlush), per(kNcBookkeeping), per(kNcOmCommit), per(kNcPostDraw),
-                     per(kNcBookkeepingAfter), static_cast<ull>(g_native_call_switches.load()),
-                     static_cast<ull>(g_native_om_flushes.load()));
-            if (g_native_regs) {
-                for (const NativeCall c : {kNcOmFlush, kNcOmCommit, kNcPostDraw}) {
-                    std::vector<std::pair<std::uint64_t, int>> top;
-                    for (int reg = 0; reg < 0x400; ++reg) {
-                        if (const std::uint64_t n = g_native_call_regs[c][reg].load()) top.emplace_back(n, reg);
-                    }
-                    std::sort(top.rbegin(), top.rend());
-                    std::string regs, ops;
-                    for (std::size_t i = 0; i < top.size() && i < 20; ++i) {
-                        appendf(regs, " 0x%03x %llu;", top[i].second, static_cast<ull>(top[i].first));
-                    }
-                    for (int op = 0; op < 0x100; ++op) {
-                        if (const std::uint64_t n = g_native_call_ops[c][op].load()) appendf(ops, " 0x%02x %llu;", op, static_cast<ull>(n));
-                    }
-                    host_log("gx-native: %s writes over %llu tokens, context registers:%s other packets:%s",
-                             c == kNcOmFlush ? "output-merger flush" : c == kNcOmCommit ? "output-merger commit" : "post-draw",
-                             static_cast<ull>(g_native_tokens.load()), regs.c_str(), ops.c_str());
-                }
-            }
-        }
+        if (g_native_drawn.fetch_add(1, std::memory_order_relaxed) % 100000 == 99999) post_native_report(id);
         return &t_native_in;
     }
     if (g_native != 1) return nullptr;
@@ -6296,7 +6387,7 @@ const GpuDrawInputs* hle_gx_trace_draw(std::uint32_t op, std::uint64_t packet_va
                 changed(kNfUserUnnamed, unnamed_changed);
             }
             t_native_shadow.erase(it);
-            if (g_native_matched.fetch_add(1, std::memory_order_relaxed) % 100000 == 99999) report_native();
+            if (g_native_matched.fetch_add(1, std::memory_order_relaxed) % 100000 == 99999) post_shadow_report();
         }
     }
     if (g_native == 1 && found && e.gx && e.rec.native_id && e.rec.tess) {

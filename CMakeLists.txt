@@ -45,6 +45,7 @@ add_executable(bbhost
   src/core/imports.cpp
   src/core/thunk.cpp
   src/core/portable.cpp
+  src/core/log_async.cpp
   src/core/host_clock.cpp
   src/core/futex.cpp
   src/core/win_vm.cpp
@@ -381,11 +382,24 @@ endif()
 #                                (llvm-profdata merge -o bbhost.profdata *.profraw,
 #                                with the llvm-profdata of the clang that built
 #                                the instrumented binary).
+#   -DBBHOST_PGO=OFF             rc6: ignore BBHOST_PGO_USE (the same commit
+#                                without the profile, for an A/B)
+#   -DBBHOST_PGO_WARN=ON         rc6: report the profile's mismatches (functions
+#                                changed since it was gathered) instead of
+#                                silencing them
 # The decomp sources stay out of both, as they stay out of LTO (bit-exact,
 # guest-facing; nothing instrumented on the game's stacks).
 if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   option(BBHOST_PGO_GENERATE "PGO-instrumented bbhost (-fprofile-generate; profiling sessions only)" OFF)
   set(BBHOST_PGO_USE "" CACHE FILEPATH "a merged .profdata to build bbhost with (-fprofile-use)")
+  option(BBHOST_PGO "build with BBHOST_PGO_USE's profile when one is given (OFF: without it)" ON)
+  option(BBHOST_PGO_WARN "report PGO profile mismatches (-Wprofile-instr-out-of-date)" OFF)
+  if(NOT BBHOST_PGO AND BBHOST_PGO_USE)
+    message(STATUS "bbhost: PGO off (BBHOST_PGO=OFF; ${BBHOST_PGO_USE} not used)")
+    set(BBHOST_PGO_USE_EFFECTIVE "")
+  else()
+    set(BBHOST_PGO_USE_EFFECTIVE "${BBHOST_PGO_USE}")
+  endif()
   if(BBHOST_PGO_GENERATE AND BBHOST_PGO_USE)
     message(FATAL_ERROR "BBHOST_PGO_GENERATE and BBHOST_PGO_USE are exclusive")
   endif()
@@ -396,11 +410,16 @@ if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_sources(bbhost PRIVATE src/host/pgo_dump.cpp)
     set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-profile-generate)
     message(STATUS "bbhost: PGO instrumentation on (BBHOST_PGO_GENERATE; profiles to \$BBHOST_PGO_DIR or ./pgo)")
-  elseif(BBHOST_PGO_USE)
+  elseif(BBHOST_PGO_USE_EFFECTIVE)
     if(NOT EXISTS "${BBHOST_PGO_USE}")
       message(FATAL_ERROR "BBHOST_PGO_USE: no file ${BBHOST_PGO_USE}")
     endif()
-    target_compile_options(bbhost PRIVATE -fprofile-use=${BBHOST_PGO_USE} -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+    if(BBHOST_PGO_WARN)
+      target_compile_options(bbhost PRIVATE -fprofile-use=${BBHOST_PGO_USE} -Wprofile-instr-unprofiled -Wprofile-instr-out-of-date
+                                           -Wprofile-instr-missing)
+    else()
+      target_compile_options(bbhost PRIVATE -fprofile-use=${BBHOST_PGO_USE} -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+    endif()
     set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-profile-instr-use)
     message(STATUS "bbhost: PGO from ${BBHOST_PGO_USE}")
   endif()
@@ -448,6 +467,14 @@ if(UNIX)
   target_include_directories(sdk_headers_test PRIVATE include)
   target_compile_features(sdk_headers_test PRIVATE cxx_std_17)
   add_test(NAME sdk_headers_test COMMAND sdk_headers_test)
+  add_executable(memmem_test tests/memmem_test.cpp src/core/thunk.cpp src/core/tls_rewrite.cpp src/core/portable.cpp src/hle/sysv_va.cpp src/host/main_wait.cpp)
+  target_include_directories(memmem_test PRIVATE src)
+  target_link_libraries(memmem_test PRIVATE pthread)
+  add_test(NAME memmem_test COMMAND memmem_test)
+  add_executable(log_async_test tests/log_async_test.cpp src/core/log_async.cpp)
+  target_include_directories(log_async_test PRIVATE src)
+  target_link_libraries(log_async_test PRIVATE pthread)
+  add_test(NAME log_async_test COMMAND log_async_test)
   add_executable(sysv_va_test tests/sysv_va_test.cpp src/hle/sysv_va.cpp)
   target_include_directories(sysv_va_test PRIVATE src)
   add_test(NAME sysv_va_test COMMAND sysv_va_test)

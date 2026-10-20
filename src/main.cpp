@@ -135,6 +135,7 @@ void run_guest_start(GuestStart fn, void* argv, bool windowed) {
                 hle_kernel_memory_report();
                 host_window_stop();
                 pgo_dump_final();  // the PGO-instrumented build only (host/pgo_dump.h)
+                host_log_sync_mode();  // rc6: what the writer thread still holds
                 _exit(0);
             }
             if (fault_flip && hle_video_flip_count() >= fault_flip) {
@@ -175,6 +176,7 @@ void run_guest_start(GuestStart fn, void* argv, bool windowed) {
                 // lock, and a guest or driver thread inside one hangs it.
                 TerminateProcess(GetCurrentProcess(), 0);
 #endif
+                host_log_sync_mode();
                 _exit(0);
             }
             // The window's input and events every 4 ms, on the high-resolution
@@ -329,6 +331,7 @@ void device_lost_exit(bool windowed) {
 #if defined(_WIN32)
     TerminateProcess(GetCurrentProcess(), 3);
 #endif
+    host_log_sync_mode();
     _exit(3);
 }
 
@@ -345,6 +348,7 @@ void exit_reports() {
     key_prompts_report();
     decomp_report();
     mouse_camera_report();
+    host_log_async_report();
 }
 
 #if !defined(_WIN32)
@@ -357,6 +361,7 @@ void exit_reports() {
 // starts under the guest's FS and never returns.
 __attribute__((no_stack_protector)) void on_term(int) {
     hle_fs_host();
+    host_log_sync_mode();  // rc6: the queued lines first, then the reports as they are made
     exit_reports();
     _exit(0);
 }
@@ -540,6 +545,14 @@ void on_trap(int sig, siginfo_t*, void* ctx) {
     raise(sig);
 }
 
+// rc6: SIGABRT, on whichever thread aborted (FS back to the host's first, as
+// the fault handler does). SA_RESETHAND: the re-raise takes the default action.
+__attribute__((no_stack_protector)) void on_abort(int sig) {
+    hle_fs_host();
+    host_log_sync_mode();
+    raise(sig);
+}
+
 // On a fault, print where and what the command processor wrote recently,
 // then re-raise so the core dump still happens.
 void on_segv(int sig, siginfo_t* info, void* ctx) {
@@ -599,6 +612,7 @@ void on_segv(int sig, siginfo_t* info, void* ctx) {
         }
     }
     hle_fs_host();  // the faulting thread may be running guest code with guest FS
+    host_log_sync_mode();  // rc6: what is queued, then this report line by line
     sampler_recover();  // a fault in the profiler's unwind drops its sample
     host_read_safe_recover();  // a fault in host_read_safe's copy fails the read
     const std::uint64_t pc = static_cast<std::uint64_t>(uc->uc_mcontext.gregs[REG_RIP]);
@@ -882,6 +896,7 @@ int main(int argc, char** argv) {
         }
     }
 #else
+    host_log_start();  // rc6: the writer thread (core/log_async.cpp)
     host_log("bbhost %s (%s, Linux x86-64)", BBHOST_VERSION, BBHOST_GIT_REV);
     log_cpu();
     pgo_dump_start();  // the PGO-instrumented build only (host/pgo_dump.h)
@@ -898,6 +913,13 @@ int main(int argc, char** argv) {
         st.sa_flags = SA_SIGINFO | SA_ONSTACK;
         sigemptyset(&st.sa_mask);
         sigaction(SIGTRAP, &st, nullptr);
+        // rc6: abort() (assertions, std::terminate, the guest's abort) writes
+        // what the log writer still holds, then ends as before (core dump).
+        struct sigaction sab{};
+        sab.sa_handler = on_abort;
+        sab.sa_flags = SA_ONSTACK | SA_RESETHAND;
+        sigemptyset(&sab.sa_mask);
+        sigaction(SIGABRT, &sab, nullptr);
     }
 #endif
     {
@@ -914,6 +936,7 @@ int main(int argc, char** argv) {
         if (rounds) {
             const int rc = host_gpu_stream_selftest(rounds);
             std::fflush(nullptr);
+            host_log_sync_mode();
             std::_Exit(rc);  // the recorder and submission threads run on: no static destructors under them
         }
     }
