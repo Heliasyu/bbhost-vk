@@ -13,6 +13,11 @@
 #   CI_WORK=/somewhere packaging/vk/build.sh  another work folder (the prefix is rebuilt there)
 #   BUILD_SKIP_TESTS=1 ...                    stop after the build (ctest is part of ci_build.sh;
 #                                             this only skips it when set)
+#   PGO_PROFILE=bbhost.profdata ...           rc6: bbhost.bin with that merged profile (ThinLTO +
+#                                             PGO), and bbhost.bin.nopgo, the same commit without
+#                                             it (build-ci/build-nopgo), for an A/B. PGO_WARN=1:
+#                                             the compiler reports the functions the profile no
+#                                             longer matches (bbhost-build.log)
 #
 # Reproducible here means: the same sources (this commit, the submodules at
 # their pinned commits), the same toolchain and the same prefix give the same
@@ -54,24 +59,43 @@ fi
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2> /dev/null || date +%s)}
 
 export CI_PORTABLE=1
-export CI_CMAKE_ARGS="-DBBHOST_RELEASE=ON ${CI_CMAKE_ARGS_EXTRA:-}"
 W=${CI_WORK:-$SRC/build-ci}
-if [ "${BUILD_SKIP_TESTS:-0}" = 1 ]; then
-    # ci_build.sh's steps without its ctest: run it with ctest made a no-op.
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
-    printf '#!/bin/sh\necho "ctest skipped (BUILD_SKIP_TESTS=1)"\n' > "$tmp/ctest"
-    chmod +x "$tmp/ctest"
-    PATH="$tmp:$PATH" tools/ci_build.sh
-else
-    tools/ci_build.sh
+PGO_ARGS="-DBBHOST_PGO_USE="
+if [ -n "${PGO_PROFILE:-}" ]; then
+    [ -f "$PGO_PROFILE" ] || { echo "build.sh: no PGO profile $PGO_PROFILE" >&2; exit 1; }
+    pw=OFF
+    [ "${PGO_WARN:-0}" = 1 ] && pw=ON
+    PGO_ARGS="-DBBHOST_PGO=ON -DBBHOST_PGO_USE=$(readlink -f "$PGO_PROFILE") -DBBHOST_PGO_WARN=$pw"
 fi
+run_ci() {  # run_ci CMAKE-ARGS [BUILD-DIR]
+    export CI_CMAKE_ARGS="-DBBHOST_RELEASE=ON $1 ${CI_CMAKE_ARGS_EXTRA:-}"
+    if [ -n "${2:-}" ]; then export CI_BUILD_DIR=$2; else unset CI_BUILD_DIR; fi
+    if [ "${BUILD_SKIP_TESTS:-0}" = 1 ]; then
+        # ci_build.sh's steps without its ctest: run it with ctest made a no-op.
+        tmp=$(mktemp -d)
+        printf '#!/bin/sh\necho "ctest skipped (BUILD_SKIP_TESTS=1)"\n' > "$tmp/ctest"
+        chmod +x "$tmp/ctest"
+        PATH="$tmp:$PATH" tools/ci_build.sh
+        rm -rf "$tmp"
+    else
+        tools/ci_build.sh
+    fi
+}
+run_ci "$PGO_ARGS"
 
 bin=$W/build/bbhost
 [ -x "$bin" ] || { echo "build.sh: no $bin" >&2; exit 1; }
 mkdir -p "$OUT"
 objcopy --strip-debug "$bin" "$OUT/bbhost.bin" 2> /dev/null || llvm-objcopy --strip-debug "$bin" "$OUT/bbhost.bin"
 (cd "$OUT" && sha256sum bbhost.bin > bbhost.bin.sha256)
+if [ -n "${PGO_PROFILE:-}" ]; then
+    # The same commit without the profile (the prefix is shared; the
+    # packages are in by now).
+    CI_APT=0 run_ci "-DBBHOST_PGO=OFF -DBBHOST_PGO_USE=" "$W/build-nopgo"
+    objcopy --strip-debug "$W/build-nopgo/bbhost" "$OUT/bbhost.bin.nopgo" 2> /dev/null ||
+        llvm-objcopy --strip-debug "$W/build-nopgo/bbhost" "$OUT/bbhost.bin.nopgo"
+    (cd "$OUT" && sha256sum bbhost.bin.nopgo > bbhost.bin.nopgo.sha256)
+fi
 rev=$(git describe --tags --always --dirty 2> /dev/null || echo unknown)
 glibc=$(objdump -T "$OUT/bbhost.bin" 2> /dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || true)
 {
@@ -81,6 +105,12 @@ glibc=$(objdump -T "$OUT/bbhost.bin" 2> /dev/null | grep -o 'GLIBC_[0-9.]*' | so
     echo "built on: ${PRETTY_NAME:-unknown}, clang ${cv:-?}"
     echo "needs:    ${glibc:-?}"
     echo "sha256:   $(cut -d' ' -f1 "$OUT/bbhost.bin.sha256")"
+    if [ -n "${PGO_PROFILE:-}" ]; then
+        echo "pgo:      $(basename "$PGO_PROFILE") (sha256 $(sha256sum "$PGO_PROFILE" | cut -d' ' -f1))"
+        echo "nopgo:    $(cut -d' ' -f1 "$OUT/bbhost.bin.nopgo.sha256")"
+    else
+        echo "pgo:      none"
+    fi
 } > "$OUT/BUILDINFO.txt"
 cat "$OUT/BUILDINFO.txt"
 echo "build.sh: $OUT/bbhost.bin (stripped; the unstripped binary is $bin)"
