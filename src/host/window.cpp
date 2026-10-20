@@ -786,15 +786,19 @@ void pacer_publish() {
     g_pacer_pub.pulls.store(g_pacer.pulls(), std::memory_order_relaxed);
 }
 std::string pacer_section() {
-    char b[768];
+    char b[1024];
     std::uint64_t direct = 0, stream = 0, wait_ns = 0, timeouts = 0;
     host_gpu_presenter_priority_stats(&direct, &stream, &wait_ns, &timeouts);
+    std::uint64_t rode = 0, alone = 0, missed = 0, fallbacks = 0, over50 = 0, max_ns = 0;
+    host_gpu_blit_ride_stats(&rode, &alone, &missed, &fallbacks, &over50, &max_ns);
     const std::uint64_t waited = g_pacer_pub.waited.load();
     std::snprintf(b, sizeof(b),
                   "pacer: period_us=%.1f creep_us=%.1f last_window_3rd_earliest_us=%.1f waited=%llu avg_wait_us=%.0f late_arrivals=%llu "
                   "late_presents=%llu restarts=%llu pulls=%llu pulled_ms=%.1f (totals since start)\n"
                   "blit_submit: priority=%llu stream=%llu priority_wait_for_frame_ms=%.1f priority_timeouts=%llu (BBHOST_PRESENT_PRIORITY=0: "
                   "always the stream)\n"
+                  "blit_ride: rode=%llu alone=%llu missed=%llu cap_fallbacks=%llu waits_over_50ms=%llu wait_max_ms=%.1f "
+                  "(BBHOST_BLIT_RIDE=0: never rides; BBHOST_PRESENT_PRIORITY_WAIT_MS: the cap, 100)\n"
                   "latency_limit: waits=%llu wait_ms=%.1f (BBHOST_FRAME_LATENCY=0 drops instead)",
                   g_pacer_pub.period.load() / 1e3, g_pacer_pub.creep.load() / 1e3,
                   g_pacer_pub.robust.load() < 0 ? -1.0 : g_pacer_pub.robust.load() / 1e3, static_cast<unsigned long long>(waited),
@@ -802,7 +806,9 @@ std::string pacer_section() {
                   static_cast<unsigned long long>(g_pacer_pub.late.load()), static_cast<unsigned long long>(g_pacer_pub.late_presents.load()),
                   static_cast<unsigned long long>(g_pacer_pub.reanchors.load()), static_cast<unsigned long long>(g_pacer_pub.pulls.load()),
                   g_pacer_pub.pulled_total.load() / 1e6, static_cast<unsigned long long>(direct), static_cast<unsigned long long>(stream),
-                  wait_ns / 1e6, static_cast<unsigned long long>(timeouts), static_cast<unsigned long long>(g_present_waits.load()),
+                  wait_ns / 1e6, static_cast<unsigned long long>(timeouts), static_cast<unsigned long long>(rode),
+                  static_cast<unsigned long long>(alone), static_cast<unsigned long long>(missed), static_cast<unsigned long long>(fallbacks),
+                  static_cast<unsigned long long>(over50), max_ns / 1e6, static_cast<unsigned long long>(g_present_waits.load()),
                   g_present_wait_ns.load() / 1e6);
     return b;
 }
@@ -1238,7 +1244,7 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
         priority = true;
         host_gpu_unlock();
         locked = false;
-        host_gpu_submit_presenter_priority(g_vk.cmd, by_fence ? nullptr : acquire_sem, wait_stage, rendered, g_vk.fence, need);
+        ticket = host_gpu_submit_presenter_priority(g_vk.cmd, by_fence ? nullptr : acquire_sem, wait_stage, rendered, g_vk.fence, need);
     } else {
         ticket = host_gpu_submit_presenter(g_vk.cmd, by_fence ? nullptr : acquire_sem, wait_stage, rendered, g_vk.fence);
         if (ticket) {

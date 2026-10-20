@@ -70,6 +70,7 @@ const bool g_render_min = [] {
 }();
 
 std::vector<std::string> g_instance_exts;
+PFN_vkCmdInsertDebugUtilsLabelEXT g_insert_label = nullptr;  // rc4: BBHOST_RGP_LABELS
 bool g_want_present = false;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -108,7 +109,7 @@ std::atomic<std::uint64_t> g_imports_made{0}, g_imports_merged{0}, g_import_byte
 // QueueGuard. A failed submission is passed back (g_sub_failed) and handled on
 // the command processor as before: no more GPU execution.
 struct SubmitJob {
-    VkCommandBuffer cmds[2] = {};
+    VkCommandBuffer cmds[3] = {};  // rc4: a third for the presenter's blit riding the flip's last submission
     std::uint32_t ncmds = 0;
     VkSemaphore wait = VK_NULL_HANDLE;
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -139,7 +140,26 @@ std::atomic<std::uint64_t> g_stream_submitted{0};
 std::atomic<std::uint64_t> g_foreign_submitted{0};
 constexpr std::uint64_t kForeignTicket = 1ull << 63;  // host_gpu_submit_presenter's tickets for a kForeignSubmit
 
+// rc4: the presenter's blit riding the flip's last game submission (under
+// g_sub_mu; host_gpu_submit_presenter_priority). The presenter offers it while
+// that submission has not reached vkQueueSubmit; submit_job_now, submitting
+// the game job whose serial + 1 is `need`, appends the blit's command buffer
+// and its semaphore to signal and takes it. The blit then runs in the same
+// kernel job as the frame it shows, straight after it, instead of as a job of
+// its own ~40 us long - after which the GPU sat idle with the next frame's
+// work queued (rc3: 28% of the idle-with-queued time came after the blit).
+// Nothing is held back: the blit could not start before that job anyway.
+struct BlitRider {
+    bool armed = false, taken = false, done = false;
+    std::uint64_t need = 0;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkSemaphore signal = VK_NULL_HANDLE;
+    VkResult result = VK_SUCCESS;
+};
+BlitRider g_rider;
+
 std::atomic<std::uint64_t> g_cp_flushes{0}, g_cp_flush_ns{0}, g_submit_splits{0};
+std::atomic<std::uint64_t> g_reset_first_cmdbufs{0};  // rc4: command buffers begun with their resets first (BBHOST_RESET_ORDER)
 // ---- test7: where the GPU's idle time between command buffers comes from ----
 // Per game submission (by serial, kSubRing deep - slots are reused after 16):
 // when the command processor handed it over (submit_locked), when the
@@ -177,7 +197,22 @@ thread_local void* t_flush_site = nullptr;  // flush_locked's caller, for submit
 
 // One job to the queue, under its lock; a failure is kept for the command
 // processor (take_submit_failure_locked).
-void submit_job_now(const SubmitJob& job) {
+void submit_job_now(const SubmitJob& job_in) {
+    SubmitJob rode_job;
+    const SubmitJob* jp = &job_in;
+    bool rode = false;
+    if (job_in.serial != ~0ull && !job_in.signal && !job_in.foreign && job_in.ncmds < 3) {
+        std::lock_guard<std::mutex> lk(g_sub_mu);
+        if (g_rider.armed && !g_rider.taken && job_in.serial + 1 == g_rider.need) {
+            rode_job = job_in;
+            rode_job.cmds[rode_job.ncmds++] = g_rider.cmd;
+            rode_job.signal = g_rider.signal;
+            g_rider.taken = true;
+            rode = true;
+            jp = &rode_job;
+        }
+    }
+    const SubmitJob& job = *jp;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = job.ncmds;
     si.pCommandBuffers = job.cmds;
@@ -223,6 +258,11 @@ void submit_job_now(const SubmitJob& job) {
         int none = 0;
         g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
         g_sub_failed_items.fetch_add(job.items);
+    }
+    if (rode) {
+        std::lock_guard<std::mutex> lk(g_sub_mu);
+        g_rider.result = r;
+        g_rider.done = true;
     }
     if (job.serial != ~0ull) g_stream_submitted.store(job.serial + 1, std::memory_order_release);
     if (job.foreign) g_foreign_submitted.store(job.foreign, std::memory_order_release);
@@ -1793,6 +1833,26 @@ bool init_locked() {
         layers.push_back("VK_LAYER_KHRONOS_validation");
         iext.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
+    // rc4, BBHOST_RGP_LABELS=1 (debugging only): the extension for the pass
+    // labels (debug_label_locked), where the loader offers it.
+    static const bool want_labels = [] {
+        const char* e = std::getenv("BBHOST_RGP_LABELS");
+        return e && e[0] == '1';
+    }();
+    bool labels_ext = g_validate;
+    if (want_labels && !g_validate) {
+        std::uint32_t n = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> have(n);
+        if (n) vkEnumerateInstanceExtensionProperties(nullptr, &n, have.data());
+        for (const VkExtensionProperties& x : have) {
+            if (std::strcmp(x.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) {
+                iext.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+                labels_ext = true;
+                break;
+            }
+        }
+    }
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = static_cast<std::uint32_t>(iext.size());
@@ -1814,6 +1874,13 @@ bool init_locked() {
             create(g.instance, &mci, nullptr, &g.messenger);
         }
         host_log("gpu: validation layer enabled");
+    }
+    if (want_labels) {
+        g_insert_label = labels_ext ? reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
+                                          vkGetInstanceProcAddr(g.instance, "vkCmdInsertDebugUtilsLabelEXT"))
+                                    : nullptr;
+        g.debug_labels = g_insert_label != nullptr;
+        host_log("gpu: render-pass labels for RGP %s (BBHOST_RGP_LABELS=1)", g.debug_labels ? "on" : "off: no VK_EXT_debug_utils");
     }
     bool has_swapchain = false;
     std::vector<Candidate> usable;
@@ -1940,6 +2007,18 @@ bool init_locked() {
         VkPhysicalDeviceFeatures have{};
         vkGetPhysicalDeviceFeatures(g.phys, &have);
         g.profile_stats = have.pipelineStatisticsQuery == VK_TRUE;
+    }
+    // rc4: pipeline statistics in the GPU sampler's frames too (one frame in
+    // ten seconds or more, already timed pass by pass): vertex and fragment
+    // invocations of each pass, so a snapshot tells a vertex-bound pass from
+    // a pixel-bound one ([pass_stats]). BBHOST_GPU_SAMPLE_STATS=0: off.
+    if (g.profile_pools && !g.profile_stats && [] {
+            const char* e = std::getenv("BBHOST_GPU_SAMPLE_STATS");
+            return !(e && e[0] == '0');
+        }()) {
+        VkPhysicalDeviceFeatures have{};
+        vkGetPhysicalDeviceFeatures(g.phys, &have);
+        g.profile_stats = g.sample_stats = have.pipelineStatisticsQuery == VK_TRUE;
     }
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
     VkPhysicalDeviceSubgroupProperties subp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -2703,7 +2782,16 @@ struct Sampler {
     int pending = 0;  // slots recorded while running, not collected yet
     std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> ns;  // by name: ns, count
     std::uint64_t span_ns = 0;
+    std::map<std::string, std::array<std::uint64_t, 6>> stats;  // rc4: by name, Gpu::profile_stats_sum's order
 };
+// rc4: the last sample's statistics for its top passes (snapshots: [pass_stats]).
+std::mutex g_pass_stats_mu;
+std::string g_pass_stats_text = "no sample yet";
+std::string pass_stats_section() {
+    std::lock_guard<std::mutex> lk(g_pass_stats_mu);
+    return g_pass_stats_text;
+}
+const bool g_pass_stats_section = (perf::add_section("pass_stats", pass_stats_section), true);
 Sampler g_sampler;
 std::atomic<bool> g_sampler_running{false};
 
@@ -2727,6 +2815,42 @@ void sampler_finish_locked() {
     host_log("gpu sample: flip %llu: command buffers %.2f ms on the GPU, %.2f ms in %zu timed passes/dispatches; top:%s",
              static_cast<unsigned long long>(g_sampler.flip), span, timed, entries, list.c_str());
     perf::note_gpu_sample(g_sampler.flip, span, timed, entries, top);
+    // rc4: the top passes' pipeline statistics: vertices in, vertex-shader
+    // invocations, primitives in, into and out of clipping, fragment-shader
+    // invocations; and the rates over the pass's own time. A pass whose
+    // time follows its fragment invocations (fs_per_us near the GPU's fill
+    // rate, few vertices) is pixel-bound; one with many vertex invocations
+    // per microsecond and few fragments is vertex-bound - read across
+    // samples of the same pass (TESTING.md, rc4).
+    if (g.sample_stats || g.profile_stats) {
+        std::string text, line;
+        char b[512];
+        std::snprintf(b, sizeof(b), "flip=%llu (the GPU sampler's frame; per pass: k = thousands, rates per microsecond of the pass)",
+                      static_cast<unsigned long long>(g_sampler.flip));
+        text = b;
+        int listed = 0;
+        for (std::size_t i = 0; i < top.size() && listed < 8; ++i) {
+            const auto it = g_sampler.stats.find(top[i].first);
+            if (it == g_sampler.stats.end()) continue;
+            const auto& a = it->second;
+            const double us = top[i].second * 1000.0;
+            const auto per_us = [&](std::uint64_t v) { return us > 0 ? static_cast<double>(v) / us : 0.0; };
+            std::snprintf(b, sizeof(b),
+                          "\npass: %s ms=%.3f verts_k=%.1f vs_k=%.1f prims_k=%.1f clip_in_k=%.1f clip_out_k=%.1f fs_k=%.1f vs_per_us=%.1f "
+                          "fs_per_us=%.1f fs_per_prim=%.1f",
+                          top[i].first.c_str(), top[i].second, a[0] / 1e3, a[2] / 1e3, a[1] / 1e3, a[3] / 1e3, a[4] / 1e3, a[5] / 1e3,
+                          per_us(a[2]), per_us(a[5]), a[4] ? static_cast<double>(a[5]) / static_cast<double>(a[4]) : 0.0);
+            text += b;
+            std::snprintf(b, sizeof(b), " %s=%.0f/%.0f/%.0fk", top[i].first.c_str(), a[2] / 1e3, a[4] / 1e3, a[5] / 1e3);
+            line += b;
+            ++listed;
+        }
+        if (listed) host_log("gpu sample stats: flip %llu (vs/clip-out prims/fs invocations, k):%s",
+                             static_cast<unsigned long long>(g_sampler.flip), line.c_str());
+        std::lock_guard<std::mutex> lk(g_pass_stats_mu);
+        g_pass_stats_text = text;
+    }
+    g_sampler.stats.clear();
     g_sampler.ns.clear();
     g_sampler.span_ns = 0;
 }
@@ -2785,7 +2909,22 @@ void begin_recording_locked() {
         }
         ++g.record_serial;  // dynamic state recorded so far is gone
         g.recording = true;
-        busy_begin_locked(g.slots[g.slot]);
+        // rc4: every query-pool reset before the first timestamp. On RADV a
+        // timestamp leaves the command buffer's "active query" flush pending
+        // (PS/CS partial flush, L2 write-back and invalidate, CB/DB flush:
+        // radv_query.c, radv_CmdWriteTimestamp2) and the next
+        // vkCmdResetQueryPool emits it, so the occlusion, coverage and
+        // profile resets that followed the busy meter's TOP timestamp drained
+        // the GPU and flushed L2 at the start of every command buffer.
+        // BBHOST_RESET_ORDER=0: the order before (for an A/B).
+        static const bool reset_first = [] {
+            const char* e = std::getenv("BBHOST_RESET_ORDER");
+            const bool on = !(e && e[0] == '0');
+            host_log("gpu: query resets %s", on ? "before the first timestamp of each command buffer (BBHOST_RESET_ORDER=0: after)"
+                                                : "after the busy meter's timestamp (BBHOST_RESET_ORDER=0)");
+            return on;
+        }();
+        if (!reset_first) busy_begin_locked(g.slots[g.slot]);
         glitch_begin_recording_locked();
         occlusion_begin_recording_locked();
         sampler_begin_recording_locked();
@@ -2794,7 +2933,18 @@ void begin_recording_locked() {
         if (g.profile) {
             Gpu::Slot& sl = g.slots[g.slot];
             rec().reset_query_pool(sl.qpool, 0, kQueriesPerSlot);
+            // rc4: the statistics pool too - profile_begin_locked's reset is
+            // skipped once qreset is set, so its queries began unreset.
+            if (g.profile_stats && sl.stat_pool) rec().reset_query_pool(sl.stat_pool, 0, kMaxQueued * kStageSlots);
+            sl.stat_open = false;
             sl.qreset = true;
+        }
+        if (reset_first) {
+            busy_begin_locked(g.slots[g.slot]);  // its own reset, then the TOP timestamp
+            g_reset_first_cmdbufs.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (g.profile) {
+            Gpu::Slot& sl = g.slots[g.slot];
             rec().write_timestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, sl.qpool, kQueriesPerSlot - 2);
             sl.span = true;
         }
@@ -4818,6 +4968,13 @@ std::array<void*, 4> g_gap_sites{};
 bool g_in_profiler = false;
 }  // namespace
 
+void debug_label_locked(const std::string* name) {
+    if (!g.debug_labels || !g_insert_label) return;
+    VkDebugUtilsLabelEXT l{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+    l.pLabelName = name && !name->empty() ? name->c_str() : "pass";
+    g_insert_label(g_cmd(), &l);
+}
+
 void profile_note_site_locked(void* site) {
     if (g_in_profiler) return;
     for (void*& s : g_gap_sites) {
@@ -4841,7 +4998,8 @@ void profile_begin_locked(const std::string* name) {
     }
     vkCmdWriteTimestamp(g_cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, sl.qpool, static_cast<std::uint32_t>(sl.qnames.size() * 2));
     if (g.profile_stats && !sl.stat_open) {
-        vkCmdBeginQuery(g_cmd(), sl.stat_pool, static_cast<std::uint32_t>(sl.qnames.size()), 0);
+        sl.stat_index = static_cast<std::uint32_t>(sl.qnames.size());
+        vkCmdBeginQuery(g_cmd(), sl.stat_pool, sl.stat_index, 0);
         sl.stat_open = true;
     }
     g_in_profiler = false;
@@ -4858,8 +5016,8 @@ void profile_end_locked() {
     if (sl.qnames.empty()) return;
     g_in_profiler = true;
     vkCmdWriteTimestamp(g_cmd(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sl.qpool, static_cast<std::uint32_t>(sl.qnames.size() * 2 - 1));
-    if (sl.stat_open) {
-        vkCmdEndQuery(g_cmd(), sl.stat_pool, static_cast<std::uint32_t>(sl.qnames.size() - 1));
+    if (sl.stat_open && sl.stat_index == sl.qnames.size() - 1) {  // rc4: only the pair that began it (a nested one never did)
+        vkCmdEndQuery(g_cmd(), sl.stat_pool, sl.stat_index);
         sl.stat_open = false;
     }
     g_in_profiler = false;
@@ -4909,13 +5067,20 @@ void collect_profile_locked(Gpu::Slot& sl) {
             e.first += static_cast<std::uint64_t>(dt * g.timestamp_period_ns);
             e.second += 1;
         }
-        std::vector<std::uint64_t> stats(sl.qnames.size() * 6);
-        if (g.profile_stats &&
-            vkGetQueryPoolResults(g.device, sl.stat_pool, 0, static_cast<std::uint32_t>(sl.qnames.size()), stats.size() * 8, stats.data(),
-                                  6 * 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
+        // rc4: with availability, not waiting - a pair nested in another
+        // began no query of its own, and waiting on one never written would
+        // not return; the timestamps above waited for the command buffer.
+        std::vector<std::uint64_t> stats(sl.qnames.size() * 7);
+        const VkResult sr = g.profile_stats
+                                ? vkGetQueryPoolResults(g.device, sl.stat_pool, 0, static_cast<std::uint32_t>(sl.qnames.size()),
+                                                        stats.size() * 8, stats.data(), 7 * 8,
+                                                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+                                : VK_ERROR_UNKNOWN;
+        if (sr == VK_SUCCESS || sr == VK_NOT_READY) {
             for (std::size_t i = 0; i < sl.qnames.size(); ++i) {
-                auto& e = g.profile_stats_sum[*sl.qnames[i]];
-                for (int k = 0; k < 6; ++k) e[k] += stats[i * 6 + k];
+                if (!stats[i * 7 + 6]) continue;
+                auto& e = sampled ? g_sampler.stats[*sl.qnames[i]] : g.profile_stats_sum[*sl.qnames[i]];
+                for (int k = 0; k < 6; ++k) e[k] += stats[i * 7 + k];
             }
         }
         // BBHOST_GPU_SLOW_MS (8): a command buffer that ran that long on the
@@ -5333,6 +5498,8 @@ bool present_priority_env() {
     return on;
 }
 std::atomic<std::uint64_t> g_prio_direct{0}, g_prio_stream{0}, g_prio_wait_ns{0}, g_prio_timeouts{0};
+std::atomic<std::uint64_t> g_blit_rode{0}, g_blit_alone{0}, g_blit_ride_missed{0}, g_prio_fallbacks{0}, g_prio_wait_over50{0},
+    g_prio_wait_max_ns{0};  // rc4
 }  // namespace
 
 std::uint64_t host_gpu_stream_mark() { return stream_activity() + g.flushes; }
@@ -5348,25 +5515,102 @@ bool host_gpu_presenter_priority_ok(std::uint64_t need, std::uint64_t mark) {
     return ok;
 }
 
-void host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence, std::uint64_t need) {
+std::uint64_t host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence,
+                                                std::uint64_t need) {
     // The flip's frame on the queue first: submissions on one queue execute
     // in submission order, so what it rendered is ahead of the blit; only
-    // the next frame's, recorded since, may come after it. Bounded - a
-    // failed or lost device publishes its serial too, but never hang here.
+    // the next frame's, recorded since, may come after it.
+    // rc4: bounded at BBHOST_PRESENT_PRIORITY_WAIT_MS (100 ms; it was 2 s)
+    // - past that, the stream path (behind the frame in the recorder's order,
+    // as with BBHOST_PRESENT_PRIORITY=0); a wait over 50 ms is logged. And the
+    // blit rides the flip's last submission when that has not gone in yet
+    // (g_rider; BBHOST_BLIT_RIDE=0: never), with an empty vkQueueSubmit for
+    // the presenter's fence after it (RADV: no GPU job, the fence takes the
+    // queue's last submission's).
+    static const std::uint64_t cap_ns = [] {
+        const char* e = std::getenv("BBHOST_PRESENT_PRIORITY_WAIT_MS");
+        const long v = e && *e ? std::atol(e) : 100;
+        return static_cast<std::uint64_t>(std::clamp<long>(v, 5, 2000)) * 1000000ull;
+    }();
+    static const bool ride_on = [] {
+        const char* e = std::getenv("BBHOST_BLIT_RIDE");
+        return !(e && e[0] == '0');
+    }();
+    VkCommandBuffer c = static_cast<VkCommandBuffer>(cmd);
+    VkSemaphore w = static_cast<VkSemaphore>(wait), sg = static_cast<VkSemaphore>(signal);
+    bool offered = false;
     if (g_stream_submitted.load(std::memory_order_acquire) < need) {
         const std::uint64_t t0 = host_clock_monotonic_ns();
         std::unique_lock<std::mutex> lk(g_sub_mu);
-        const bool got = g_sub_idle.wait_for(lk, std::chrono::seconds(2), [need] {
+        // A blit waiting on a semaphore (the acquire, without the fence) does not ride.
+        if (ride_on && !w && !g_rider.armed && g_stream_submitted.load(std::memory_order_acquire) < need) {
+            g_rider = BlitRider{};
+            g_rider.armed = true;
+            g_rider.need = need;
+            g_rider.cmd = c;
+            g_rider.signal = sg;
+            offered = true;
+        }
+        const bool got = g_sub_idle.wait_for(lk, std::chrono::nanoseconds(cap_ns), [need] {
             return g_stream_submitted.load(std::memory_order_acquire) >= need || g_device_lost.load(std::memory_order_acquire);
         });
+        bool taken = false, failed = false;
+        if (offered) {
+            if (g_rider.taken && !g_rider.done) {
+                // Taken and in vkQueueSubmit now: its result is moments away.
+                g_sub_idle.wait_for(lk, std::chrono::milliseconds(50), [] { return g_rider.done; });
+            }
+            taken = g_rider.taken;
+            failed = taken && (!g_rider.done || g_rider.result != VK_SUCCESS);
+            g_rider = BlitRider{};  // revoked, or used
+        }
         lk.unlock();
-        g_prio_wait_ns.fetch_add(host_clock_monotonic_ns() - t0, std::memory_order_relaxed);
-        if (!got) g_prio_timeouts.fetch_add(1, std::memory_order_relaxed);
+        const std::uint64_t waited = host_clock_monotonic_ns() - t0;
+        g_prio_wait_ns.fetch_add(waited, std::memory_order_relaxed);
+        bump_max(g_prio_wait_max_ns, waited);
+        if (waited > 50000000ull) {
+            g_prio_wait_over50.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<int> logs{0};
+            if (logs.fetch_add(1) < 16) {
+                host_log("present: the blit waited %.1f ms for the flip's submission %llu (%s)", waited / 1e6,
+                         static_cast<unsigned long long>(need - 1), got ? "then went" : "past the cap: the stream path");
+            }
+        }
+        if (taken && !failed) {
+            g_blit_rode.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> q(g.queue_mu);
+            const VkResult r = vkQueueSubmit(g.queue, 0, nullptr, static_cast<VkFence>(fence));
+            if (r != VK_SUCCESS) {
+                int none = 0;
+                g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
+            }
+            return 0;
+        }
+        if (taken && failed) {
+            // Its submission failed (the device is going): the fence alone, so the presenter does not wait forever.
+            std::lock_guard<std::mutex> q(g.queue_mu);
+            vkQueueSubmit(g.queue, 0, nullptr, static_cast<VkFence>(fence));
+            return 0;
+        }
+        if (offered) g_blit_ride_missed.fetch_add(1, std::memory_order_relaxed);
+        if (!got) {
+            g_prio_timeouts.fetch_add(1, std::memory_order_relaxed);
+            if (!g_device_lost.load(std::memory_order_acquire)) {
+                std::uint64_t ticket = 0;
+                {
+                    std::lock_guard<GpuMutex> lock(g.mu);
+                    if (g.ok) ticket = host_gpu_submit_presenter(cmd, wait, wait_stage, signal, fence);
+                }
+                if (ticket) {
+                    g_prio_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                    return ticket;
+                }
+            }
+        }
     }
+    g_blit_alone.fetch_add(1, std::memory_order_relaxed);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    VkSemaphore w = static_cast<VkSemaphore>(wait), sg = static_cast<VkSemaphore>(signal);
     VkPipelineStageFlags ws = wait_stage;
-    VkCommandBuffer c = static_cast<VkCommandBuffer>(cmd);
     si.waitSemaphoreCount = w ? 1 : 0;
     si.pWaitSemaphores = w ? &w : nullptr;
     si.pWaitDstStageMask = w ? &ws : nullptr;
@@ -5385,7 +5629,20 @@ void host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wai
         static std::atomic<int> logs{0};
         if (logs.fetch_add(1) < 4) host_log("present: the blit's priority submit failed (%d)", static_cast<int>(r));
     }
+    return 0;
 }
+
+void host_gpu_blit_ride_stats(std::uint64_t* rode, std::uint64_t* alone, std::uint64_t* missed, std::uint64_t* fallbacks,
+                              std::uint64_t* over50, std::uint64_t* max_ns) {
+    *rode = g_blit_rode.load(std::memory_order_relaxed);
+    *alone = g_blit_alone.load(std::memory_order_relaxed);
+    *missed = g_blit_ride_missed.load(std::memory_order_relaxed);
+    *fallbacks = g_prio_fallbacks.load(std::memory_order_relaxed);
+    *over50 = g_prio_wait_over50.load(std::memory_order_relaxed);
+    *max_ns = g_prio_wait_max_ns.load(std::memory_order_relaxed);
+}
+
+std::uint64_t host_gpu_reset_first_cmdbufs() { return g_reset_first_cmdbufs.load(std::memory_order_relaxed); }
 
 void host_gpu_presenter_priority_stats(std::uint64_t* direct, std::uint64_t* stream, std::uint64_t* wait_ns, std::uint64_t* timeouts) {
     *direct = g_prio_direct.load(std::memory_order_relaxed);

@@ -315,6 +315,7 @@ struct Gpu {
         bool sampled = false;  // rc2: recorded during the GPU sampler's frame (gpu.cpp sampler_*)
         VkQueryPool stat_pool = VK_NULL_HANDLE;  // Gpu::profile_stats: one query per pair
         bool stat_open = false;                  // the last pair's statistics query is still active
+        std::uint32_t stat_index = 0;            // rc4: the query that is (stat_open), ended by the pair that began it
         // The GPU busy meter (gpu_busy.cpp, on unless BBHOST_GPU_BUSY=0): a
         // timestamp at the command buffer's start and one at its end, read
         // once the slot retired. `busy_written`: this recording wrote both.
@@ -464,6 +465,8 @@ struct Gpu {
     // invocations, primitives into and out of clipping, fragment-shader
     // invocations), summed by name like profile_ns.
     bool profile_stats = false;
+    bool sample_stats = false;  // rc4: profile_stats for the GPU sampler's frames (BBHOST_GPU_SAMPLE_STATS=0: off)
+    bool debug_labels = false;  // rc4: VK_EXT_debug_utils labels at each render pass for RGP (BBHOST_RGP_LABELS=1)
     std::map<std::string, std::array<std::uint64_t, 6>> profile_stats_sum;
     std::map<std::array<void*, 4>, std::pair<std::uint64_t, std::uint64_t>> profile_gap_ns;
     float timestamp_period_ns = 1.0f;
@@ -1268,6 +1271,10 @@ bool render_copy_target_locked(std::uint64_t src_base, std::uint64_t dst_base, s
 // The command buffer being recorded, once the recorder has replayed every
 // block handed to it: whatever records next lands after them. Under g.mu.
 VkCommandBuffer g_cmd();
+// rc4, BBHOST_RGP_LABELS=1 (debugging only): a VK_EXT_debug_utils label
+// inserted at each render pass, named by its first draw's pipeline, for RGP
+// and other capture tools. In place (g_cmd()), as the profiler's pairs are.
+void debug_label_locked(const std::string* name);
 // BBHOST_GPU_PROFILE=2: a recording site (g_cmd()'s caller) noted for the gap
 // the next profiled draw or dispatch closes.
 void profile_note_site_locked(void* site);

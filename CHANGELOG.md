@@ -1,5 +1,70 @@
 # Changelog (bbhost-vk)
 
+## vk.1-rc4 (2026-10-20, test build "build 3", branch `phase-5-test-release`; not released)
+
+Rule as in rc3: optimizations are permanent (no menu or launcher switch); `BBHOST_*`
+variables only for debugging, each `=0` falling back to rc3's behaviour.
+
+- **GPU idle with work queued (item 1):**
+  - **Query resets before the first timestamp.** On RADV a timestamp leaves the command
+    buffer's query flush pending (partial flushes, L2 write-back and invalidate, CB/DB
+    flush) and the next `vkCmdResetQueryPool` emits it. The occlusion, coverage and
+    profiler resets came after the busy meter's TOP timestamp, so every command buffer
+    started with a drain and an L2 flush. They now come first. Log `gpu: query resets
+    before the first timestamp`; [gpu_idle] `reset_first_cmdbufs`;
+    `BBHOST_RESET_ORDER=0` restores the old order.
+  - **The blit rides the flip's last game submission.** When that submission is still
+    waiting for bb-submit, the blit's command buffer and its `rendered` semaphore are
+    appended to it (one kernel job), and an empty `vkQueueSubmit` gives the presenter
+    its fence. Nothing is held back or merged: the blit could not have started earlier.
+    This is not submit batching (t9). [present] `blit_ride:` (`rode`, `alone`, `missed`);
+    `BBHOST_BLIT_RIDE=0` never rides.
+  - **Attribution:** the queued gaps are split by what ended the command buffer before
+    them and by how long that command buffer ran. Log `gpu idle queued after:`;
+    [gpu_idle] `idle_by_span_before:`; `gpu_gaps.py --idle` prints both.
+- **Fetch shader inlined (item 2).** A vertex shader and its fetch shader that are both
+  branch-free are translated as one straight line, the fetch shader in place of
+  `s_swappc_b64`. Their bound loads are no longer excluded with "registers redefined,
+  dispatcher order", so the post chain's VS page-table walks go. Log `fetch inline:`;
+  [walks] `fetch_inline:` (`fetch_inlined`, `fetch_inlined_walking`);
+  `BBHOST_FETCH_INLINE=0` uses the dispatcher.
+- **Bound loads at an SGPR offset (item 3).** An indexed buffer load with a register
+  `soffset` adds it at run time. It falls back to the walk when the offset is not whole
+  dwords or the element lies past the binding. Stores always walk: a binding can be the
+  draw's copy or a device-local mirror, and a store there would never reach the game's
+  memory. 16e3fa9f's 28 stores therefore stay as they are. Log `soffset bound:`;
+  [walks] `soffset_bound`, `soffset_bound_sites`; `BBHOST_SOFFSET_BOUND=0`.
+- **Main scene pass diagnostics (item 6), no behaviour change:**
+  - Pipeline statistics in the GPU sampler's frames (one every 10 s or more): vertex and
+    fragment invocations and primitives for each timed pass.
+  - Log `gpu sample stats:`; new snapshot section [pass_stats]
+    (`vs_per_us`, `fs_per_us`, `fs_per_prim`); `BBHOST_GPU_SAMPLE_STATS=0` turns it off.
+  - `BBHOST_RGP_LABELS=1` inserts a VK_EXT_debug_utils label at each render pass, named
+    by its first pipeline, for RGP.
+  - Also fixed: the profiler's statistics pool is reset with the timestamp pool, and a
+    pair nested in another no longer ends the outer pair's query.
+- **Robustness (item 7):**
+  - The presenter's priority wait is capped at 100 ms, down from 2 s
+    (`BBHOST_PRESENT_PRIORITY_WAIT_MS`). Past the cap the blit takes the stream path,
+    behind its frame. Waits over 50 ms are logged as `present: the blit waited`. [present]
+    `blit_ride:` shows `cap_fallbacks`, `waits_over_50ms` and `wait_max_ms`.
+  - bbtest no longer counts "render target re-created (contents lost)" lines and their
+    summary as errors. They get their own line in session.txt.
+  - dfmt 6 (10_11_11) was already mapped to B10G11R11 for textures, render targets and
+    vertex fetch. The "has no texture: unsupported format" message for that T# now says
+    "no address (an unbound slot)", which is what it was.
+- The translator changed, so on the first start the translation and pipeline caches are
+  rebuilt (the translator fingerprint).
+- **Not in rc4:**
+  - CA and bloom pass 1 at render size (item 4). CA's offsets are in pixels, and before
+    FSR its fringe would be upscaled and accumulated, which changes its look. Bloom pass
+    1 must see FSR's 4K picture or it shimmers.
+  - The glare composite 8747a367 at render size (item 5) would change glare sharpness.
+    Scissoring each sprite to its quad leaves the picture identical but saves nothing:
+    the rasterizer shades only the quad already.
+  - Neither could be shown identical on the box, which has no game files or captures to
+    compare.
+
 ## vk.1-rc3 (2026-10-19, test build, branch `phase-5-test-release`; not released)
 
 - **Frame-latency limit on the uncapped/120 path.** rc2's limit only covered flips

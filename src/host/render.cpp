@@ -1466,6 +1466,10 @@ RtImage* post_shadow_locked(const RtImage& real) {
 // chain's: perf section [walks].
 struct WalkPipelines {
     std::atomic<std::uint64_t> pipelines{0}, vs_walking{0}, post{0}, post_vs_walking{0};
+    // rc4: vertex shaders whose fetch shader ran inline (gcn translate.cpp,
+    // "fetch inline"), and of those the ones that still walk; bound-variant
+    // pipelines with bound loads at an SGPR offset ("soffset bound").
+    std::atomic<std::uint64_t> fetch_inlined{0}, fetch_inlined_walking{0}, soffset_bound{0}, soffset_bound_sites{0};
     std::mutex mu;
     std::vector<std::string> post_names;
 } g_walk_pl;
@@ -1476,6 +1480,13 @@ std::string walk_section() {
                   static_cast<unsigned long long>(g_walk_pl.pipelines.load()), static_cast<unsigned long long>(g_walk_pl.vs_walking.load()),
                   static_cast<unsigned long long>(g_walk_pl.post.load()), static_cast<unsigned long long>(g_walk_pl.post_vs_walking.load()));
     std::string out = b;
+    std::snprintf(b, sizeof(b), "\nfetch_inline: fetch_inlined=%llu fetch_inlined_walking=%llu soffset_bound=%llu soffset_bound_sites=%llu "
+                  "(pipelines since start; BBHOST_FETCH_INLINE=0 / BBHOST_SOFFSET_BOUND=0 turn them off)",
+                  static_cast<unsigned long long>(g_walk_pl.fetch_inlined.load()),
+                  static_cast<unsigned long long>(g_walk_pl.fetch_inlined_walking.load()),
+                  static_cast<unsigned long long>(g_walk_pl.soffset_bound.load()),
+                  static_cast<unsigned long long>(g_walk_pl.soffset_bound_sites.load()));
+    out += b;
     std::lock_guard<std::mutex> lk(g_walk_pl.mu);
     for (const std::string& n : g_walk_pl.post_names) out += "\npost_vs_walks: " + n;
     return out;
@@ -6459,6 +6470,7 @@ void begin_pass(const DrawState& s, std::uint64_t key, bool hazard = false) {
         profile_begin_locked(g_pass_profile_name);
         g_pass.profiled = true;
     }
+    if (g.debug_labels) debug_label_locked(g_pass_profile_name);  // rc4: BBHOST_RGP_LABELS=1
     if (DrawCmds* c = DrawCmds::open(); !c || !c->begin_rendering(ri)) vkCmdBeginRendering(g_cmd(), &ri);
     g_pass.active = true;
     g_pass.key = key;
@@ -8203,7 +8215,9 @@ void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre,
                 const std::uint64_t tbase = (static_cast<std::uint64_t>(w[0]) | (static_cast<std::uint64_t>(w[1] & 0xff) << 32)) << 8;
                 host_log("render: %s binding %u (%s) has no texture: %s, want dim %u%s, got dim %u%s",
                          pipeline_name ? pipeline_name : "?", b.binding, b.path.str().c_str(),
-                         !resolved ? "T# unreadable" : !shape_ok ? "wrong shape" : "unsupported format", b.dim,
+                         // rc4: an unbound slot (no base: dfmt 6's case in rc2/rc3,
+                         // a mapped format) was "unsupported format".
+                         !resolved ? "T# unreadable" : !shape_ok ? "wrong shape" : tbase == 0 ? "no address (an unbound slot)" : "unsupported format", b.dim,
                          b.arrayed ? " array" : "", got_dim, got_arrayed ? " array" : "");
                 host_log("  T# %08x %08x %08x %08x %08x %08x %08x %08x", w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
                 host_log("  reads as T#: base 0x%llx dfmt %u nfmt %u %ux%u type %u tiling %u%s",
@@ -14147,6 +14161,27 @@ static bool draw_impl(const GpuDraw& d) {
         g_walk_pl.pipelines.fetch_add(1, std::memory_order_relaxed);
         if (vs_walks) g_walk_pl.vs_walking.fetch_add(1, std::memory_order_relaxed);
         if (post) g_walk_pl.post.fetch_add(1, std::memory_order_relaxed);
+        if (bind_pl->vs.meta().fetch_inlined) {
+            g_walk_pl.fetch_inlined.fetch_add(1, std::memory_order_relaxed);
+            if (vs_walks) g_walk_pl.fetch_inlined_walking.fetch_add(1, std::memory_order_relaxed);
+            static int fi_logs = 0;  // under g.mu
+            if (fi_logs < 8) {
+                ++fi_logs;
+                host_log("fetch inline: %s - vertex shader and fetch shader as one straight line%s", pl.name.c_str(),
+                         vs_walks ? " (still walks)" : ", no walks");
+            }
+        }
+        const std::uint32_t so_sites = bind_pl->vs.meta().soffset_bound + bind_pl->ps.meta().soffset_bound;
+        if (so_sites) {
+            g_walk_pl.soffset_bound.fetch_add(1, std::memory_order_relaxed);
+            g_walk_pl.soffset_bound_sites.fetch_add(so_sites, std::memory_order_relaxed);
+            static int so_logs = 0;  // under g.mu
+            if (so_logs < 8) {
+                ++so_logs;
+                host_log("soffset bound: %s - %u bound load%s at an SGPR offset (the walk past the binding)", pl.name.c_str(), so_sites,
+                         so_sites == 1 ? "" : "s");
+            }
+        }
         if (post && vs_walks) {
             g_walk_pl.post_vs_walking.fetch_add(1, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lk(g_walk_pl.mu);

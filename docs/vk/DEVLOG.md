@@ -1851,3 +1851,169 @@ frame's critical path. So no code was written. Nothing on this branch changes be
 - The occlusion resolve's bubble. rc3 made it parallel; it needs a new capture.
 - The 25-250 µs queued gaps per submission (rc3's [gpu_idle] split says which kind).
 - FSR 4.1.1 itself: check the snapshot says the FP8 variant on the 9070 XT.
+
+---
+
+## 2026-10-20 (Tue), vk.1-rc4 ("build 3"): queued idle, fetch inline, soffset, pass stats
+
+The third build of the night, from the rc3 session (`20261020-000251-vk1-rc3`; Old
+Yharnam GPU-bound: span 7.82 ms, `idle_with_queued` 7.6 s over 150,789 gaps, 1.83 s of it
+after the present). Same rule as before: permanent, `BBHOST_*=0` only for debugging.
+
+### 1. GPU idle with work queued
+What it is, from the driver sources (Mesa 26.2 `radv_query.c`, `radv_cmd_buffer.c`,
+`radv_queue.c`, `radv_cs.c`, winsys `radv_amdgpu_cs.c`, `wsi_common.c`), and what is
+inferred:
+- **Proven (source):** `vkCmdWriteTimestamp2` sets the command buffer's
+  `active_query_flush_bits` (PS/CS partial flush, INV_L2, INV_VCACHE, CB/DB flush+inv).
+  The next `vkCmdResetQueryPool`, or `vkEndCommandBuffer`, emits them. On gfx12, INV_L2 is
+  GL2_INV|GL2_WB, a release event plus a PWS wait. Our command buffers began with
+  the busy meter's reset+TOP timestamp, then the coverage, occlusion and profiler resets.
+  So each began with a full drain and an L2 write-back/invalidate.
+  **Fix:** every reset before the first timestamp (`begin_recording`).
+  `BBHOST_RESET_ORDER=0` restores the old order. One L2 flush fewer per command buffer
+  (~9-11 a frame). The end-of-command-buffer flush stays: it is the last timestamp's,
+  and the HOST barrier needs it anyway.
+- **Proven (source):** a `vkQueueSubmit` with no command buffers on RADV is CPU-only
+  (`radv_amdgpu_cs_submit_zero`: syncobj transfers, no GPU job). Its fence takes the
+  queue's last submission's.
+- **Inferred, not measurable on the box:** amdgpu keeps `sched_hw_submission` (2) jobs on
+  the ring, and the scheduler pushes the next one only after a CPU round trip (fence IRQ →
+  scheduler worker). A job shorter than that round trip lets the GPU run dry with work
+  queued. The present blit is such a job: ~42 µs on the GPU, followed by a ~138 µs gap
+  (28% of the queued idle). The <25 µs gaps (~7 µs each, the same as RGP's) are the
+  per-boundary flush plus the kernel's cost.
+- **Fix (blit):** the blit rides the flip's last game submission when bb-submit has not
+  taken it yet. `submit_job_now` appends the blit command buffer and its `rendered`
+  semaphore to the game job whose serial + 1 is the flip's `need`. The presenter then
+  submits an empty `vkQueueSubmit` for its own fence.
+  - This is not batching (t9 rejected that). No job is held, and no two game jobs are
+    merged. The blit could not start before that job anyway.
+  - Only blits that wait on no semaphore ride (acquire-by-fence, the default).
+  - If the rider is not taken by the time the job has gone in, it is revoked and the
+    blit goes alone, as in rc3.
+  - Counters `rode`, `alone` and `missed` are in [present] `blit_ride:`.
+  - `BBHOST_BLIT_RIDE=0` turns it off.
+- **Attribution for the rest (63%, ~9 boundaries):**
+  - The meter now keys each queued gap by the site that ended the command buffer before
+    it (as the late gaps already were): the `gpu idle queued after:` line, top 10.
+  - It also buckets each gap by how long that command buffer ran (<50 µs, 50-200 µs,
+    200 µs-1 ms, longer): the same line and [gpu_idle] `idle_by_span_before:`.
+  - `gpu_gaps.py --idle` names the sites.
+  - If the next session shows the gaps mostly after short command buffers, it is the
+    scheduler round trip above. The answer then is fewer short jobs: what ends them is
+    named by site.
+  - An optional A/B on the PC (TESTING, rc4) confirms it: the kernel parameter
+    `amdgpu.sched_hw_submission=4`. Nothing in bbhost sets it.
+- **Expected:** −0.1-0.2 ms per GPU-bound frame from the blit (most of the 0.17 ms
+  after-present share) and a few µs per command buffer from the reset order. The rest
+  depends on what the attribution shows.
+
+### 2. Fetch shader inlined (translate.cpp `run()`)
+- The new straight-line path runs when all of these hold:
+  - `opt.fetch` is set and `force_dispatcher` is not;
+  - the main program has no branch, no `s_setpc`, exactly one `s_swappc`, and
+    `s_endpgm` only at its end;
+  - the fetch program has no branch, no `s_swappc` and no `s_endpgm`, and exactly one
+    `s_setpc`, as its last instruction.
+- Emission:
+  - `ordered = true`;
+  - the main instructions are translated in order;
+  - at the `s_swappc`, its destination pair gets the return address (as the call did),
+    then the fetch instructions follow, translated with `kFetchBias`, up to the
+    `s_setpc`;
+  - no blocks are made at the call or the return.
+- The bound-V# check then takes the latest definition before each load, as for any
+  straight-line shader. The fetch shader's `s_load_dwordx4 s[8:11]` no longer excludes the
+  main program's reload of `s[8:11]`.
+- `gcn_fetch_inline_test` reproduces rc3's log exactly through the forced dispatcher
+  ("indexed, excluded" ×2 and "registers redefined, dispatcher order" ×2). Inline: 0
+  walks, both loads bound, valid SPIR-V. A fetch shader with a branch keeps the
+  dispatcher.
+- Log `fetch inline:` (the first 8 pipelines). [walks] `fetch_inline:` counts
+  `fetch_inlined` and `fetch_inlined_walking`; `vs_walking` should drop.
+  `BBHOST_FETCH_INLINE=0` uses the dispatcher.
+- `TranslateResult::fetch_inlined` and `soffset_bound` are stored in the translation
+  cache (`write_result`/`read_result`, size assert 424 → 432). The translator fingerprint
+  changes, so the first start rebuilds the caches.
+
+### 3. Register soffset
+- `indexed_buffer_load` takes an SGPR soffset (codes < 104). It adds `read_s(soffset) >> 2`
+  to the dword index. `read_bound` reads the binding only where the offset is a whole
+  number of dwords and the element's last dword is inside the binding (`OpArrayLength`).
+  Otherwise it takes the walk. It is rejected under `cb_no_fallback`, which has no walk.
+  `BBHOST_SOFFSET_BOUND=0` restores rc3.
+- **Stores: not done, on purpose.** There is no bound store path, and adding one is not
+  safe. A binding can be the draw's copy (YEBIS windows) or a device-local mirror
+  (buffer_shadow), so a store into it would never reach guest memory.
+  16e3fa9f+b6e87124's 28 `buffer_store_dword` at a register offset keep walking. The
+  expected saving for that shader is 0. The load side helps any load "at a register
+  offset" (`soffset bound:` log, [walks] `soffset_bound`).
+
+### 4 and 5: dropped
+- **CA (84b3a182 / bb92a5b6) and bloom pass 1 at render size:**
+  - CA's offsets are in pixels: at 1080p before FSR, the fringe is 2× wider at the output
+    and goes through FSR's temporal accumulation.
+  - The rule says CA's look must not change, and nothing on the box can show it
+    identical: no game files, no captures. `capture_diff_test.py` and
+    `replay_compare_test` need captures from the game.
+  - Bloom pass 1 must read FSR's 4K picture or it shimmers (rc2).
+- **Glare 8747a367:**
+  - At render size, the sprites lose sharpness and pass through the upscale: not
+    identical.
+  - Scissored to each quad, the picture is identical, but nothing is saved: the
+    rasterizer already shades only the quad. The 186-286 µs per draw with 2-71 µs of work
+    (rc2) is serialization, not shading outside the quad.
+  - So no change.
+
+### 6. Main scene pass: vertex- or pixel-bound
+- No behaviour change in normal frames. The GPU sampler's frame (one every 10 s or more,
+  already timed pass by pass) now also takes pipeline statistics per pass:
+  - `pipelineStatisticsQuery` is enabled when the device has it;
+  - `BBHOST_GPU_SAMPLE_STATS=0` turns it off.
+- New snapshot section [pass_stats] for the sample's top 8 passes: `ms`, `verts_k`,
+  `vs_k`, `prims_k`, `clip_in_k`, `clip_out_k`, `fs_k`, `vs_per_us`, `fs_per_us`,
+  `fs_per_prim`. Log line: `gpu sample stats:`.
+- How to read 4efb29f6 across samples:
+  - pixel-bound: `fs_per_us` stays high and steady (thousands of fragments per µs) while
+    the pass time follows `fs_k`;
+  - vertex-bound: the time follows `vs_k`/`prims_k`, and `fs_per_prim` is low.
+- `BBHOST_RGP_LABELS=1`: a `vkCmdInsertDebugUtilsLabelEXT` at each render pass, named by
+  its first pipeline, so RGP shows the passes by name. It enables VK_EXT_debug_utils on
+  the instance only then. In place, as the profiler's pairs are, so for profiling only.
+- Fixed on the way:
+  - `begin_recording` reset the timestamp pool and set `qreset`, so
+    `profile_begin_locked` never reset the statistics pool. Its queries began unreset
+    under `BBHOST_GPU_PROFILE=3`. It is reset there now.
+  - A nested pair no longer ends the outer pair's query (`stat_index`).
+  - Results are read with availability rather than `WAIT_BIT`.
+
+### 7. Robustness
+- **Priority wait:**
+  - capped at 100 ms, not 2 s (`BBHOST_PRESENT_PRIORITY_WAIT_MS`, 5-2000);
+  - past the cap, if the device is not lost, the blit goes into the stream behind its
+    frame (`host_gpu_submit_presenter` under `g.mu`). The function now returns that
+    ticket and window.cpp waits on it as on any stream blit;
+  - waits over 50 ms are logged (`present: the blit waited`, the first 16);
+  - [present] `blit_ride:` shows `cap_fallbacks`, `waits_over_50ms` and `wait_max_ms`.
+- **bbtest:** the `render: target ... re-created ... (contents lost)` lines and the
+  `targets re-created in another format:` summary are filtered out of `errors in the
+  log`, and counted on their own line in session.txt. rc3's log: 12 such lines, and 0
+  errors left.
+- **dfmt 6:** already mapped everywhere (textures, render targets, `format_layout`).
+  rc3's `unusable T# dfmt=6 ... no address: an unbound slot` was a T# with no base. The
+  render log's "has no texture: unsupported format" for it now says
+  "no address (an unbound slot)".
+
+### Verified here (box, lavapipe)
+- 53/53 ctest (19 skipped as before: they need the game's files), also with
+  `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`. New: `gcn_fetch_inline_test`.
+- `--stream-selftest`, `=2` with BBHOST_FSR4_FEATURES=1, and `=20`, run with
+  `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` and synchronization validation: pass,
+  with the same 10 upstream SYNC-HAZARD lines as rc3.
+  - Pre-existing, not new: the threading checker's `UNASSIGNED-Threading-MultipleThreads`
+    message on a VkFence (vkGetFenceStatus on bb-submit). It shows with the rc3 binary
+    too. With `BBHOST_VK_VALIDATE=1` it fails `=20` in about 2 runs of 5, for rc3 and
+    rc4 alike.
+- None of it ran on the hardware. The blit ride, the reset order and the inline fetch
+  shader can only be judged there.

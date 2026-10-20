@@ -59,7 +59,22 @@ if a.idle:
     late = collections.Counter()
     late_n = collections.Counter()
     late_lines = 0
+    queued = collections.Counter()  # rc4
+    queued_n = collections.Counter()
+    by_len = collections.Counter()
+    by_len_n = collections.Counter()
+    queued_lines = 0
     for line in open(a.log, errors='replace'):
+        if 'gpu idle queued after:' in line:  # rc4
+            queued_lines += 1
+            head, _, tail = line.partition('; by the command buffer before:')
+            for m in re.finditer(r' ([0-9a-f]+|present|unknown)=([0-9.]+)ms/s\(([0-9.]+)/s\)', head):
+                queued[m.group(1)] += float(m.group(2))
+                queued_n[m.group(1)] += float(m.group(3))
+            for m in re.finditer(r' (lt50us|50_200us|200us_1ms|gt1ms) ([0-9.]+)ms/s\(([0-9.]+)/s\)', tail):
+                by_len[m.group(1)] += float(m.group(2))
+                by_len_n[m.group(1)] += float(m.group(3))
+            continue
         if 'gpu idle late after:' in line:
             late_lines += 1
             for m in re.finditer(r' ([0-9a-f]+|present)=([0-9.]+)ms/s\(([0-9.]+)/s\)', line):
@@ -115,6 +130,14 @@ if a.idle:
         print('late gaps by what ended the command buffer before them (mean over %d reports):' % late_lines)
         for site, ms in late.most_common(a.top):
             print('%8.2f ms/s %6.0f/s  %s' % (ms / late_lines, late_n[site] / late_lines, names.get(site, site)))
+    if queued_lines:  # rc4
+        names = name_sites(sorted(s for s in queued if s not in ('present', 'unknown')), a.exe, a.windows)
+        print('queued gaps by what ended the command buffer before them (mean over %d reports):' % queued_lines)
+        for site, ms in queued.most_common(a.top):
+            print('%8.2f ms/s %6.0f/s  %s' % (ms / queued_lines, queued_n[site] / queued_lines, names.get(site, site)))
+        print('queued gaps by the length of the command buffer before them:')
+        for k in ('lt50us', '50_200us', '200us_1ms', 'gt1ms'):
+            print('%8.2f ms/s %6.0f/s  %s' % (by_len[k] / queued_lines, by_len_n[k] / queued_lines, k))
     raise SystemExit(0)
 
 total = collections.Counter()

@@ -366,7 +366,11 @@ finish() {
         # occlusion report's "0 lost", "keyboard focus lost", the DL_PANIC
         # patch, MangoHud's own power/battery notes); those are left out.
         echo "errors in the log: $(grep -iE 'error|fatal|crash|panic|lost' "$s/bbhost.log" 2> /dev/null |
-            grep -vcE '; 0 lost\)|keyboard focus lost|patched DL_PANIC|error paths would have dropped|\[MANGOHUD\] \[error\] \[(cpu|battery)\.cpp' || true)"
+            grep -vcE '; 0 lost\)|keyboard focus lost|patched DL_PANIC|error paths would have dropped|\[MANGOHUD\] \[error\] \[(cpu|battery)\.cpp|render: target 0x[0-9a-f]+ re-created: .*\(contents lost\)|render: targets re-created in another format:' || true)"
+        # rc4: a render target the game re-creates in another format (its
+        # pixels not carried over) is the renderer following the game, not an
+        # error; counted on its own line instead of under errors.
+        echo "render targets re-created (contents lost): $(grep -cE 'render: target 0x[0-9a-f]+ re-created: .*\(contents lost\)' "$s/bbhost.log" 2> /dev/null || true)"
         # The FPS shown, in game only: the presenter's 300-frame lines after
         # the first in-game frame (loading screens and menus left out).
         echo "in-game fps shown: $(awk '/world: the first in-game frame/ { on = 1; next }

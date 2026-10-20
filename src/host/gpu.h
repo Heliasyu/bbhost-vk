@@ -460,7 +460,18 @@ bool host_gpu_wait_submitted_until(std::uint64_t ticket, std::int64_t deadline_n
 std::uint64_t host_gpu_stream_mark();
 void host_gpu_presenter_priority_stats(std::uint64_t* direct, std::uint64_t* stream, std::uint64_t* wait_ns, std::uint64_t* timeouts);
 bool host_gpu_presenter_priority_ok(std::uint64_t need, std::uint64_t mark);
-void host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence, std::uint64_t need);
+// rc4: its ticket when it fell back to the stream past the wait's cap
+// (host_gpu_wait_submitted it, as host_gpu_submit_presenter's), else 0: gone
+// in - by itself, or riding the flip's last submission (BBHOST_BLIT_RIDE).
+std::uint64_t host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence,
+                                                std::uint64_t need);
+// rc4: blits that rode the flip's last submission, went alone, were offered
+// and missed it, fell back to the stream past the cap; waits over 50 ms; the
+// longest wait.
+void host_gpu_blit_ride_stats(std::uint64_t* rode, std::uint64_t* alone, std::uint64_t* missed, std::uint64_t* fallbacks,
+                              std::uint64_t* over50, std::uint64_t* max_ns);
+// rc4: command buffers begun with every query reset before the first timestamp (BBHOST_RESET_ORDER).
+std::uint64_t host_gpu_reset_first_cmdbufs();
 // How busy the GPU is with our work (gpu_busy.cpp): the union of the time
 // our command buffers - the game's and the presenter's - spent on the GPU,
 // from a timestamp at each one's start and end. Windows' per-process GPU

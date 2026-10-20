@@ -31,7 +31,7 @@ namespace {
 // program, and a result field the entry does not hold would come back empty.
 #if defined(__GLIBCXX__) && defined(__x86_64__)
 static_assert(sizeof(gcn::TranslateOptions) == 312, "a new TranslateOptions field: add it to hash_options");  // a bool can land in padding: check the list too
-static_assert(sizeof(gcn::TranslateResult) == 424, "a new TranslateResult field: add it to write_result and read_result");
+static_assert(sizeof(gcn::TranslateResult) == 432, "a new TranslateResult field: add it to write_result and read_result");
 static_assert(sizeof(gcn::ResourcePath) == 40 && sizeof(gcn::ResourceStep) == 8, "a new ResourcePath field: add it to the entry");
 static_assert(sizeof(gcn::ImageBinding) == 64 && sizeof(gcn::SamplerBinding) == 56 && sizeof(gcn::BufferBinding) == 56,
               "a new binding field: add it to the entry");
@@ -304,6 +304,8 @@ void write_result(Writer& w, const gcn::TranslateResult& r, bool with_spirv) {
     w.i32(r.vs_clip_count);
     w.u8(r.vs_point_size ? 1 : 0);
     w.u32(r.wave64_needs);  // what keeps a pixel program at 64 lanes (gcn/wave.h)
+    w.u8(r.fetch_inlined ? 1 : 0);  // rc4
+    w.u32(r.soffset_bound);
 }
 
 bool read_result(Reader& r, gcn::TranslateResult& t) {
@@ -360,6 +362,8 @@ bool read_result(Reader& r, gcn::TranslateResult& t) {
     t.vs_clip_count = r.i32();
     t.vs_point_size = r.u8() != 0;
     t.wave64_needs = r.u32();
+    t.fetch_inlined = r.u8() != 0;
+    t.soffset_bound = r.u32();
     return r.ok && r.p == r.end;
 }
 

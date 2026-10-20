@@ -811,7 +811,10 @@ struct Translator {
         const Id last = m.emit(spv::OpISub, t_u32, {m.ext_inst(t_u32, spv::GlslUMax, {len, c_one_u}), c_one_u});
         return m.ext_inst(t_u32, spv::GlslUMin, {at, last});
     }
-    std::vector<Id> read_bound(std::size_t index, int reg, Id first_dw, int n, Id guest_u64, bool clamp = false) {
+    // soff (rc4): the SGPR byte offset already added to first_dw (in dwords);
+    // the binding is read only where it is a whole number of dwords and the
+    // element's last dword lies inside the binding, the walk otherwise.
+    std::vector<Id> read_bound(std::size_t index, int reg, Id first_dw, int n, Id guest_u64, bool clamp = false, Id soff = 0) {
         res.buffer_at[cur_offset] = static_cast<std::uint32_t>(index);
         buffer_sites.push_back({reg, index, sym_key(sym_of(reg)), sym_key(sym_of(reg + 1)), def_seq++, cur_block});
         if (opt.cb_no_fallback) {
@@ -826,7 +829,12 @@ struct Translator {
         }
         std::vector<Id> vars(static_cast<std::size_t>(n));
         for (Id& v : vars) v = m.local_variable(p_fn_u32, c_zero_u);
-        const Id valid = buffer_bound(index);
+        Id valid = buffer_bound(index);
+        if (soff) {
+            const Id last = iadd(params_u32(4, index), iadd(first_dw, cu(static_cast<std::uint32_t>(n - 1))));
+            const Id len = m.emit(spv::OpArrayLength, t_u32, {buffer_vars[index], 0u});
+            valid = band(valid, band(ieq(iand(soff, cu(3)), c_zero_u), ult(last, len)));
+        }
         const Id l_bound = m.fresh(), l_walk = m.fresh(), l_merge = m.fresh();
         m.emit_void(spv::OpSelectionMerge, {l_merge, 0u});
         m.emit_void(spv::OpBranchConditional, {valid, l_bound, l_walk});
@@ -2404,14 +2412,24 @@ struct Translator {
         if (!opt.cb_ssbo) return reject("");
         if (!in.idxen || in.offen || in.addr64) return reject(", offset register or 64-bit address");
         if (dynamic_format && (in.lds || in.tfe)) return reject(", to LDS or with tfe");
-        if (in.soffset < 128 || in.soffset > 208) return reject(", register offset");
+        // rc4: an SGPR offset (16e3fa9f's kind) is added at run time, the
+        // walk kept for an offset off a dword or past the binding (read_bound).
+        // Not with cb_no_fallback, which has no walk to fall back on.
+        // BBHOST_SOFFSET_BOUND=0: rejected, as before.
+        static const bool soffset_bound_on = [] {
+            const char* e = std::getenv("BBHOST_SOFFSET_BOUND");
+            return !(e && e[0] == '0');
+        }();
+        const bool reg_soffset = in.soffset < 104;
+        if (reg_soffset && (!soffset_bound_on || opt.cb_no_fallback)) return reject(", register offset");
+        if (!reg_soffset && (in.soffset < 128 || in.soffset > 208)) return reject(", register offset");
         if (dynamic_format) {
             count = 4;
             bits[0] = bits[1] = bits[2] = bits[3] = 32;
         } else if (!format_layout(in.dfmt, count, bits)) {
             return reject(", unknown format");
         }
-        const std::int32_t constant = in.soffset <= 192 ? static_cast<std::int32_t>(in.soffset) - 128 : 192 - static_cast<std::int32_t>(in.soffset);
+        const std::int32_t constant = reg_soffset ? 0 : in.soffset <= 192 ? static_cast<std::int32_t>(in.soffset) - 128 : 192 - static_cast<std::int32_t>(in.soffset);
         const std::int32_t off = static_cast<std::int32_t>(in.offset12) + constant;
         ResourcePath path;
         if (off < 0 || off % 4) return reject(", offset not in dwords");
@@ -2431,10 +2449,16 @@ struct Translator {
             stride = sel(ine(spec, c_zero_u), spec, stride);
         }
         const Id stride_dw = shr(stride, cu(2));
-        const Id first = iadd(cu(static_cast<std::uint32_t>(off / 4)), imul(ld(vgpr_var(in.vaddr)), stride_dw));
+        Id first = iadd(cu(static_cast<std::uint32_t>(off / 4)), imul(ld(vgpr_var(in.vaddr)), stride_dw));
+        Id soff = 0;
+        if (reg_soffset) {
+            soff = read_s(in.soffset, in);
+            first = iadd(first, shr(soff, cu(2)));
+            ++res.soffset_bound;  // rc4: [walks] soffset_bound
+        }
         // The element's guest address feeds only the fallback walk.
         const Id guest = opt.cb_no_fallback ? m.const_u64(0) : buffer_address(in).addr;
-        const std::vector<Id> words = read_bound(index, in.srsrc, first, nwords, guest, dynamic_format);
+        const std::vector<Id> words = read_bound(index, in.srsrc, first, nwords, guest, dynamic_format, soff);
         if (opt.cb_no_fallback) {
             Id& spec = cb_w3_spec[index];  // translate.h kCbW3SpecId
             if (!spec) spec = m.spec_const_u32(0, kCbW3SpecId + static_cast<std::uint32_t>(index));
@@ -3881,6 +3905,66 @@ struct Translator {
         // Blocks
         find_blocks(prog, 0);
         if (opt.fetch) find_blocks(*opt.fetch, kFetchBias);
+        // rc4: a vertex shader and its fetch shader that are both
+        // branch-free run as one straight line - the fetch shader's
+        // instructions in place of the s_swappc_b64 that calls it, its
+        // closing s_setpc_b64 dropped - so instruction order is execution
+        // order (`ordered`) and the bound-V# check takes the latest definition
+        // before each load, as for any straight-line shader. Through the
+        // dispatcher, the fetch shader's own V# loads redefine the registers
+        // the main program's loads use and every bound load was excluded
+        // ("registers redefined, dispatcher order"). The swappc still writes
+        // its return address into its destination pair, as the call did.
+        // BBHOST_FETCH_INLINE=0: the dispatcher, as before.
+        static const bool fetch_inline_on = [] {
+            const char* e = std::getenv("BBHOST_FETCH_INLINE");
+            return !(e && e[0] == '0');
+        }();
+        const auto inline_fetch_ok = [&]() -> bool {
+            if (!opt.fetch || opt.force_dispatcher || !fetch_inline_on) return false;
+            const Program& f = *opt.fetch;
+            int calls = 0;
+            for (std::size_t k = 0; k < prog.insts.size(); ++k) {
+                const Inst& in = prog.insts[k];
+                if (is_branch(in)) return false;
+                if (in.enc == Enc::SOP1 && in.op == 32) return false;
+                if (in.enc == Enc::SOP1 && in.op == 33) ++calls;
+                if (in.enc == Enc::SOPP && in.op == 1 && k + 1 != prog.insts.size()) return false;
+            }
+            if (calls != 1 || f.insts.empty()) return false;
+            for (std::size_t k = 0; k < f.insts.size(); ++k) {
+                const Inst& in = f.insts[k];
+                if (is_branch(in)) return false;
+                if (in.enc == Enc::SOP1 && in.op == 33) return false;
+                if (in.enc == Enc::SOPP && in.op == 1) return false;
+                if (in.enc == Enc::SOP1 && in.op == 32 && k + 1 != f.insts.size()) return false;
+            }
+            const Inst& last = f.insts.back();
+            return last.enc == Enc::SOP1 && last.op == 32;
+        };
+        if (inline_fetch_ok()) {
+            lbl_loop_merge = m.fresh();
+            ordered = true;
+            res.fetch_inlined = true;
+            for (const Inst& in : prog.insts) {
+                if (block_terminated) break;
+                if (in.enc == Enc::SOP1 && in.op == 33) {
+                    cur_offset = in.offset;
+                    write_pair(in.dst, cu(in.offset + 4), c_zero_u);
+                    for (const Inst& fi : opt.fetch->insts) {
+                        if (fi.enc == Enc::SOP1 && fi.op == 32) break;  // the return: execution simply goes on
+                        translate_inst(fi, kFetchBias);
+                    }
+                    continue;
+                }
+                translate_inst(in, 0);
+            }
+            if (!block_terminated) {
+                lane_exit();
+                m.emit_void(spv::OpBranch, {lbl_loop_merge});
+            }
+            m.label(lbl_loop_merge);
+        } else
         // A straight-line shader needs no program-counter interpreter. Keeping
         // it linear lets the driver propagate register values through the
         // whole shader instead of carrying them around a loop backedge.

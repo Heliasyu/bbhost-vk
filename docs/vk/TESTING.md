@@ -149,6 +149,59 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## Snapshot additions (rc4)
+- **[present]** gains `blit_ride:`: `rode` (the blit went in the flip's last game
+  submission), `alone`, `missed` (offered, but that submission had already gone),
+  `cap_fallbacks` (past the 100 ms wait cap, into the stream), `waits_over_50ms`,
+  `wait_max_ms`.
+- **[gpu_idle]** gains `idle_by_span_before:`: the queued idle by how long the command
+  buffer before it ran (`lt50us`, `50_200us`, `200us_1ms`, `gt1ms`, ms and gaps), and
+  `reset_first_cmdbufs`. The 300-flip `gpu idle queued after:` log line names the sites
+  (`present=` is the blit). `gpu_gaps.py --idle bbhost.log --exe bbhost` prints both.
+- **[walks]** gains `fetch_inline:`: `fetch_inlined`, `fetch_inlined_walking`,
+  `soffset_bound`, `soffset_bound_sites`. Log lines `fetch inline:` and `soffset bound:`.
+- **[pass_stats]** (new): the GPU sampler's latest frame, per top pass: `ms`, `vs_k`,
+  `prims_k`, `clip_out_k`, `fs_k`, `vs_per_us`, `fs_per_us`, `fs_per_prim`. Log line
+  `gpu sample stats:`.
+- session.txt: `render targets re-created (contents lost): N` on its own line, no longer
+  under errors.
+- Debugging variables (no menu entries; each `=0` is rc3's behaviour):
+  - `BBHOST_RESET_ORDER=0`
+  - `BBHOST_BLIT_RIDE=0`
+  - `BBHOST_FETCH_INLINE=0`
+  - `BBHOST_SOFFSET_BOUND=0`
+  - `BBHOST_GPU_SAMPLE_STATS=0`
+  - `BBHOST_PRESENT_PRIORITY_WAIT_MS=<ms>` sets the cap.
+  - `BBHOST_RGP_LABELS=1` labels the render passes for RGP.
+
+## vk.1-rc4 checks (~10-15 min)
+FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual. The first start
+rebuilds the shader caches (the translator changed): expect compile stutter for the first
+minutes of each area. Don't judge the frame rate until it settles.
+
+1. Run `bbtest start vk1-rc4`.
+2. **Hunter's Dream, ~4 min:** the same route as rc3. Press F11 at every dip, and once when
+   smooth.
+3. **Old Yharnam, ~6 min:** the same route as rc3 (lamp, plaza, church), with an F11 in the
+   GPU-bound spot rc3's snap-20261020-000521 was taken in. Then F11 again about 15 s later,
+   so the sampler has a frame for [pass_stats].
+4. Watch for:
+   - broken, missing or exploding geometry, or broken post effects or HUD (the inlined
+     fetch shader, the soffset loads);
+   - a frame out of order, a stale frame or a tear-like jump (the blit ride);
+   - flicker (the reset order).
+   - If you see one, note where and press F11.
+5. Run `bbtest stop`, then send the session folder.
+6. Only if something looked wrong, repeat the spot once with each of
+   `BBHOST_BLIT_RIDE=0`, `BBHOST_FETCH_INLINE=0`, `BBHOST_SOFFSET_BOUND=0` and
+   `BBHOST_RESET_ORDER=0`, pressing F11 each time.
+7. Optional, to confirm the queued-idle theory (DEVLOG rc4). Leave it out if unsure.
+   - Boot once with the kernel parameter `amdgpu.sched_hw_submission=4`, then repeat
+     step 3.
+   - If `idle_by_span_before: lt50us_ms` and `50_200us_ms` fall sharply, the gaps are the
+     scheduler's round trip.
+   - Remove the parameter afterwards. bbhost needs nothing from it.
+
 ## Snapshot additions (rc3)
 - `flip_to_present_split:` in the summary gives the averages and maxima of `record` (the
   blit), `submit` (until its work is in the queue), `pacer` (the wait) and `present`
