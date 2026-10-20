@@ -149,6 +149,56 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## vk.1-rc6 checks (~15 min)
+Install as before (`bbtest start vk1-rc6`). The translator is unchanged: **no shader-cache
+rebuild**, the first start is like rc5b's second. Two binaries come with the package:
+`bbhost.bin` (ThinLTO + PGO from the rc5 profiling session) and `bbhost.bin.nopgo` (the same
+commit without the profile).
+0. **Optional, once per boot, for fewer buffer objects per submission:**
+   `echo 1024 | sudo tee /sys/module/udmabuf/parameters/size_limit_mb` before starting (or
+   `options udmabuf size_limit_mb=1024` in `/etc/modprobe.d/udmabuf.conf` to keep it). The
+   log then says `gpu: dma-buf pieces of 1024 MiB`; without it `… of 64 MiB` (as rc5).
+1. **Start-up log lines** (game.log): `gpu: the host's own GPU mappings (the GX table ring)
+   as memfds, imported as dma-bufs (rc6)` and, a little later, `gpu: host mapping
+   0xf000000000 (131072 KiB) imported as …` (instead of rc5's `importing flexible mapping
+   0xf000000000`); `recorder: its wait loop timed with the TSC`. If the ring line says it
+   failed, or anything in the picture is missing (GX-drawn meshes, UI), repeat with
+   `BBHOST_HOST_MAP_DMABUF=0` and say so.
+2. **At the Old Yharnam spot** (F11 there, stand still, F11 ~30 s later):
+   - the periodic ~12 ms frame should be gone or much rarer: compare `>11 ms` frames and the
+     frame-time graph with rc5b (MangoHud's frametime graph shows it too);
+   - [cpu] `log_writer:` - `on=1`, `drained_by_loggers=0 waited=0` (above 0 means a log
+     storm the writer could not keep up with);
+   - [cpu] `recorder_wait: … clock=tsc`;
+   - [cpu] `cp_cost:` / `cp_split:` and bb-submit's CPU in [seconds]/[threads] against rc5b
+     (bb-submit should drop: no userptr to re-check, and fewer pieces with step 0).
+3. **PGO A/B** (same spot, same routine): swap in `bbhost.bin.nopgo` for one run (`cp
+   bbhost.bin.nopgo bbhost.bin` in the game folder after keeping a copy), F11 twice; compare
+   [cpu] `cp_cost: exec_ns_per_draw` and `cp_split: sum=`, bb-cp0/bb-record ms/s.
+4. **Logs still complete:** run-bbhost.sh's tee writes logs/ as before; after closing the
+   game the log ends with `log: N lines through the writer thread …`. A crash (if one
+   happens) still ends with the SIGSEGV report.
+5. Debug reverts, only for an A/B or if something looks wrong (no menu entries):
+   `BBHOST_LOG_SYNC=1` (synchronous logging), `BBHOST_GX_REPORT_INLINE=1` (the native-draw
+   report on bb-cp0), `BBHOST_GX_REPORT_MAPS=1` (name the slow reads' regions in play, the
+   rc5 cost), `BBHOST_HOST_MAP_DMABUF=0` (the ring as a host-pointer import),
+   `BBHOST_DMABUF_PIECE_MB=64` (rc5's pieces), `BBHOST_RECORDER_TSC=0` (clock_gettime).
+
+Snapshot additions (rc6): [cpu] `log_writer: on= lines= deepest= slots= drained_by_loggers=
+waited=` and `recorder_wait: … clock=`. New log labels: `log:` (start with
+`BBHOST_LOG_SYNC=1`, exit), `gpu: dma-buf pieces of`, `gpu: the host's own GPU mappings`,
+`gpu: host mapping 0x… imported as`, `kernel: host mapping … (a memfd, for a dma-buf import)`,
+`recorder: its wait loop timed with`. The `gx-native:`/`gx:`/`yebis:` periodic lines are
+the same, written by `bb-gx-report` a moment later; `gx:   0x… is in …` lines appear at exit
+only.
+
+Profiling kit changes: game.log is on tmpfs while the game runs (`$XDG_RUNTIME_DIR`, else
+`/dev/shm`; moved into the step folder at the exit; `BBPROFILE_LOGDIR=-` keeps it in the step
+folder), every step records the GPU queue (`perf/gpu-queue.data`, 8 s, with sudo), and the
+analysis warns when a step's draws per frame differ from a1's by more than 5% (not the same
+view). In the rc5 session this flagged a1 (1008 draws/frame) and a2 (1432) against the later
+steps (~1500-1600): compare a3-a5 with m4 rather than a1.
+
 ## Profiling kit (after rc5b): `bbprofile.sh`
 A guided ~30 min session that measures what the next build should target, with its own
 binaries (rc5b plus off-by-default debug instrumentation, and a PGO-instrumented one). The

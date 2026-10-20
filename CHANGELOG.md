@@ -1,5 +1,75 @@
 # Changelog (bbhost-vk)
 
+## vk.1-rc6 (2026-10-20, test build "build 5"/rc6, branch `phase-5-test-release`; not released)
+
+On top of the profiling-kit commits (ea885ba, b30746b, fbfe181), from the rc5 profile's plan
+(the session of 2026-10-20 11:25). Same rules: no picture, HDR, chromatic-aberration or menu
+change, nothing new in the launcher; each `BBHOST_*` below is a debug revert. The translator
+is unchanged (fingerprint cbb93a8a…): **the shader caches are kept** (no rebuild).
+
+- **The periodic ~12 ms frame: the native-draw report off the command processor.** Every
+  100,000 token draws bb-cp0 wrote ~30 log lines and read `/proc/self/maps` (3,000+
+  mappings) inline - 74 of rc5's 92 frames of 11 ms or more fell within -5…+25 ms of one. The
+  CP now only marks the report due; a reporter thread (`bb-gx-report`) writes the same lines.
+  The slow guest reads' regions are named from the process's map only at exit (the report
+  runs once more there) or with `BBHOST_GX_REPORT_MAPS=1`. `BBHOST_GX_REPORT_INLINE=1`: on the
+  CP again (still without the map read unless `BBHOST_GX_REPORT_MAPS=1`). The shadow mode's
+  report (`BBHOST_GX_NATIVE=1`) goes the same way.
+- **Asynchronous logging** (`src/core/log_async.cpp`). A log line no longer waits for the log
+  file: lines go into a 4 MiB ring (one CAS to reserve, a copy, no lock, no sleep) and a
+  writer thread (`bb-log`) writes them in order, whole lines, at most 4096 bytes a write (so
+  a pipe - run-bbhost.sh's `tee` - never gets another writer's bytes inside a line). rc5's m4
+  caught GXRenderThread 3.1-4.7 ms in a synchronous write to game.log on btrfs. Same bytes,
+  same order; the F11 30-second log tap still sees every line as it is logged. Flushed and
+  then synchronous on every exit path (window closed, `BBHOST_EXIT_*`, SIGTERM, a crash in the
+  fault handler, `abort()` via a new SIGABRT handler that then dumps core as before, `exit()`,
+  the stream selftest). Only a ring full of a log storm makes a logging thread write (it
+  drains the ring itself, keeping the order). `BBHOST_LOG_SYNC=1`: the old synchronous writes.
+  Snapshot [cpu] `log_writer:`; exit line `log: N lines through the writer thread`.
+- **Cheaper submissions.**
+  - The GX table ring (bbhost's own 128 MiB GPU mapping) is a sealed memfd imported as
+    dma-bufs where direct memory already goes in that way (AMD on Linux), instead of a
+    host-pointer import: amdgpu re-checked that userptr page by page at every submission
+    (`hmm_range_fault`, 22.6% of bb-submit in rc5). Only after a probe import of a memfd of
+    its own succeeds, and only with sparse binding (or pieces of 128 MiB+); otherwise as
+    before. `BBHOST_HOST_MAP_DMABUF=0`: anonymous memory and a host-pointer import. Log
+    `gpu: the host's own GPU mappings …`, `gpu: host mapping 0x… imported as …`.
+  - dma-buf pieces as large as the udmabuf module allows (up to 1 GiB, the chunk size), so
+    a 1 GiB direct-memory chunk is one buffer object per submission instead of 16. The module's
+    default is 64 MiB (unchanged pieces); `echo 1024 | sudo tee
+    /sys/module/udmabuf/parameters/size_limit_mb` before starting (docs/vk/TESTING.md). Log
+    `gpu: dma-buf pieces of N MiB`. `BBHOST_DMABUF_PIECE_MB=64`: as before.
+  - `BBHOST_SUBMIT_EVERY_JOB=0` already exists and stays rejected (test4: flashing effects);
+    no new A/B for it.
+- **Recorder wait timed with the TSC**: the four clock reads around every block are RDTSC
+  where the TSC is invariant and the kernel's clock source (so synchronized across cores),
+  converted with the TSC's rate measured against CLOCK_MONOTONIC. `BBHOST_RECORDER_TSC=0`:
+  clock_gettime. [cpu] `recorder_wait: … clock=tsc`.
+- **Camera table search**: `host_memmem` compares 32 (AVX2) or 16 (SSE2) positions at once
+  (first and last byte, then the rest) - the same first match (new test `memmem_test`), ~2-4x
+  faster over the 8 GiB scan here.
+- **PGO + ThinLTO release binary** from the rc5 session's merged profile; the package also
+  has `bbhost.bin.nopgo`, the same commit without it, for an A/B. New CMake options
+  `-DBBHOST_PGO=OFF` (ignore `BBHOST_PGO_USE`) and `-DBBHOST_PGO_WARN=ON` (report profile
+  mismatches); `packaging/vk/build.sh` takes `PGO_PROFILE=` (and builds the nopgo twin) and
+  `tools/ci_build.sh` `CI_BUILD_DIR=`. The profile (gathered on the ea885ba-era kit binary)
+  still matches 6,686 of its 6,696 functions; the 10 that changed here are built without it
+  (4 of them among the profile's 300 hottest: host_memmem, hle_gx_native_token,
+  rebuild_page_tables, recorder_thread). The logging change keeps the inlined log code's
+  shape on purpose so the functions that log keep their profiles.
+- **Not in this build: the per-stage exact-key cache** (resolve_stage_buffers,
+  prefetch_stage_images, resolve_key_stage). Their inputs include guest memory read through
+  user-data pointers (V#/T# tables) that nothing tracks, and the texture-cache and
+  buffer-shadow state they update; a hit cannot be proven exact without write tracking of
+  those tables, and nothing on the build box runs the draw path to prove byte-identical
+  output. Left for build 6 with a draw-path replay harness (docs/vk/DEVLOG.md).
+- Profiling kit: game.log on tmpfs while the game runs (`$XDG_RUNTIME_DIR`, moved into the
+  step folder at the exit; `BBPROFILE_LOGDIR`), a GPU-queue trace (gpu_scheduler and
+  amdgpu CS tracepoints, 8 s) in every step's second window, and the analysis warns when a
+  step's draws per frame differ from a1's by more than 5% (not the same view). a6 kept.
+- New tests `log_async_test` (8 threads, 160,000 lines of 1-4 ring slots through a pipe read
+  late: every line once, whole, in each thread's order) and `memmem_test`.
+
 ## Profiling kit instrumentation (2026-10-20, branch `phase-5-test-release`; debug only, not released)
 
 On top of rc5b (7b65cd0), for the measured profiling session before the next build

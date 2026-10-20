@@ -131,6 +131,9 @@ def snap_stats(d):
     cc = sect_line(d, "cpu", "cp_cost:")
     m = re.search(r"since_last_snapshot: draws=(\d+) exec_ns_per_draw=(\d+)", cc)
     s["exec_ns_draw"] = float(m.group(2)) if m else float(kvs(cc).get("exec_ns_per_draw", "nan"))
+    # rc6: draws per frame in the window - the fixed-view check (the same
+    # spot and camera should draw the same scene within a few percent)
+    s["draws_frame"] = float(m.group(1)) / s["frames"] if m and s["frames"] else float("nan")
     pt = sect_line(d, "walks", "page_tables:")
     s["page_tables"] = pt.split("(")[0].replace("page_tables:", "").strip() if pt else "-"
     s["env"] = [l for l in d["sections"].get("env", []) if l.strip()]
@@ -235,7 +238,7 @@ def section_ab(root):
     cols = [("avg_fps", "fps", 1), ("low1", "1% low", 1), ("pct_over8.5", "%>8.5ms", 1), ("over11", ">11ms/30s", 1), ("p99_ms", "p99 ms", 2),
             ("gpu_busy", "GPU busy%", 1), ("gpu_ms_frame", "GPU ms/frame", 2), ("queued_idle_ms_s", "queued idle ms/s", 1),
             ("iwq_delta_ms_s", "queued idle (totals) ms/s", 1), ("late_idle_ms_s", "late idle ms/s", 1), ("exec_ns_draw", "CP ns/draw", 0),
-            ("cpu_bb-cp0", "bb-cp0 ms/s", 0), ("cpu_bb-record", "bb-record ms/s", 0), ("cpu_bbhost.bin", "game thr ms/s", 0)]
+            ("draws_frame", "draws/frame", 0), ("cpu_bb-cp0", "bb-cp0 ms/s", 0), ("cpu_bb-record", "bb-record ms/s", 0), ("cpu_bbhost.bin", "game thr ms/s", 0)]
     p("| step | " + " | ".join(c[1] for c in cols) + " |")
     p("|" + "---|" * (len(cols) + 1))
     for sname, r in rows.items():
@@ -250,6 +253,14 @@ def section_ab(root):
         p("Against a1 (plain). 'drift' = a6 - a1 (same binary, same spot, end of the session):")
         keys = [("gpu_ms_frame", "GPU ms/frame", -1), ("queued_idle_ms_s", "queued idle ms/s", -1), ("gpu_busy", "GPU busy%", -1),
                 ("pct_over8.5", "%>8.5ms", -1), ("low1", "1% low", 1), ("exec_ns_draw", "CP ns/draw", -1)]
+        # rc6: a step whose view was not the same scene (draws per frame more
+        # than 5% from a1's) compares different work: say so first.
+        bd = base.get("draws_frame")
+        for sname, r in rows.items():
+            dd = r.get("draws_frame")
+            if sname != "a1" and isinstance(bd, float) and isinstance(dd, float) and bd == bd and dd == dd and bd > 0 and abs(dd - bd) / bd > 0.05:
+                p(f"- WARNING: {sname} drew {dd:.0f} draws/frame against a1's {bd:.0f} ({(dd - bd) / bd * 100:+.1f}%): not the same view "
+                  "(spot, camera or what is on screen differs) - its A/B numbers compare different work")
         for sname, r in rows.items():
             if sname in ("a1", "a6"):
                 continue

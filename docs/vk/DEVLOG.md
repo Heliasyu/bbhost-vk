@@ -2265,3 +2265,112 @@ without `BBHOST_PARAMS_VRAM=1` (lavapipe: `params ring: … in video memory the 
   bundle + analysis + pgo-merge; the PGO binary writes its profile periodically and on a
   normal exit, merges with llvm-profdata 19, and a `-DBBHOST_PGO_USE` build of it passes the
   stream selftest. Not verifiable here: the game itself (no game files, lavapipe).
+
+## 2026-10-20 (Tue), vk.1-rc6: the 12 ms frame, asynchronous logging, cheaper submissions, PGO
+
+From the rc5 profiling session's plan (`REPORT.md` of the 11:25 session), on top of the kit
+commits. Translator unchanged (cbb93a8a…): the shader caches stay.
+
+### The periodic ~12 ms frame
+`hle_gx_native_token` ran a ~220-line report inline on bb-cp0 every 100,000 token draws:
+~30 `host_log` lines (each a synchronous write) and a `/proc/self/maps` read to name the
+slow guest reads' megabytes (3,158 mappings in the session). The rc5 data put 74 of 92
+frames of 11 ms or more within -5…+25 ms of one. The block is now `native_periodic_report`
+(gx_trace.cpp); the CP stores the due token's id and returns, and `bb-gx-report` (started on
+the first report, polls every 100 ms) writes it. The map naming runs at exit only
+(`hle_gx_scaleform_report` calls the report once more with `name_regions`; the stale-calls
+part takes `g_native_mu` with try_lock there, as the exit can run on a thread that holds it)
+or with `BBHOST_GX_REPORT_MAPS=1`. The counters it prints are atomics and the one map it
+reads is under `g_native_mu` as before, so another thread may print them; the numbers are a
+moment later than the CP's, nothing else. `report_native` (shadow mode) goes the same way.
+
+### Asynchronous logging
+`host_log_line` (log.h) keeps its old shape - tap, then a loop around one write - but the
+write is `host_log_write2`, out of line, which hands the whole line to the sink when one is
+installed (the shape matters: PGO's function hashes are taken after early inlining, and the
+first version, which changed the inline code, made 640 functions' profiles mismatch, 52 of
+the 300 hottest among them: draw_impl, cp_thread, gx_hook, prefetch_stage_images…; with the
+shape kept, 10 do - the functions this build changed).
+The sink (core/log_async.cpp): 16,384 slots of 244 bytes; a line takes 1-5 consecutive
+tickets, reserved with one CAS on `head` when they fit, copied, and published per slot with
+a release store of ticket+1. One writer thread drains in ticket order into a batch, writes
+it when it reaches 4096 - 5 × 244 bytes at a line end (≤ PIPE_BUF: a pipe write that size is
+atomic, so tee's input never has another process's bytes inside a line), waits up to 2 ms for
+a producer mid-copy, and sleeps on a futex (10 ms timeout; a producer wakes it only if its
+`sleeping` flag is set, after a seq_cst fence). A full ring: the producer takes the drain
+lock and drains it itself (order kept; what a synchronous write would have cost), or, while
+the writer holds it (inside a write to a pipe nobody reads), yields and then sleeps 200 us
+at a time - never a direct write, which would reorder lines and (found by the test) let a
+large batch write interleave inside a line. Producers use no thread-locals, locks or
+errno-setting calls (raw syscalls for the futex wake, yield and sleep; no stack protector),
+as guest threads and the fault handler log. `host_log_sync_mode()` (sink off, then a bounded
+flush: 500 ms for the lock, as long for producers mid-copy) runs at every exit: the window
+closing, `BBHOST_EXIT_FLIP/SECONDS`, the device-lost exit, SIGTERM (`on_term`), the fault
+handler after `hle_fs_host()`, a new SIGABRT handler (SA_RESETHAND; re-raises, so the core
+dump is as before), `atexit` (guest `exit()`), the stream selftest. A SIGKILL or the OOM
+killer loses at most what the writer had not written yet (milliseconds). The F11 tap is
+called by the logging thread as before, so the snapshot's log excerpt and its times are
+unchanged. Box: 376-426 ns a line synchronously to a file, 147-175 ns queued (the
+producer's side); the gain in the game is the stalls on a slow file, not the average.
+`log_async_test`: 8 threads × 20,000 lines of 0-899 bytes of padding (1-4 slots) into a
+pipe whose reader starts 300 ms late (the ring fills; producers drain and wait): every line
+arrives once, byte-exact, each thread's lines in order, the lines logged after the joins
+and after sync mode last; also clean under ThreadSanitizer (built by hand).
+
+### Submissions
+The one userptr left on AMD/Linux was bbhost's own GX table ring (`hle_kernel_map_host`,
+0xf000000000, 128 MiB; the game's flexible mappings in the session had no GPU bits and
+were not imported). amdgpu revalidates a userptr at every CS (`hmm_range_fault`, 22.6% of
+bb-submit). Where direct memory goes in as dma-bufs, `choose_dmem_import` now probes a
+1 MiB sealed memfd of its own through /dev/udmabuf; if that imports (and the ring fits a
+piece or sparse binding joins pieces), host mappings are made as sealed memfds
+(`MAP_SHARED | MAP_FIXED_NOREPLACE` at the same addresses) and `import_anon` imports them
+through `dmabuf_span` with that memfd. A failure there logs and falls back to the host
+pointer. Not testable on the box (lavapipe takes host pointers; no /dev/udmabuf): the
+user's log lines in TESTING.md's rc6 checks say whether it took.
+dma-buf pieces: `size_limit_mb` of the udmabuf module (read at start; default 64) decides
+the piece size, up to 1 GiB; each piece was one more BO in every submission's list (RADV's
+global BO list: every allocation is in every CS). `BBHOST_SUBMIT_EVERY_JOB=0` exists and
+was rejected in test4 (flashing effects): no new A/B.
+
+### Small items
+- Recorder wait: RDTSC for its own timing where CPUID 0x80000007 EDX[8] (invariant TSC)
+  and the kernel's clocksource is `tsc`; ticks become ns at the reports from the TSC rate
+  measured against CLOCK_MONOTONIC since the thread started. `BBHOST_RECORDER_TSC=2`
+  forces it (a test: the box's clocksource is not the TSC); the selftest passes either way.
+- `host_memmem`: AVX2 (runtime check) or SSE2 first/last-byte filter, then memcmp; the
+  byte loop for the tail. `memmem_test`: 197,765 cases against the byte loop (alphabets of
+  1-4 letters, needles 1-40, every offset 0-16 and three end cuts), 0 differences. 512 MiB
+  of varied bytes: 197-320 ms byte loop, 83-98 ms new (noisy box).
+- Kit: game.log on tmpfs (symlinked from the step folder while the game runs, moved there
+  by `log_settle` at the exit and in the cleanup), `gpuq_record_bg` (gpu_scheduler +
+  amdgpu CS tracepoints, 8 s) in every step's second window, and a draws-per-frame column
+  with a >5% warning in the analysis (it flags the rc5 session's a1 and a2: 1008 and 1432
+  draws a frame against ~1500-1600 for a3-a5 and m4). Dry runs with the fake game: a1, m4
+  and a6, Ctrl-C, the tarball.
+
+### PGO
+`packaging/vk/build.sh` with `PGO_PROFILE=bbhost.profdata` builds bbhost.bin with
+`-fprofile-use` (ThinLTO stays on) and `bbhost.bin.nopgo` in build-ci/build-nopgo, both
+through ci_build.sh's ctest. CMake: `-DBBHOST_PGO=OFF` ignores the profile;
+`-DBBHOST_PGO_WARN=ON` reports mismatches. The profile came from the ea885ba-era kit binary;
+against this commit 10 of its 6,696 functions no longer match (their counts are discarded,
+they are built as without PGO): `host_memmem`, `hle_gx_trace_draw`, `hle_gx_native_token`,
+`hle_kernel_map_host`, `hle_gx_scaleform_report`, `gpu::cpu_section`, `recorder_thread`,
+`choose_dmem_import`, `rebuild_page_tables`, `main`. Of the profile's 300 hottest functions,
+4 are among them (`host_memmem`, `hle_gx_native_token`, `rebuild_page_tables`,
+`recorder_thread`). New functions (the log writer, the reporter) have no profile.
+
+### Not in this build: the per-stage exact-key cache
+`resolve_key_stage` reads V#/T#/S# words through user-data pointers into guest memory
+(`resolve_via_plan` → `resolve_resource_impl`) unless every binding comes from the GX
+records; `prefetch_stage_images` turns words into views through the texture cache, which
+re-uploads on CPU writes it detects inside `texture_view`; `resolve_stage_buffers` updates
+the buffer shadows, copy versions and the temporal observer. A cache hit would have to
+prove the guest words unchanged - nothing tracks writes to those tables, and write-
+protecting them would fault every frame - and would skip side effects the texture cache and
+shadows rely on. Nothing on the build box runs the draw path (no game), so "byte-identical
+with the cache on and off" cannot be shown here. For build 6: a draw-path replay harness
+(recorded GX streams through draw_impl with the cache on/off, packets compared), then a
+cache limited to `GxStagePlan::all_records` stages (records copied at the call, keyed by
+their bytes) as the first, provable step.
