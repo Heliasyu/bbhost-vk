@@ -43,6 +43,9 @@ bool host_opt_get(const char* key);
 bool host_opt_resolution(int* w, int* h);
 // Texture detail: the LOD bias every sampler adds to the game's own (cheap: an atomic).
 float host_opt_mip_bias();
+// Submit split (More > Performance, experimental): check every n-th draw
+// whether the GPU has run dry; 0 off. Live, an atomic. BBHOST_SUBMIT_SPLIT wins.
+unsigned host_opt_submit_split();
 int host_opt_resolution_index();
 void host_opt_set_resolution_index(int i);
 // The game's frame rate (engine/frame_rate.h): 30, 60, 90, or 0 for

@@ -4,6 +4,7 @@
 #include "host/foreign_hooks.h"
 #include "host/gpu_internal.h"
 #include "host/fsr4_pass.h"
+#include "host/options.h"
 #include "host/perf_capture.h"
 #include "host/settings.h"
 #include "host/shader_patch.h"
@@ -5644,15 +5645,19 @@ SubmitLatencyTotals submit_latency_totals() {
 // instead of keeping the GPU idle until the job ends. A submission at a draw
 // boundary mid-job is what BBHOST_PASS_BREAK_SUBMIT and the renderer's own
 // flush_locked callers already do; the labels recorded so far land at its
-// end, after their work, as they would at the job's end.
+// end, after their work, as they would at the job's end. The launcher's
+// Submit split (More > Performance) sets it live; the env var, when set, wins.
 void submit_split_point() {
-    static const std::uint64_t every = [] {
+    static const long long forced = [] {
         const char* e = std::getenv("BBHOST_SUBMIT_SPLIT");
-        const std::uint64_t n = e ? std::strtoull(e, nullptr, 10) : 0ull;
-        if (n) host_log("gpu: BBHOST_SUBMIT_SPLIT=%llu: a recording is submitted mid-job when the GPU has run dry (checked every %llu draws)",
-                        static_cast<unsigned long long>(n), static_cast<unsigned long long>(n));
-        return n;
+        return e && e[0] ? static_cast<long long>(std::strtoull(e, nullptr, 10)) : -1ll;
     }();
+    const std::uint64_t every = forced >= 0 ? static_cast<std::uint64_t>(forced) : host_opt_submit_split();
+    static std::atomic<std::uint64_t> logged{0};
+    if (logged.load(std::memory_order_relaxed) != every + 1 && logged.exchange(every + 1, std::memory_order_relaxed) != every + 1 && every)
+        host_log("gpu: submit split %llu%s: a recording is submitted mid-job when the GPU has run dry (checked every %llu draws)",
+                 static_cast<unsigned long long>(every), forced >= 0 ? " (BBHOST_SUBMIT_SPLIT)" : "",
+                 static_cast<unsigned long long>(every));
     if (!every) return;
     static thread_local std::uint64_t seen = 0;
     if (++seen % every != 0) return;

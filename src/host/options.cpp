@@ -141,8 +141,10 @@ enum SettingId {
     kTrophyPopups,
     kMipBias,
     kPadIcons,
-    kCompileNote,
     kGameLanguage,
+    kCompileNote,  // after kGameLanguage, as in g_set: the table is positional
+    // More > Performance (experimental): BBHOST_SUBMIT_SPLIT as a setting.
+    kSubmitSplit,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -414,6 +416,11 @@ Setting g_set[kSettingCount] = {
      "The game's own text and voices. Takes effect at the next start.", true},
     {"compile_note", "Building shaders note", {"On", "Off"}, 0,
      "\"Building shaders\" in a corner while the game builds shaders for something it shows for the first time (a brief stutter is normal then).", false},
+    // test7's BBHOST_SUBMIT_SPLIT (host/gpu.cpp submit_split_point): every n-th
+    // draw, if the GPU has run dry, the recording so far is submitted mid-job.
+    // Live; the env var wins. Launcher only (More > Performance), no F10 row.
+    {"submit_split", "Submit split", {"Off", "32", "64", "128", "256"}, 0,
+     "Experimental: every N draws, if the GPU has nothing left to do, hand it the work recorded so far instead of waiting for the job's end.", false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -900,6 +907,7 @@ void apply(int id) {
         case kPadIcons:
         case kCompileNote:
         case kGameLanguage:
+        case kSubmitSplit:
             break;  // the settings object carries them (host/settings.h)
         case kSsao:
         case kMotionBlur:
@@ -993,6 +1001,7 @@ bool on_of(int id) { return reads_on(g_set[id], g_set[id].index); }
 int index_of(int id) { return g_set[id].index; }
 
 std::atomic<float> g_mip_bias{0.0f};  // host_opt_mip_bias(): the samplers read it on every lookup
+std::atomic<unsigned> g_submit_split{0};  // host_opt_submit_split(): read at every draw
 
 void rebuild_settings() {
     HostSettings h;
@@ -1064,6 +1073,11 @@ void rebuild_settings() {
     h.button_prompts = index_of(kButtonPrompts) < 0 ? 0 : index_of(kButtonPrompts);
     h.pad_icons = std::clamp(index_of(kPadIcons), 0, 2);
     h.compile_note = on_of(kCompileNote);
+    {
+        const int i = index_of(kSubmitSplit);
+        h.submit_split = i > 0 ? static_cast<unsigned>(std::strtoul(g_set[kSubmitSplit].values[static_cast<std::size_t>(i)], nullptr, 10)) : 0u;
+        g_submit_split.store(h.submit_split, std::memory_order_relaxed);
+    }
     {
         // The PS4's language codes, in the setting's order.
         static constexpr int kLang[] = {1, 2, 3, 4, 5, 8, 0};
@@ -2019,3 +2033,4 @@ std::string host_account_detail() { return account_detail(); }
 bool host_account_take_save() { return g_acct_save.exchange(false); }
 
 float host_opt_mip_bias() { return g_mip_bias.load(std::memory_order_relaxed); }
+unsigned host_opt_submit_split() { return g_submit_split.load(std::memory_order_relaxed); }
