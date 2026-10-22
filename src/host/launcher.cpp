@@ -637,7 +637,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         }
 
         ImGui::SeparatorText("Display");  // rc2: the F10 menu's sections, mirrored
-        ImGui::Checkbox("Fullscreen", &fullscreen);
+        ImGui::Checkbox("Fullscreen (borderless)", &fullscreen);
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kCapLabels[] = {"30 fps", "60 fps", "90 fps", "120 fps", "Uncapped"};
         ImGui::Combo("Frame rate", &cap_choice, kCapLabels, 5);

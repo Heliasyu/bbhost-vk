@@ -125,7 +125,7 @@ struct Row {
 
 Setting g_set[kSettingCount] = {
     {"window_mode", "Window mode", {"Windowed", "Fullscreen"}, 0,
-     "Fullscreen is borderless: the desktop resolution, no mode switch.", false},
+     "Fullscreen is a borderless window over the whole display: the desktop resolution, no mode switch, and overlays and pop-ups show over it.", false},
     {"vsync", "V-Sync", {"On", "Off"}, 0,
      "Off presents as soon as a frame is ready, and can tear.", false},
     // The game's own pace (engine/frame_rate.h), the same five the game's Frame
@@ -1435,7 +1435,10 @@ void options_panel_frame(float display_w, float display_h) {
         }
         const Setting& s = g_set[row.setting];
         host_overlay_text(px + 40.0f, y + text_dy, 0.8f, sel ? 0xffffffffu : 0xbbbbbbffu, s.label);
+        // The value as shown: the saved word, but Fullscreen says what it is (there is no
+        // exclusive mode; the window covers the display, and overlays show over it).
         const char* v = s.values[static_cast<std::size_t>(s.index)];
+        if (std::strcmp(s.key, "window_mode") == 0 && std::strcmp(v, "Fullscreen") == 0) v = "Fullscreen (borderless)";
         const float vw = host_overlay_text_width(0.8f, v);
         const float vx = px + pw - 60.0f - vw;
         g_row_vl[r] = vx - 30.0f;
