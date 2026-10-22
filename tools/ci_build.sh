@@ -89,7 +89,7 @@ if [ ! -f "$P/lib/libavcodec.a" ]; then
         --disable-iconv --disable-zlib --disable-bzlib --disable-lzma --extra-cflags=-O2 \
         > "$W/ffmpeg-configure.log" 2>&1 \
         && make -j"$JOBS" > "$W/ffmpeg-build.log" 2>&1 && make install > "$W/ffmpeg-install.log" 2>&1) \
-        || { tail -20 "$W/ffmpeg-configure.log" "$W/ffmpeg-build.log"; exit 1; }
+        || { tail -n 20 "$W/ffmpeg-configure.log" "$W/ffmpeg-build.log"; exit 1; }
     sed -i 's/ -latomic/ -l:libatomic.a/' "$P"/lib/pkgconfig/*.pc
 fi
 

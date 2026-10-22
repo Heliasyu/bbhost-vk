@@ -118,7 +118,7 @@ if [ ! -f "$P/lib/libavcodec.a" ]; then
         --disable-iconv --disable-zlib --disable-bzlib --disable-lzma --extra-cflags=-O2 \
         > "$W/ffmpeg-configure.log" 2>&1 \
         && make -j"$(nproc)" > "$W/ffmpeg-build.log" 2>&1 && make install > "$W/ffmpeg-install.log" 2>&1) \
-        || { tail -20 "$W/ffmpeg-configure.log" "$W/ffmpeg-build.log"; exit 1; }
+        || { tail -n 20 "$W/ffmpeg-configure.log" "$W/ffmpeg-build.log"; exit 1; }
 fi
 
 # ffmpeg's .pc files ask for -latomic, a shared library that is not on every
