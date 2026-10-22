@@ -46,14 +46,16 @@ bool finite3(const float v[3]) { return std::isfinite(v[0]) && std::isfinite(v[1
 // by their vtables (tools/class_catalog): SprjChrTimeActModule (the animation
 // it plays), SprjChrActionRequestModule and SprjChrBehaviorScriptModule. A
 // module not found is zeros. The container's slots, with each one's vtable,
-// go to the log once. Off unless set.
+// go to the log once. Then 0x4000 bytes of the local player's game data
+// (GameDataMan +0x08, engine/player_data.h) in four more blocks - where the
+// inventory's counts are, Quicksilver Bullets among them. Off unless set.
 constexpr std::uint64_t kScanVtables[3] = {0x5735190, 0x5734350, 0x57350f0};
 constexpr std::size_t kScanBytes = 0x1000;
 struct ScanHead {
     std::uint64_t t_us;
     std::uint32_t buttons;
     std::uint8_t l2, r2;
-    std::uint16_t blocks;  // 4: the ChrIns, then the three modules
+    std::uint16_t blocks;  // 8: the ChrIns, the three modules, then the game data
 };
 void read_block(std::uint64_t at, std::uint8_t* out) {
     std::memset(out, 0, kScanBytes);
@@ -73,7 +75,7 @@ void chr_scan() {
             host_log("world: BBHOST_CHR_SCAN cannot open %s", path);
             return;
         }
-        host_log("world: BBHOST_CHR_SCAN to %s (%zu bytes a frame)", path, sizeof(ScanHead) + 4 * kScanBytes);
+        host_log("world: BBHOST_CHR_SCAN to %s (%zu bytes a frame)", path, sizeof(ScanHead) + 8 * kScanBytes);
     }
     const std::uint64_t man = ptr(slot(kWorldChrMan));
     const std::uint64_t chr = man ? ptr(man + 0x60) : 0;
@@ -99,10 +101,14 @@ void chr_scan() {
     h.buttons = pad.buttons;
     h.l2 = pad.l2;
     h.r2 = pad.r2;
-    h.blocks = 4;
-    static std::uint8_t buf[4][kScanBytes];
+    h.blocks = 8;
+    static std::uint8_t buf[8][kScanBytes];
     read_block(chr, buf[0]);
     for (int k = 0; k < 3; ++k) read_block(found[k], buf[1 + k]);
+    constexpr std::uint64_t kGameDataMan = 0x593b130;
+    const std::uint64_t gdm = ptr(slot(kGameDataMan));
+    const std::uint64_t record = gdm ? ptr(gdm + 0x08) : 0;
+    for (int k = 0; k < 4; ++k) read_block(record ? record + static_cast<std::uint64_t>(k) * kScanBytes : 0, buf[4 + k]);
     std::fwrite(&h, sizeof(h), 1, f);
     std::fwrite(buf, sizeof(buf), 1, f);
 }
