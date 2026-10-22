@@ -49,6 +49,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -844,6 +845,12 @@ void hle_watch_report() {}
 #endif
 
 int main(int argc, char** argv) {
+    // --version: the build's name and revision on stdout, nothing else started
+    // (the launcher reads it to tell an update apart).
+    if (argc == 2 && std::strcmp(argv[1], "--version") == 0) {
+        std::printf("%s %s\n", BBHOST_VERSION, BBHOST_GIT_REV);
+        return 0;
+    }
 #if defined(_WIN32)
     hle_kernel_reserve_guest_windows();  // before anything else can take those addresses
     write_watch_install();               // the vectored handler for write-protected texture memory
