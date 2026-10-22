@@ -129,6 +129,7 @@ enum SettingId {
     kHdrBoost,
     kMenuKey,
     kTrophyPopups,
+    kMipBias,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -381,6 +382,13 @@ Setting g_set[kSettingCount] = {
     {"menu_key", "Menu key", {"F10", "Insert", "Home", "F1"}, 0, "The key that opens this menu. F10 always works too.", false},
     {"trophy_popups", "Trophy pop-ups", {"On", "Off"}, 0,
      "A card in the top right corner when you earn a trophy, with its grade and your progress.", false},
+    // The samplers' LOD bias (host/textures.cpp): with the scene rendered below
+    // the output, textures fall to smaller mips sooner than they would at the
+    // output's size; Auto puts back what the render scale took (log2 of it).
+    {"mip_bias", "Texture detail", {"Auto", "-2.0", "-1.5", "-1.0", "-0.5", "0.0", "+0.5", "+1.0"}, 5,
+     "The texture sharpness bias. Auto matches the upscaler's render scale (sharper textures when upscaling; can shimmer). "
+     "0.0 is the game's own; below 0 sharper, above 0 softer.",
+     false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -422,6 +430,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kUpscaleReactive},
     {Row::Option, nullptr, kUpscaleJitter},
     {Row::Option, nullptr, kAntiAlias},
+    {Row::Option, nullptr, kMipBias},
     {Row::Header, "GRAPHICS"},
     {Row::Option, nullptr, kSsao},
     {Row::Option, nullptr, kMotionBlur},
@@ -953,6 +962,8 @@ HostSettings g_settings;
 bool on_of(int id) { return reads_on(g_set[id], g_set[id].index); }
 int index_of(int id) { return g_set[id].index; }
 
+std::atomic<float> g_mip_bias{0.0f};  // host_opt_mip_bias(): the samplers read it on every lookup
+
 void rebuild_settings() {
     HostSettings h;
     h.serial = g_serial.load(std::memory_order_acquire);
@@ -1049,6 +1060,17 @@ void rebuild_settings() {
     h.five_players = on_of(kFivePlayers);
     h.upscaler = std::clamp(index_of(kUpscaler), 0, 3);
     h.upscale_quality = std::clamp(index_of(kUpscaleQuality), 0, 4);
+    {
+        const int i = index_of(kMipBias);
+        if (i == 0) {
+            static constexpr float kScale[] = {1.0f, 1.5f, 1.7f, 2.0f, 3.0f};
+            const bool temporal = h.upscaler >= 2;
+            h.mip_bias = temporal ? -std::log2(kScale[std::clamp(h.upscale_quality, 0, 4)]) : 0.0f;
+        } else {
+            h.mip_bias = std::strtof(g_set[kMipBias].values[static_cast<std::size_t>(i)], nullptr);
+        }
+        g_mip_bias.store(h.mip_bias, std::memory_order_relaxed);
+    }
     // Auto: off while FSR 4.1.1 is the upscaler and runs (host_opt_fsr4_unavailable).
     // It runs only below Native AA: Native AA is stock rendering, the scene not
     // split and no FSR pass (DEVLOG Phase 1, decision 2), so Auto keeps the
@@ -1954,3 +1976,5 @@ std::string host_account_outcome() {
 }
 std::string host_account_detail() { return account_detail(); }
 bool host_account_take_save() { return g_acct_save.exchange(false); }
+
+float host_opt_mip_bias() { return g_mip_bias.load(std::memory_order_relaxed); }

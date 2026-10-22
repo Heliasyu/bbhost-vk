@@ -14,6 +14,7 @@
 #include "core/write_watch.h"
 #include "hle/modules.h"
 #include "log.h"
+#include "host/options.h"
 
 #include <atomic>
 #include <limits>
@@ -2793,17 +2794,23 @@ VkSampler sampler_for(const std::uint32_t* s, bool compare) {
     struct Memo {
         std::uint32_t w[4];
         bool compare;
+        float bias;
         VkSampler sampler = VK_NULL_HANDLE;
     };
     static Memo memo[64];  // under g.mu
+    // Texture detail (host_opt_mip_bias): part of the sampler, so a change
+    // makes new ones (samplers are few and never destroyed).
+    const float extra_bias = host_opt_mip_bias();
     Memo& m = memo[(s[0] ^ (s[1] * 31u) ^ (s[2] * 17u) ^ (s[3] * 7u) ^ (compare ? 1u : 0u)) & 63];
-    if (m.sampler && m.compare == compare && std::memcmp(m.w, s, 16) == 0) return m.sampler;
+    if (m.sampler && m.compare == compare && m.bias == extra_bias && std::memcmp(m.w, s, 16) == 0) return m.sampler;
     std::uint64_t key = fnv1a(s, 16);
     key = fnv1a(&compare, 1, key);
+    key = fnv1a(&extra_bias, sizeof(extra_bias), key);
     auto it = g_samplers.find(key);
     if (it != g_samplers.end()) {
         std::memcpy(m.w, s, 16);
         m.compare = compare;
+        m.bias = extra_bias;
         m.sampler = it->second;
         return it->second;
     }
@@ -2836,6 +2843,8 @@ VkSampler sampler_for(const std::uint32_t* s, bool compare) {
     std::int32_t bias = static_cast<std::int32_t>(s[2] & 0x3fff);
     if (bias & 0x2000) bias -= 0x4000;
     sci.mipLodBias = static_cast<float>(bias) / 256.0f;
+    // Only where there are mips to choose from (render targets and UI have one).
+    if (mip != 0) sci.mipLodBias = std::clamp(sci.mipLodBias + extra_bias, -16.0f, 15.99f);
     // The comparison only applies to samplers the shader uses with
     // image_sample_c* (Vulkan needs compareEnable for Dref ops and forbids it
     // for plain sampling); DEPTH_COMPARE_FUNC gives the function.

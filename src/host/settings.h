@@ -36,7 +36,10 @@ struct HostSettings {
     bool hdr_peak_auto = true;
     float hdr_peak = 1000.0f;        // nits, when not from the display
     float hdr_boost = 0.25f;         // 0..1: the share of the room above paper white the highlights use
-    bool trophy_popups = true;       // the in-game pop-up when a trophy is earned (host/trophies.h)
+    bool trophy_popups = true;
+    // Texture detail (the samplers' LOD bias, added to the game's own): -1 a mip
+    // sharper. NAN is Auto: log2(render / output) under FSR 3.1 / 4.1.1.
+    float mip_bias = 0.0f;       // the in-game pop-up when a trophy is earned (host/trophies.h)
     int menu_key = 0;                // 0 F10, 1 Insert, 2 Home, 3 F1 (F10 always works)
     int res_width = 1920, res_height = 1080;  // the render resolution (BBHOST_RES wins)
 

@@ -41,6 +41,8 @@ bool host_opt_get(const char* key);
 // The render resolution the player chose, or what BBHOST_RES says. False when
 // neither parses. Read once by the loader - it is a patch on the image.
 bool host_opt_resolution(int* w, int* h);
+// Texture detail: the LOD bias every sampler adds to the game's own (cheap: an atomic).
+float host_opt_mip_bias();
 int host_opt_resolution_index();
 void host_opt_set_resolution_index(int i);
 // The game's frame rate (engine/frame_rate.h): 30, 60, 90, or 0 for
