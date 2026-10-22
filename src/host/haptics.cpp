@@ -64,16 +64,21 @@ struct Envelope {
 };
 
 // What can be tuned between test rounds without a build:
-// BBHOST_HAPTICS_TUNE="cutoff=160,sustain=0.15,floor=0.003,carrier=0.5,gain=3,rumble=0.8"
+// BBHOST_HAPTICS_TUNE="cutoff=160,sustain=0,floor=0.006,ratio=2,slow=800,carrier=0.5,gain=3,rumble=0.8"
 //   cutoff   the effects' low-pass, Hz (what the motors are given of the sound)
 //   sustain  how much of a steady sound stays (0: only hits; 1: everything)
 //   floor    the level below which a sound is not felt at all
+//   ratio    how much louder than the last `slow` ms a sound must be to be a hit
+//   slow     that window, ms - longer than a gust of wind
 //   carrier  0: the filtered sound itself; 1: a 150 Hz tone that follows it
 //   gain     the effects' level before the soft limit
 //   rumble   the converted rumble's level
 // BBHOST_HAPTICS_CHANNELS="2,3": the device channels of the left and right motors.
 struct Tuning {
-    float cutoff = 160.0f, sustain = 0.15f, floor = 0.003f, carrier = 0.5f, gain = 3.0f, rumble = 0.8f;
+    // Round 7: with 15% of every steady sound kept, a 1.4x rise over 400 ms
+    // counted as a hit and a floor of 0.003, wind and ambience were felt as a
+    // constant buzz. Only hits now: twice the last 800 ms, above a higher floor.
+    float cutoff = 160.0f, sustain = 0.0f, floor = 0.006f, ratio = 2.0f, slow = 800.0f, carrier = 0.5f, gain = 3.0f, rumble = 0.8f;
     int left = 2, right = 3;
 };
 Tuning read_tuning() {
@@ -92,6 +97,8 @@ Tuning read_tuning() {
                 else if (k == "sustain") t.sustain = std::clamp(v, 0.0f, 1.0f);
                 else if (k == "floor") t.floor = std::clamp(v, 0.0f, 1.0f);
                 else if (k == "carrier") t.carrier = std::clamp(v, 0.0f, 1.0f);
+                else if (k == "ratio") t.ratio = std::clamp(v, 1.0f, 10.0f);
+                else if (k == "slow") t.slow = std::clamp(v, 50.0f, 5000.0f);
                 else if (k == "gain") t.gain = std::clamp(v, 0.0f, 50.0f);
                 else if (k == "rumble") t.rumble = std::clamp(v, 0.0f, 2.0f);
             }
@@ -118,8 +125,8 @@ struct Side {
         lp2.lowpass(t.cutoff, 0.707f);
         fast.attack = follow(1.0f);
         fast.release = follow(40.0f);
-        slow.attack = follow(400.0f);
-        slow.release = follow(400.0f);
+        slow.attack = follow(t.slow);
+        slow.release = follow(t.slow);
         gate.attack = follow(2.0f);
         gate.release = follow(60.0f);
     }
@@ -129,8 +136,8 @@ struct Side {
         const float low = lp2.run(lp1.run(x));
         const float e = fast.run(std::fabs(low));
         const float s = slow.run(std::fabs(low));
-        // A hit: louder now than the last half second has been.
-        const float hit = std::clamp((e - 1.4f * s) / (e + 1e-6f), 0.0f, 1.0f);
+        // A hit: `ratio` times louder now than the last `slow` ms have been.
+        const float hit = std::clamp((e - t.ratio * s) / (e + 1e-6f), 0.0f, 1.0f);
         const float g = gate.run(hit);
         // Under the floor nothing is felt, with a soft knee to it.
         const float audible = std::clamp((e - t.floor) / (t.floor + 1e-6f), 0.0f, 1.0f);
@@ -443,8 +450,10 @@ void haptics_game_audio(const float* frames, unsigned count, float gain) {
         g_tune = read_tuning();
         for (Side& s : g_side) s.init(g_tune);
         if (std::getenv("BBHOST_HAPTICS_TUNE") || std::getenv("BBHOST_HAPTICS_CHANNELS")) {
-            host_log("haptics: tuning cutoff %.0f Hz, sustain %.2f, floor %.4f, carrier %.2f, gain %.2f, rumble %.2f; motors on channels %d,%d",
+            host_log("haptics: tuning cutoff %.0f Hz, sustain %.2f, floor %.4f, ratio %.2f, slow %.0f ms, carrier %.2f, gain %.2f, "
+                     "rumble %.2f; motors on channels %d,%d",
                      static_cast<double>(g_tune.cutoff), static_cast<double>(g_tune.sustain), static_cast<double>(g_tune.floor),
+                     static_cast<double>(g_tune.ratio), static_cast<double>(g_tune.slow),
                      static_cast<double>(g_tune.carrier), static_cast<double>(g_tune.gain), static_cast<double>(g_tune.rumble),
                      g_tune.left + 1, g_tune.right + 1);
         }
