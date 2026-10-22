@@ -1182,9 +1182,11 @@ bool live_resolution_install(ElfImage* image) {
     g_image = image;
     int w = 0, h = 0;
     if (!host_opt_resolution(&w, &h)) w = 1920, h = 1080;
+    // The Live resolution change setting; BBHOST_LIVE_RESOLUTION=0/1 wins.
     const bool live = [] {
         const char* e = std::getenv("BBHOST_LIVE_RESOLUTION");
-        return !(e && e[0] == '0');
+        if (e && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
+        return host_opt_get("live_resolution");
     }();
     const std::uint64_t start_px = static_cast<std::uint64_t>(w) * static_cast<std::uint32_t>(h);
     const bool tight = live && host_gpu_memory_tight();
@@ -1224,7 +1226,7 @@ bool live_resolution_install(ElfImage* image) {
         host_log("resolution: live changes up to %.1f million pixels, the GPU's memory is tight (larger sizes apply at the next start)",
                  static_cast<double>(g_live_max_px) / 1e6);
     if (!live) {
-        host_log("resolution: changes wait for the next run (BBHOST_LIVE_RESOLUTION=0)");
+        host_log("resolution: changes wait for the next run (Live resolution change: Off)");
         return false;
     }
     g_device_slot = static_cast<const std::uint64_t*>(guest_ptr(image->mem, guest(kGxDeviceSlot)));

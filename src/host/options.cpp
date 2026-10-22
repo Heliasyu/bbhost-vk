@@ -103,6 +103,8 @@ enum SettingId {
     kAdaptiveTriggers,
     kTriggerStrength,
     kMenuHaptics,
+    // engine/live_resolution.h: read once at the start.
+    kLiveResolution,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -306,6 +308,15 @@ Setting g_set[kSettingCount] = {
      "HD: a light tap as the cursor moves through the title menu, the pause menu, the inventory and the System menu, "
      "and a firmer one for a decide or back.",
      false},
+    // On: the Resolution setting applies in the game (engine/live_resolution.h). What it costs
+    // is memory set aside at the start for the largest display's size - display buffers and
+    // the render-target heap - and, when the game starts below that size, buffers larger than
+    // the picture that are cleared every frame. Off sizes everything for the starting
+    // resolution; a change applies at the next start.
+    {"live_resolution", "Live resolution change", {"On", "Off"}, 0,
+     "On: a new Resolution applies in the game. Off: it applies at the next start, and the memory and buffers kept "
+     "ready for larger sizes are not set aside (a little faster when the game runs below your display's size).",
+     true},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -315,6 +326,7 @@ Setting g_set[kSettingCount] = {
 const Row g_rows[] = {
     {Row::Header, "DISPLAY"},
     {Row::Option, nullptr, kResolution},
+    {Row::Option, nullptr, kLiveResolution},
     {Row::Option, nullptr, kWindowMode},
     {Row::Option, nullptr, kVsync},
     {Row::Option, nullptr, kFrameCap},
