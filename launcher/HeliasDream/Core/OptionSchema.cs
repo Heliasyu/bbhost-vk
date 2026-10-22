@@ -102,6 +102,8 @@ public static class OptionSchema
         ["mouse_auto_rotation"] = "Off: while you use the mouse, the camera stays where you put it instead of swinging behind you as you move. A controller always gets the game's own camera.",
         ["mouse_menu"] = "In menus: click confirms, right-click goes back, the wheel moves the cursor. A click only reaches menus while one is open, so it never swings a weapon.",
         ["button_prompts"] = "What the game's own button prompts and tutorial notes show. Auto follows the device you used last, keyboard or controller.",
+        ["trophy_popups"] = "When you earn a trophy, a frosted glass card slides into the top right corner with its medal, its name and your progress, and a DualSense gives a firm tap. The platinum is awarded once every base-game trophy is earned.",
+        ["mip_bias"] = "How sharp textures stay at a distance. With an upscaler the scene renders smaller, so the game picks blurrier texture levels sooner; Auto puts back what the render scale took (Performance: one level sharper), as AMD recommends for FSR. 0.0 is the game's own. Sharper can shimmer on fine patterns. Changes live.",
         ["skip_logos"] = "Skips the three company logos before the title screen, and the warning shown when the last session did not end with Exit Game.",
         ["change_appearance"] = "The Hunter's Dream mirror opens the character appearance editor (the game's unused \"Put on Disguise\").",
         ["rebirth"] = "With the Yharnam Stone, the Altar of Despair resets your level and attributes so you can rebuild your character.",
@@ -161,6 +163,8 @@ public static class OptionSchema
             new OptionDef("upscale_reactive", "Reactive mask", OffOn, 1, "Keeps fog, particles and the lantern's glow from smearing."),
             new OptionDef("upscale_jitter", "Camera jitter", OffOn, 1, "Lets the upscaler rebuild fine detail."),
             new OptionDef("anti_alias", "Game anti-aliasing", new[] { "On", "Off", "Auto" }, 2, "Auto: off while FSR 4.1.1 upscales, on otherwise."),
+            new OptionDef("mip_bias", "Texture detail", new[] { "Auto", "-2.0", "-1.5", "-1.0", "-0.5", "0.0", "+0.5", "+1.0" }, 5,
+                "Auto matches the upscaler; below 0 sharper textures, above softer."),
         }),
     };
 
@@ -223,6 +227,7 @@ public static class OptionSchema
         new("Game", new[]
         {
             new OptionDef("skip_logos", "Skip company logos", OffOn, 0, "And the warning after a session that did not end with Exit Game.", true),
+            new OptionDef("trophy_popups", "Trophy pop-ups", OnOff, 0, "A card in the corner when you earn a trophy."),
             new OptionDef("change_appearance", "Hunter's Dream mirror", OnOff, 0, "The Dream's mirror opens the appearance editor.", true),
             new OptionDef("rebirth", "Rebirth at the Altar", OnOff, 0, "With the Yharnam Stone, the Altar of Despair resets your level.", true),
             new OptionDef("five_players", "Five players", OnOff, 0, "Two invaders in some areas; all players need it.", true),

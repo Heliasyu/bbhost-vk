@@ -27,6 +27,8 @@ public sealed class Ctx
     public required Func<string?, System.Threading.Tasks.Task<string?>> PickFolder { get; init; }
     /// The monitors: connector name and a label; the primary first.
     public required Func<IReadOnlyList<(string Name, string Label, bool Primary)>> Monitors { get; init; }
+    /// The primary monitor's size in pixels.
+    public required Func<(int W, int H)> ScreenSize { get; init; }
 }
 
 public static class Pages
@@ -411,9 +413,90 @@ public static class Pages
         var g2 = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 18 };
         var left = Ui.Col(18, OptionSchema.More.Select(gr => Ui.Group(gr, ctx.Options, ctx.Changed)).ToArray());
         g2.Children.Add(left);
-        Grid.SetColumn(launcher, 1); g2.Children.Add(launcher);
+        var right = Ui.Col(18, launcher, SavesCard(ctx), BestCard(ctx));
+        right.VerticalAlignment = VerticalAlignment.Top;
+        Grid.SetColumn(right, 1); g2.Children.Add(right);
         col.Children.Add(g2);
         return col;
+    }
+
+    // The save and its backups (Core/Saves.cs): the engine's automatic copies, one made on
+    // request, and one put back (the save it replaces backed up first).
+    static Control SavesCard(Ctx ctx)
+    {
+        var saves = new Saves(ctx.Config().DataDir);
+        var status = Ui.Text("", 12, "muted");
+        var list = Ui.Col(6);
+        Button? armed = null;
+        void Fill()
+        {
+            list.Children.Clear();
+            var all = saves.List();
+            status.Text = saves.HasSave ? $"{all.Count} backups · newest {(all.Count > 0 ? all[0].When.ToString("MMM d, HH:mm") : "none yet")}" : "No save yet.";
+            foreach (var b in all.Take(6))
+            {
+                var restore = new Button { Content = "Restore", Classes = { "flat", "ghost" }, Height = 34, Padding = new Thickness(14, 0), FontSize = 13 };
+                restore.Click += (_, _) =>
+                {
+                    // Two clicks: the first arms it, the second restores.
+                    if (!ReferenceEquals(armed, restore))
+                    {
+                        if (armed != null) armed.Content = "Restore";
+                        armed = restore;
+                        restore.Content = "Click again to restore";
+                        return;
+                    }
+                    armed = null;
+                    saves.Restore(b, out var msg);
+                    Fill();
+                    status.Text = msg;
+                };
+                list.Children.Add(Ui.Row2(b.When.ToString("ddd MMM d, HH:mm"), b.Bytes >= 1L << 20 ? $"{b.Bytes / (1L << 20)} MB" : $"{b.Bytes / 1024} KB", restore));
+            }
+        }
+        Fill();
+        var now = Ui.Ghost("Back up now", () =>
+        {
+            var d = saves.BackUpNow();
+            Fill();
+            if (d == null) status.Text = saves.HasSave ? "The backup failed." : "No save to back up yet.";
+        });
+        var open = Ui.Ghost("Open folder", () =>
+        {
+            try
+            {
+                var dir = Directory.Exists(saves.BackupRoot) ? saves.BackupRoot : saves.SaveDir;
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(OperatingSystem.IsWindows() ? "explorer" : "xdg-open", dir) { UseShellExecute = false });
+            }
+            catch (Exception) { }
+        });
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        head.Children.Add(Ui.Col(2, Ui.Eyebrow("Saves"), status));
+        var buttons = Ui.Row(8, now, open);
+        Grid.SetColumn(buttons, 1); head.Children.Add(buttons);
+        return Ui.Tip(Ui.Glass(Ui.Col(10, head, list), 18),
+            "The game backs up your save by itself as it writes it (at most every 5 minutes, the newest 8 kept). Restore puts one back as your save; the save it replaces is backed up first, so nothing is lost. The game must be closed.");
+    }
+
+    // Recommended settings for this PC (Core/Saves.cs, HardwareInfo).
+    static Control BestCard(Ctx ctx)
+    {
+        var (w, h) = ctx.ScreenSize();
+        var hw = HardwareInfo.Detect(w, h);
+        var (settings, why) = hw.Recommend();
+        var detail = Ui.Text(why + " " + string.Join(", ", settings.Select(x => $"{x.Key.Replace('_', ' ')} {x.Value}")), 12, "muted");
+        var apply = Ui.Ghost("Apply", () =>
+        {
+            foreach (var (k, v) in settings) ctx.Options.Set(k, v);
+            detail.Text = "Applied. " + why;
+            ctx.Changed();
+        });
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 14 };
+        head.Children.Add(Ui.Col(2, Ui.Eyebrow("Best settings for this PC"), Ui.Text(hw.Summary, 13, "soft")));
+        apply.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(apply, 1); head.Children.Add(apply);
+        return Ui.Tip(Ui.Glass(Ui.Col(10, head, detail), 18),
+            "Picks a resolution, upscaler, quality and frame rate from your GPU and screen. Apply writes them to your settings; you can change any of them afterwards.");
     }
 
     // ---- Trophies ----

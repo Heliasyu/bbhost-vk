@@ -64,6 +64,11 @@ public sealed class MainWindow : Window
             Changed = () => { UpdateSummary(); _scene!.ReduceMotion = _settings.ReduceMotion; _glide.Reduced = _settings.ReduceMotion; },
             PickFolder = PickFolder,
             Monitors = Monitors,
+            ScreenSize = () =>
+            {
+                var sc = Screens.Primary ?? Screens.All.FirstOrDefault();
+                return sc == null ? (1920, 1080) : (sc.Bounds.Width, sc.Bounds.Height);
+            },
         };
 
         var cfg = new BbhostToml(Paths.BbhostToml);
