@@ -420,6 +420,22 @@ constexpr int kUncappedReferenceFps = 90;
 // of that, and stays right if a frame runs long.
 constexpr int kOneTwentyFps = 120;
 
+// The effects' own rate. The effect manager's 30.0 (0x26fb39f) and the GPU
+// particle update's (0x4cad7fc) turn effect data, written in 30 fps frames,
+// into seconds - so they are right at any frame rate. Kyo's lists set both to
+// 60, which halves every emitter's interval and lifetime and runs GPU
+// particles twice as fast: smoke and motes thin out and pop in and out.
+// Lantern Engine leaves them at 30 (its scripts/patches.py, EFFECT_RATE_SITES),
+// and so does this build; BBHOST_EFFECT_RATE=60 writes the lists' 60.
+constexpr std::uint32_t kEffectRateSites[] = {0x26fb39f, 0x4cad7fc};
+bool keeps_effect_rate(std::uint32_t at) {
+    static const bool lists = [] {
+        const char* e = std::getenv("BBHOST_EFFECT_RATE");
+        return e && std::strcmp(e, "60") == 0;
+    }();
+    return !lists && std::find(std::begin(kEffectRateSites), std::end(kEffectRateSites), at) != std::end(kEffectRateSites);
+}
+
 // The modes that step by the measured frame time: uncapped (0) and 120.
 constexpr bool follows_frame_time(int mode) { return mode == 0 || mode == kOneTwentyFps; }
 
@@ -1206,6 +1222,7 @@ int apply_rate(ElfImage* image, int want) {
     const int fps = mode == 0 ? kUncappedReferenceFps : mode;
     std::size_t rated_written = 0;
     for (const Constant& c : kConstants) {
+        if (keeps_effect_rate(c.at)) continue;
         std::uint32_t now = c.now;
         if (mode != 60) {
             if (const Rated* r = rated(c.at)) {
@@ -1215,6 +1232,8 @@ int apply_rate(ElfImage* image, int want) {
         }
         write(c.at, &now, 4);
     }
+    host_log("frame rate: effects at their data's rate (30.0 at 0x26fb39f, 0x4cad7fc)%s",
+             keeps_effect_rate(kEffectRateSites[0]) ? "" : " - no: BBHOST_EFFECT_RATE=60, the lists' 60");
     for (const Counted& c : kCounts) {
         std::uint8_t now[8];
         count_bytes(c, c.kind == Count::Digits && mode == 0 ? kUncappedMaxFps : fps, now);
