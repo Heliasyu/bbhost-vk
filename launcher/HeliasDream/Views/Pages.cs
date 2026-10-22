@@ -639,6 +639,11 @@ public static class Pages
         col.Children[0].Margin = new Thickness(8, 6, 8, 0);
         var g2 = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 18 };
         var left = Ui.Col(18, OptionSchema.More.Select(gr => Ui.Group(gr, ctx.Options, ctx.Changed)).ToArray());
+        var exp = (Border)Ui.Group(OptionSchema.Experimental, ctx.Options, ctx.Changed);
+        var warn = Ui.Text("Experimental: not measured enough to be on by default. Off is the safe choice; turn a switch off again if the game stutters or flashes.", 12);
+        warn.Foreground = Brush.Parse("#E8C27A"); warn.TextWrapping = TextWrapping.Wrap; warn.Margin = new Thickness(4, 0, 4, 4);
+        ((StackPanel)exp.Child!).Children.Insert(1, warn);
+        left.Children.Add(exp);
         g2.Children.Add(left);
         var right = Ui.Col(18, launcher, SavesCard(ctx));
         right.VerticalAlignment = VerticalAlignment.Top;

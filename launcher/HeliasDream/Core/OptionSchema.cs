@@ -106,6 +106,7 @@ public static class OptionSchema
         ["mouse_auto_rotation"] = "Off: while you use the mouse, the camera stays where you put it instead of swinging behind you as you move. A controller always gets the game's own camera.",
         ["mouse_menu"] = "In menus: click confirms, right-click goes back, the wheel moves the cursor. A click only reaches menus while one is open, so it never swings a weapon.",
         ["pad_icons"] = "The button icons the game's prompts show while you play with a controller. Auto: the game's own PlayStation icons with a PlayStation controller, and the Xbox buttons by name ([A], [RB], D-pad Up) with an Xbox or any other controller. The world's \"Examine\" prompts drawn on the HUD keep the PlayStation icons for now.",
+        ["submit_split"] = "Experimental, untested on real hardware. Every N draws (Off, 32, 64, 128, 256), if the graphics card has finished everything it was given, the work recorded so far is handed to it at once instead of at the end of the game's batch. It aims at the card's idle gaps while it waits for the CPU: up to 80-120 ms a second (8-12%) were measured where the card had time to spare. Expected: at best a few % more FPS where the CPU holds the frame back; nothing when the card itself is the limit, since then it never runs dry and nothing is split. Each split is one more submission (about 27 µs on the card), so a small N can cost a little instead. May add stutter, and flashing or black frames would mean it does not work on your system: turn it off then. Changes live; BBHOST_SUBMIT_SPLIT wins when set.",
         ["compile_note"] = "Shows \"Building shaders...\" under the FPS counter's corner while the game builds a shader for something it shows for the first time, so a brief stutter then reads as what it is. Built shaders are kept, so it shows less and less.",
         ["game_language"] = "The language of the game's own text, menus and subtitles, from the message bundles on your disc. Takes effect at the next start. The in-game settings menu (F10) is in English.",
         ["button_prompts"] = "What the game's own button prompts and tutorial notes show. Auto follows the device you used last, keyboard or controller.",
@@ -234,6 +235,14 @@ public static class OptionSchema
             new OptionDef("button_prompts", "Button prompts", new[] { "Auto", "Keyboard", "Controller" }, 0, "Auto follows the device you last used."),
         }),
     };
+
+    /// More > Performance (experimental): engine switches that are not measured enough to be on
+    /// by default. The card shows a warning line above them (Pages.More).
+    public static readonly OptionGroup Experimental = new("Performance (experimental)", new[]
+    {
+        new OptionDef("submit_split", "Submit split", new[] { "Off", "32", "64", "128", "256" }, 0,
+            "Every N draws, give an idle GPU the work recorded so far."),
+    });
 
     public static readonly OptionGroup[] More =
     {
