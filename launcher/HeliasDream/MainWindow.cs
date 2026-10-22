@@ -45,7 +45,10 @@ public sealed class MainWindow : Window
     {
         Title = "Helia's Dream";
         Width = 1280; Height = 800; MinWidth = 1120; MinHeight = 720;
-        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        // Centred on the primary monitor (KDE's priority 1), not whichever screen
+        // the window system lists first.
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        CenterOnPrimary();
         SystemDecorations = SystemDecorations.None;
         TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
         Background = Brushes.Transparent;
@@ -141,6 +144,16 @@ public sealed class MainWindow : Window
 
         UpdateSummary();
         GoTo(0);
+    }
+
+    void CenterOnPrimary()
+    {
+        var screen = Screens.Primary ?? Screens.All.OrderByDescending(x => x.Bounds.Width * x.Bounds.Height).FirstOrDefault();
+        if (screen == null) { WindowStartupLocation = WindowStartupLocation.CenterScreen; return; }
+        var wa = screen.WorkingArea;
+        double scale = screen.Scaling;
+        int w = (int)(Width * scale), h = (int)(Height * scale);
+        Position = new PixelPoint(wa.X + Math.Max(0, (wa.Width - w) / 2), wa.Y + Math.Max(0, (wa.Height - h) / 2));
     }
 
     void ToggleMaximized() => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
