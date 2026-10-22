@@ -95,8 +95,12 @@ public static class Steam
             : new[] { Path.Combine(home, ".local/share/Steam"), Path.Combine(home, ".steam/steam"),
                       Path.Combine(home, ".var/app/com.valvesoftware.Steam/.local/share/Steam") };
         var seen = new HashSet<string>();
-        foreach (var root in roots)
+        foreach (var r0 in roots)
         {
+            // ~/.steam/steam is usually a link to ~/.local/share/Steam: one install, once.
+            var root = r0;
+            try { root = new DirectoryInfo(r0).ResolveLinkTarget(true)?.FullName ?? r0; } catch (Exception) { }
+            if (!seen.Add(Path.GetFullPath(root).TrimEnd('/'))) continue;
             var ud = Path.Combine(root, "userdata");
             if (!Directory.Exists(ud)) continue;
             foreach (var u in Directory.EnumerateDirectories(ud))
