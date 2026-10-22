@@ -67,6 +67,17 @@ VkExtent2D g_hdr_extent{0, 0};
 VkDescriptorPool g_hdr_pool = VK_NULL_HANDLE;
 VkDescriptorSet g_hdr_set = VK_NULL_HANDLE;
 bool g_encoding = false;  // this frame's pass draws into g_hdr_image
+// Helia's Dream, the UI kept apart (host/hdr_ui.h): the encode's own set -
+// the SDR layer, the display buffer as the picture drew it, and its copy from
+// before its UI - and layout (a larger push range). This frame's copy, if any.
+VkDescriptorSetLayout g_hdr_dsl = VK_NULL_HANDLE;
+VkPipelineLayout g_hdr_layout = VK_NULL_HANDLE;
+VkImageView g_preui_view = VK_NULL_HANDLE;
+PresentSource g_preui{};
+bool g_preui_set = false;
+std::atomic<float> g_ui_brightness{0.0f};
+VkRect2D g_shown{};
+PresentSource g_src_region{};
 VkImage g_dst_image = VK_NULL_HANDLE;
 VkImageView g_dst_view = VK_NULL_HANDLE;
 VkExtent2D g_dst_extent{0, 0};
@@ -181,17 +192,37 @@ bool build(VkDevice device) {
             if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_grade_pipeline) != VK_SUCCESS) g_grade_pipeline = VK_NULL_HANDLE;
             vkDestroyShaderModule(device, m, nullptr);
         }
-        if (VkShaderModule m = make_module(device, k_hdr_encode_frag_spv, sizeof(k_hdr_encode_frag_spv) / 4)) {
-            stages[1].module = m;
-            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_hdr_pipeline) != VK_SUCCESS) g_hdr_pipeline = VK_NULL_HANDLE;
-            vkDestroyShaderModule(device, m, nullptr);
+        VkDescriptorSetLayoutBinding hb[3]{};
+        for (std::uint32_t i = 0; i < 3; ++i) hb[i] = {i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo hdl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        hdl.bindingCount = 3;
+        hdl.pBindings = hb;
+        const VkPushConstantRange hpc[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4},
+                                            {VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(float) * 16}};
+        VkPipelineLayoutCreateInfo hpl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        hpl.setLayoutCount = 1;
+        hpl.pSetLayouts = &g_hdr_dsl;
+        hpl.pushConstantRangeCount = 2;
+        hpl.pPushConstantRanges = hpc;
+        if (vkCreateDescriptorSetLayout(device, &hdl, nullptr, &g_hdr_dsl) == VK_SUCCESS &&
+            vkCreatePipelineLayout(device, &hpl, nullptr, &g_hdr_layout) == VK_SUCCESS) {
+            if (VkShaderModule m = make_module(device, k_hdr_encode_frag_spv, sizeof(k_hdr_encode_frag_spv) / 4)) {
+                stages[1].module = m;
+                gp.layout = g_hdr_layout;
+                if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_hdr_pipeline) != VK_SUCCESS) g_hdr_pipeline = VK_NULL_HANDLE;
+                gp.layout = g_layout;
+                vkDestroyShaderModule(device, m, nullptr);
+            }
         }
         stages[1].module = fs;
+        VkDescriptorPoolSize hps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
         VkDescriptorPoolCreateInfo hp = dpci;
-        if (vkCreateDescriptorPool(device, &hp, nullptr, &g_hdr_pool) == VK_SUCCESS) {
-            dsai.descriptorPool = g_hdr_pool;
-            if (vkAllocateDescriptorSets(device, &dsai, &g_hdr_set) != VK_SUCCESS) g_hdr_set = VK_NULL_HANDLE;
-            dsai.descriptorPool = g_pool;
+        hp.pPoolSizes = &hps;
+        if (g_hdr_dsl && vkCreateDescriptorPool(device, &hp, nullptr, &g_hdr_pool) == VK_SUCCESS) {
+            VkDescriptorSetAllocateInfo hsa = dsai;
+            hsa.descriptorPool = g_hdr_pool;
+            hsa.pSetLayouts = &g_hdr_dsl;
+            if (vkAllocateDescriptorSets(device, &hsa, &g_hdr_set) != VK_SUCCESS) g_hdr_set = VK_NULL_HANDLE;
         }
     }
     if (r == VK_SUCCESS) {  // rc2: its sharpening variant; its failure costs only that
@@ -290,6 +321,12 @@ void present_pass_shutdown(VkDevice device) {
     if (g_hdr_image) vkDestroyImage(device, g_hdr_image, nullptr);
     if (g_hdr_mem) vkFreeMemory(device, g_hdr_mem, nullptr);
     if (g_hdr_pool) vkDestroyDescriptorPool(device, g_hdr_pool, nullptr);
+    if (g_hdr_layout) vkDestroyPipelineLayout(device, g_hdr_layout, nullptr);
+    if (g_hdr_dsl) vkDestroyDescriptorSetLayout(device, g_hdr_dsl, nullptr);
+    if (g_preui_view) vkDestroyImageView(device, g_preui_view, nullptr);
+    g_hdr_layout = VK_NULL_HANDLE;
+    g_hdr_dsl = VK_NULL_HANDLE;
+    g_preui_view = VK_NULL_HANDLE;
     g_grade_pipeline = g_hdr_pipeline = VK_NULL_HANDLE;
     g_hdr_view = VK_NULL_HANDLE;
     g_hdr_image = VK_NULL_HANDLE;
@@ -467,6 +504,8 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
     to_colour.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     to_colour.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     g_encoding = g_hdr_on.load() && hdr_target(extent);
+    g_shown = shown;
+    g_src_region = src ? *src : PresentSource{};
     g_dst_image = dst;
     g_dst_view = dst_view;
     g_dst_extent = extent;
@@ -524,6 +563,12 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
     return true;
 }
 
+void present_pass_set_hdr_ui(float ui_brightness, const PresentSource* before_ui) {
+    g_ui_brightness.store(ui_brightness);
+    g_preui_set = before_ui && before_ui->image;
+    if (g_preui_set) g_preui = *before_ui;
+}
+
 void present_pass_end(VkCommandBuffer cmd, VkImage dst) {
     vkCmdEndRendering(cmd);
     if (g_encoding && dst == g_dst_image) {
@@ -556,16 +601,55 @@ void present_pass_end(VkCommandBuffer cmd, VkImage dst) {
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &att;
         vkCmdBeginRendering(cmd, &ri);
+        // The UI kept apart: the display buffer (as the picture drew it) and its
+        // copy from before its UI; without one this frame, the SDR layer in
+        // their place and the shader told not to look.
+        if (g_preui_view) {
+            vkDestroyImageView(g_device, g_preui_view, nullptr);  // last frame's (the presenter's fence is behind us)
+            g_preui_view = VK_NULL_HANDLE;
+        }
+        bool ui_apart = g_preui_set && g_source_bound && g_source_view && g_src_region.image && g_ui_brightness.load() > 0.0f;
+        if (ui_apart) {
+            VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            vci.image = g_preui.image;
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = g_preui.format;
+            vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            if (vkCreateImageView(g_device, &vci, nullptr, &g_preui_view) != VK_SUCCESS) {
+                g_preui_view = VK_NULL_HANDLE;
+                ui_apart = false;
+            }
+        }
+        {
+            VkDescriptorImageInfo ii[2] = {{g_point ? g_point : g_sampler, ui_apart ? g_source_view : g_hdr_view,
+                                            ui_apart ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                           {g_point ? g_point : g_sampler, ui_apart ? g_preui_view : g_hdr_view,
+                                            ui_apart ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = g_hdr_set;
+            w.dstBinding = 1;
+            w.descriptorCount = 2;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.pImageInfo = ii;
+            vkUpdateDescriptorSets(g_device, 1, &w, 0, nullptr);
+        }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_hdr_pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_hdr_set, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_hdr_layout, 0, 1, &g_hdr_set, 0, nullptr);
         const VkViewport vp{0.0f, 0.0f, static_cast<float>(g_dst_extent.width), static_cast<float>(g_dst_extent.height), 0.0f, 1.0f};
         const VkRect2D sc{{0, 0}, g_dst_extent};
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &sc);
         const float uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
-        vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uv), uv);
-        const float pc[4] = {g_hdr_paper.load(), g_hdr_peak.load(), g_hdr_boost.load(), 0.8f};
-        vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
+        vkCmdPushConstants(cmd, g_hdr_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uv), uv);
+        // p: paper white, peak, boost, knee; ui: apart (1/0), UI brightness (x paper white),
+        // whether our overlay counts as UI; shown: the picture's rectangle; src: its region of the display buffer.
+        const float pc[16] = {g_hdr_paper.load(), g_hdr_peak.load(), g_hdr_boost.load(), 0.8f,
+                              ui_apart ? 1.0f : 0.0f, g_ui_brightness.load() > 0.0f ? g_ui_brightness.load() : 1.0f, g_ui_brightness.load() > 0.0f ? 1.0f : 0.0f, 0.0f,
+                              static_cast<float>(g_shown.offset.x), static_cast<float>(g_shown.offset.y),
+                              static_cast<float>(g_shown.extent.width), static_cast<float>(g_shown.extent.height),
+                              static_cast<float>(g_src_region.x), static_cast<float>(g_src_region.y),
+                              static_cast<float>(g_src_region.w), static_cast<float>(g_src_region.h)};
+        vkCmdPushConstants(cmd, g_hdr_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);
         g_encoding = false;

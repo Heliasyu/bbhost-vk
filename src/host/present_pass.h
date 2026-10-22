@@ -64,5 +64,10 @@ bool present_pass_glass(VkCommandBuffer cmd, VkRect2D shown, const PresentSource
 // (the swapchain is HDR10: compose in an SDR layer and encode it at the end).
 void present_pass_set_grade(float brightness, float contrast, float hue_degrees);
 void present_pass_set_hdr(bool on, float paper_white, float peak, float boost);
+// Helia's Dream, HDR with the UI kept apart (host/hdr_ui.h), set each frame
+// before present_pass_begin: the UI's brightness (times paper white; 0 off),
+// and the display buffer's copy from before its UI (null: none this frame -
+// then only our overlay is told apart).
+void present_pass_set_hdr_ui(float ui_brightness, const PresentSource* before_ui);
 // Ends the rendering and moves `dst` to PRESENT_SRC_KHR.
 void present_pass_end(VkCommandBuffer cmd, VkImage dst);

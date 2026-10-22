@@ -24,5 +24,5 @@ void main() {
     const vec3 lobe3 = max(-hit_min, hit_max);
     const float lobe = max(-0.1875, min(max(lobe3.r, max(lobe3.g, lobe3.b)), 0.0)) * pc.con;
     const vec3 o = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
-    out_colour = vec4(clamp(o, 0.0, 1.0), e4.a);
+    out_colour = vec4(clamp(o, 0.0, 1.0), 1.0);  // alpha 1: see present.frag
 }

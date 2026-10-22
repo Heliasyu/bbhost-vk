@@ -36,6 +36,7 @@ struct HostSettings {
     bool hdr_peak_auto = true;
     float hdr_peak = 1000.0f;        // nits, when not from the display
     float hdr_boost = 0.25f;         // 0..1: the share of the room above paper white the highlights use
+    float hdr_ui_brightness = 0.0f;  // the UI kept apart at this x paper white (host/hdr_ui.h); 0: boosted with the rest
     bool trophy_popups = true;
     bool compile_note = true;        // "Building shaders" while pipelines are built in play
     int game_language = 1;           // the PS4's language code (1 English US); BBHOST_SYSTEM_LANG wins

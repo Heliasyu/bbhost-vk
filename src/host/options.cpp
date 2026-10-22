@@ -146,6 +146,7 @@ enum SettingId {
     kCompileNote,
     kGameLanguage,
     kMenuLanguage,
+    kHdrUi,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -419,6 +420,11 @@ Setting g_set[kSettingCount] = {
     // host/menu_i18n.h: this menu's own language; each language by its own name.
     {"menu_language", "Menu language", {"English", "Русский", "Español", "Português (Brasil)", "Français", "Deutsch", "Italiano", "Polski", "Türkçe"}, 0,
      "The language of this menu. The game's own text follows Game language.", false},
+    // host/hdr_ui.h: HDR with the UI told apart from the picture, at this
+    // brightness (times paper white); the first value leaves it expanded.
+    {"hdr_ui_brightness", "UI brightness",
+     {"Like the picture", "50%", "60%", "70%", "80%", "90%", "100%", "110%", "120%", "130%", "140%", "150%", "160%", "170%", "180%", "190%", "200%"}, 0,
+     "HDR: the HUD, menus and subtitles at this share of paper white, kept out of the highlight boost. Like the picture: they are boosted as the rest.", false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -453,6 +459,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kHdrPeakAuto},
     {Row::Option, nullptr, kHdrPeak},
     {Row::Option, nullptr, kHdrBoost},
+    {Row::Option, nullptr, kHdrUi},
     {Row::Header, "UPSCALING"},
     {Row::Option, nullptr, kUpscaler},
     {Row::Option, nullptr, kUpscaleQuality},
@@ -555,7 +562,8 @@ const bool g_table_order_ok = [] {
         std::abort();
     };
     return at(kUpscaler, "upscaler") && at(kHaptics, "haptics") && at(kHdr, "hdr") && at(kMipBias, "mip_bias") && at(kPadIcons, "pad_icons") &&
-           at(kCompileNote, "compile_note") && at(kGameLanguage, "game_language") && at(kMenuLanguage, "menu_language");
+           at(kCompileNote, "compile_note") && at(kGameLanguage, "game_language") && at(kMenuLanguage, "menu_language") &&
+           at(kHdrUi, "hdr_ui_brightness");
 }();
 
 std::array<int, kSettingCount> g_default_index = [] {
@@ -938,6 +946,7 @@ void apply(int id) {
         case kCompileNote:
         case kGameLanguage:
         case kMenuLanguage:
+        case kHdrUi:
             break;  // the settings object carries them (host/settings.h)
         case kSsao:
         case kMotionBlur:
@@ -1103,6 +1112,10 @@ void rebuild_settings() {
     h.pad_icons = std::clamp(index_of(kPadIcons), 0, 2);
     h.compile_note = on_of(kCompileNote);
     menu_i18n_set_language(std::clamp(index_of(kMenuLanguage), 0, kMenuLanguageCount - 1));
+    {
+        const int i = index_of(kHdrUi);
+        h.hdr_ui_brightness = i <= 0 ? 0.0f : 0.4f + 0.1f * static_cast<float>(i);  // 1: 50%
+    }
     {
         // The PS4's language codes, in the setting's order.
         static constexpr int kLang[] = {1, 2, 3, 4, 5, 8, 0};

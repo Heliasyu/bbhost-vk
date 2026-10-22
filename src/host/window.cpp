@@ -18,6 +18,7 @@
 #include "host/trophies.h"
 #include "host/perf_capture.h"
 #include "host/present_pass.h"
+#include "host/hdr_ui.h"
 #include "host/ingame_menu.h"
 #include "host/audio.h"
 #include "host/haptics.h"
@@ -1338,6 +1339,11 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
             present_pass_set_grade(hs.brightness, hs.contrast, hs.hue_degrees);
             const float peak = hs.hdr_peak_auto && g_vk.hdr_display_peak > 0.0f ? g_vk.hdr_display_peak : hs.hdr_peak;
             present_pass_set_hdr(g_vk.hdr, hs.hdr_paper_white, peak, hs.hdr_boost);
+            // The UI kept apart (host/hdr_ui.h): this display buffer's copy from before its UI.
+            PresentSource before_ui;
+            const bool have_bui = g_vk.hdr && hs.hdr_ui_brightness > 0.0f && display_va &&
+                                  host_gpu_hdr_ui_source(display_va, &before_ui.image, &before_ui.format, &before_ui.width, &before_ui.height);
+            present_pass_set_hdr_ui(g_vk.hdr ? hs.hdr_ui_brightness : 0.0f, have_bui ? &before_ui : nullptr);
             static std::uint64_t md_serial = 0;
             if (g_vk.hdr && hs.serial != md_serial) {
                 md_serial = hs.serial;

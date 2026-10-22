@@ -18,5 +18,5 @@ void main() {
     const float k = 0.57735027;
     const vec3 axis = vec3(k);
     rgb = rgb * pc.g.z + cross(axis, rgb) * pc.g.w + axis * dot(axis, rgb) * (1.0 - pc.g.z);
-    out_colour = vec4(clamp(rgb, 0.0, 1.0), c.a);
+    out_colour = vec4(clamp(rgb, 0.0, 1.0), 1.0);  // alpha 1: see present.frag
 }

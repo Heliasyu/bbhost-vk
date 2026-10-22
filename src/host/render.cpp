@@ -18,6 +18,7 @@
 #include "host/translation_cache.h"
 #include "host/upscaler.h"
 #include "host/fsr3_pass.h"
+#include "host/hdr_ui.h"
 #include "host/temporal_inputs.h"
 #include "host/temporal/mblur_skip.h"
 #include "host/temporal/motion_classify.h"
@@ -12591,6 +12592,17 @@ static bool draw_impl(const GpuDraw& d) {
         if (t_bilinear_samplers) note_scale_pass(pl.name);
         prefetch_stage_images(pl.ps.meta(), s.ps_user, stage_images[1], gx_stage[1], pl.paths_match[1] ? &key_stages[1] : nullptr);
         t_bilinear_samplers = false;
+        // Helia's Dream, HDR with the UI kept apart (host/hdr_ui.h): the frame
+        // before its first UI draw, and that copy following it into a display buffer.
+        if (s.color[0] && hdr_ui_wanted()) {
+            if (temporal::is_ui_vs(pl.orb_vs)) hdr_ui_before_ui_locked(s.color[0]);
+            if (hle_video_is_display_buffer(s.color[0]->base)) {
+                RtImage* from = !stage_images[1].images.empty() && stage_images[1].images[0].resolved
+                                    ? find_render_target(tsharp_base(stage_images[1].images[0].w))
+                                    : nullptr;
+                hdr_ui_display_written_locked(s.color[0], from);
+            }
+        }
         // bbhost-vk Phase 2: the scene is complete - motion vectors, camera
         // history, the next jitter phase (host/temporal_inputs.h).
         if (pl.scale_pass == 1 && temporal_watching()) {

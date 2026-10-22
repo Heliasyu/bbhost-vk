@@ -512,8 +512,10 @@ bool host_overlay_init(VkDevice device, VkPhysicalDevice phys, VkFormat colour_f
     cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
     cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     cba.colorBlendOp = VK_BLEND_OP_ADD;
-    cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    // The target's alpha falls where the overlay covers it (dst * (1 - a)):
+    // the HDR encode keeps those pixels apart as UI (host/hdr_ui.h).
+    cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     cba.alphaBlendOp = VK_BLEND_OP_ADD;
     cba.colorWriteMask = 0xf;
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};

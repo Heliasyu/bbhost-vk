@@ -687,6 +687,11 @@ GUEST_ABI int hle_video_set_attr(void* attr, unsigned fmt, unsigned tile, unsign
     return 0;
 }
 
+// Every registered display buffer's address, readable without g_vo_mu: the
+// renderer asks per draw (hle_video_is_display_buffer).
+std::atomic<std::uint64_t> g_display_addrs[32];
+
+
 GUEST_ABI int hle_video_register(int handle, int start, void** addrs, int n, const void* attr) {
     std::lock_guard<std::mutex> lock(g_vo_mu);
     if (!vo_get(handle)) {
@@ -700,6 +705,14 @@ GUEST_ABI int hle_video_register(int handle, int start, void** addrs, int n, con
     for (int i = 0; addrs && i < n; ++i) {
         const int idx = start + i;
         if (idx >= 0 && idx < 16) p->buffers[idx] = reinterpret_cast<std::uint64_t>(addrs[i]);
+        // Into the first free slot of the lock-free list (or where it already is).
+        const auto va = reinterpret_cast<std::uint64_t>(addrs[i]);
+        bool there = false;
+        for (auto& a : g_display_addrs) there = there || a.load() == va;
+        for (auto& a : g_display_addrs) {
+            std::uint64_t empty = 0;
+            if (there || a.compare_exchange_strong(empty, va)) break;
+        }
     }
     if (attr) {
         const auto* a = static_cast<const unsigned*>(attr);
@@ -768,6 +781,13 @@ GUEST_ABI int hle_video_status(int handle, void* st) {
 }
 
 }  // namespace
+
+bool hle_video_is_display_buffer(std::uint64_t va) {
+    if (!va) return false;
+    for (const auto& a : g_display_addrs)
+        if (a.load(std::memory_order_relaxed) == va) return true;
+    return false;
+}
 
 void hle_video_set_picture(unsigned w, unsigned h) {
     g_picture.store(w && h ? static_cast<std::uint64_t>(w) << 32 | h : 0, std::memory_order_relaxed);

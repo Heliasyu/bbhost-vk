@@ -147,6 +147,8 @@ void hle_gnm_find_writes(std::uint64_t va, std::uint64_t bytes, std::uint64_t va
 // game thread's flip request, which may be ahead of them.
 void hle_video_finish_flip(int handle, int buffer, std::int64_t arg, bool recorded = false);
 std::uint64_t hle_video_flip_count();
+// Whether `va` is a registered display buffer's address (any thread, no lock).
+bool hle_video_is_display_buffer(std::uint64_t va);
 // Since the last call, for the 300-flip report: how late the vblank clock's
 // ticks woke, and how long flips took from queued to shown and to completed.
 std::string hle_video_pacing_window();
