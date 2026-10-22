@@ -45,3 +45,7 @@ dist/
 fsr4_411/
 out/fsr4cap/
 *.dll
+
+# PGO profiles (merged .profdata and raw .profraw): local, per compiler
+/pgo/
+*.profraw

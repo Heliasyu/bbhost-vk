@@ -1,5 +1,34 @@
 # Known issues (bbhost-vk)
 
+## Vicar Amelia's textures come out broken, as rainbow noise
+- **Seen on:** rc7 (`v0.2.18-vk.1-18-gb369d66`), the Vicar Amelia fight, FSR 4.1.1 at Native AA
+  (reported 2026-10-21). Not yet known whether stock bbhost shows it.
+- **What it looks like:** the boss's textures are rainbow noise: a texture sampled from memory
+  that holds something else.
+- **Likely family:** upstream fixed two of these before, both on the blood layers characters
+  get when hit. One was a 512x512 blood mask whose mip levels were lost when its surface was
+  replaced (host/textures.cpp `carry_surface_locked`). The other was a 256x256 blood layer
+  placed inside an older render target, whose clear wiped the wrong image (host/render.cpp
+  `fill_starts_inside`). Amelia is a large, heavily bloodied character, which fits.
+- **bbhost-vk changes that could be involved:** each can be turned off without a rebuild. All
+  of them change how shaders read memory, and none touches the texture cache:
+  - `BBHOST_CS_CB` (compute constants through bindings, rc5b);
+  - `BBHOST_FETCH_INLINE` and `BBHOST_SOFFSET_BOUND` (rc4);
+  - `BBHOST_TABLES_VRAM` (rc5);
+  - `BBHOST_CP_STAGE_CACHE` (rc7);
+  - `BBHOST_MOTION_BLUR_SKIP`.
+
+  The scene split and post-processing at render size were not active (Native AA).
+- **To narrow it down:**
+  1. While it's on screen, press **F12**. Stock bbhost writes the frame's render targets and
+     its draw list to `logs/f12-*`.
+  2. Run with all of the above off:
+     `BBHOST_CS_CB=0 BBHOST_FETCH_INLINE=0 BBHOST_SOFFSET_BOUND=0 BBHOST_TABLES_VRAM=0
+     BBHOST_CP_STAGE_CACHE=0 BBHOST_MOTION_BLUR_SKIP=0 ./bbtest start amelia-off`.
+     - If it's gone, halve the list until one switch is left.
+     - If it stays, try stock bbhost (`bbhost.bin.official`). If stock shows it too, it's
+       upstream's, and it should be reported there with the F12 dump.
+
 ## Menus stop responding after a resolution change in the game's own Settings menu
 - **Seen on:** upstream bbhost too, before bbhost-vk's changes (reported 2026-10-18).
 - **Confirmed by the user (2026-10-18):** it happens **only** through the game's own

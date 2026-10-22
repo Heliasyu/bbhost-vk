@@ -41,8 +41,9 @@ std::uint32_t host_thread_id();
 // SetThreadDescription, which the sampler and debuggers read.
 void host_thread_set_name(const char* name);
 // The largest width and height among the desktop's displays, in physical
-// pixels (each display's current mode). False when the platform does not say
-// (only Windows answers today).
+// pixels (each display's current mode on Windows; on Linux the largest mode of
+// each connected display, from the DRM connectors in sysfs). False when the
+// platform does not say.
 bool host_desktop_max_size(int* w, int* h);
 // The name Linux can hold (15 characters): leading dotted parts dropped
 // first ("Core.Res.PostProcessor_0" -> "PostProcessor_0"), then the tail.

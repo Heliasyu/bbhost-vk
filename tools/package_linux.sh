@@ -50,10 +50,20 @@ rm -rf "$dir/tools/fsr4cap/__pycache__"
 # BBHOST_FSR4CAP_TOOLS=<folder with dxil-spirv and fsr4cap.exe>: built
 # beforehand, so build_assets.sh needs no MinGW, cmake or network (it reads
 # them through BB_FSR4CAP_TOOLS; run-fsr4cap.sh below sets it).
+# The folder must carry the licence texts of what those binaries are built
+# from (dxil-spirv and the libraries linked into it) in licenses/: they are
+# copied to the package's licenses/fsr4cap-tools/. Without them the binaries
+# stay out (v0.2.18-vk.1 shipped them with no notices and was repackaged), and
+# build_assets.sh builds them on the player's PC instead.
 if [ -n "${BBHOST_FSR4CAP_TOOLS:-}" ]; then
-    mkdir -p "$dir/tools/fsr4cap/bin"
-    # dxil-spirv with its library (rpath $ORIGIN), fsr4cap.exe, SOURCES.txt.
-    cp "$BBHOST_FSR4CAP_TOOLS"/* "$dir/tools/fsr4cap/bin/"
+    if [ -d "$BBHOST_FSR4CAP_TOOLS/licenses" ] && [ -n "$(ls -A "$BBHOST_FSR4CAP_TOOLS/licenses")" ]; then
+        mkdir -p "$dir/tools/fsr4cap/bin" "$dir/licenses/fsr4cap-tools"
+        # dxil-spirv with its library (rpath $ORIGIN), fsr4cap.exe, SOURCES.txt.
+        find "$BBHOST_FSR4CAP_TOOLS" -maxdepth 1 -type f -exec cp {} "$dir/tools/fsr4cap/bin/" \;
+        cp -r "$BBHOST_FSR4CAP_TOOLS/licenses/." "$dir/licenses/fsr4cap-tools/"
+    else
+        echo "package: $BBHOST_FSR4CAP_TOOLS has no licenses/ folder: the prebuilt fsr4cap tools are left out" >&2
+    fi
 fi
 cat > "$dir/build-fsr4.sh" <<'EOF2'
 #!/bin/bash

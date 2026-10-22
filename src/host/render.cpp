@@ -318,6 +318,17 @@ const std::string* g_pass_profile_name = nullptr;  // the profile name of the dr
 // read of a target this tracking does not see (a T# whose base is inside the
 // target rather than at it, or an image bound another way), which the
 // validation layer cannot see through the bindless set either.
+// bbhost-vk b7 turned them on by default; b8 turns them off again: on the RX
+// 9070 XT, loading into the Hunter's Dream flashed white blocks at the top
+// and bottom of the screen with them and not with BBHOST_PASS_BARRIERS=full
+// (2026-10-21, round 4) - a hazard the tracking below still misses.
+// What b7 had going for it: The hazards are matched by range now (a T#
+// inside a target included: hazard_holds / hazard_inside below), the pass's
+// timestamp pair is closed on a lazy end (the GPU sampler's hang), and on
+// the RX 9070 XT the validation layer's synchronization checks found no
+// hazard from it in a game session (tools/vvl_game.sh, 2026-10-21) while
+// the 1% lows rose (b6: 105.7 with it, b5: 102.7 without). The bindless set
+// (BBHOST_BINDLESS=1, off) is still not tracked.
 struct PassHazards {
     bool owed = false;
     std::unordered_set<std::uint64_t> written;  // attachment bases written since the last barrier
@@ -328,6 +339,32 @@ const bool g_lazy_barriers = [] {
     const char* e = std::getenv("BBHOST_PASS_BARRIERS");
     return e && std::strcmp(e, "lazy") == 0;
 }();
+
+// bbhost-vk: the hazards by range, not by base. A T# can point inside a
+// target - a layer or a mip of it, or an image the game placed in its memory
+// (the blood layers sit 0x28000 bytes into an older target) - and a base
+// compare missed exactly those reads, the likeliest cause of the Deck's
+// white blocks with lazy barriers and compressed targets. Exact bases
+// still hit first; a target that is gone (not in g_rts) matches by base only.
+bool hazard_holds(const std::unordered_set<std::uint64_t>& targets, std::uint64_t va) {
+    if (targets.count(va)) return true;
+    for (const std::uint64_t t : targets) {
+        if (va <= t) continue;
+        if (const auto it = g_rts.find(t); it != g_rts.end() && va < t + rt_size_bytes(it->second)) return true;
+    }
+    return false;
+}
+// Anything in `addrs` inside the target at `base` (its whole range).
+bool hazard_inside(const std::unordered_set<std::uint64_t>& addrs, std::uint64_t base) {
+    if (addrs.count(base)) return true;
+    const auto it = g_rts.find(base);
+    if (it == g_rts.end()) return false;
+    const std::uint64_t end = base + rt_size_bytes(it->second);
+    for (const std::uint64_t a : addrs) {
+        if (a > base && a < end) return true;
+    }
+    return false;
+}
 std::atomic<std::uint64_t> g_barriers_paid{0}, g_barriers_skipped{0}, g_barriers_mid_pass{0};
 
 std::atomic<std::uint64_t> g_rt_created{0}, g_untraced_draws{0}, g_clears{0}, g_rt_copies{0};
@@ -2097,6 +2134,13 @@ VkImageAspectFlags aspect_of(const RtImage& r) {
 void ensure_initialised(RtImage& r) {
     if (r.initialised) return;
     begin_recording_locked();
+    // bbhost-vk: a layout change cannot be recorded inside dynamic rendering
+    // (VUID-vkCmdPipelineBarrier-None-09553/-09554/-01181, the validation
+    // layer on the RX 9070 XT). A target made mid-pass - a post stand-in
+    // (post_shadow_locked), a scene target at a live rescale - was given one
+    // there. Not part of the open pass, so the draw that uses it starts a
+    // pass of its own anyway.
+    render_end_pass_locked();
     image_barrier(g_cmd(), r.image, aspect_of(r), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
                   VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, r.layers);
     r.initialised = true;
@@ -6527,6 +6571,15 @@ void end_pass_for_draw_locked() {
     }
     g_pass.active = false;
     if (DrawCmds* c = DrawCmds::open(); !c || !c->end_rendering(false)) rec().end_rendering(false);
+    // bbhost-vk: the pass's timestamp pair is closed here too, as
+    // render_end_pass_locked closes it. Left open, a GPU-sampled frame
+    // (BBHOST_GPU_PROFILE=3, the F11 sampler) had a query never written, and
+    // retire_slot_locked's vkGetQueryPoolResults(WAIT) waited for it forever:
+    // the game hung in its first loading screen with lazy barriers on.
+    if (g_pass.profiled) {
+        profile_end_locked();
+        g_pass.profiled = false;
+    }
     for (int t = 0; t < g_pass.ntargets; ++t) g_hazards.written.insert(g_pass.targets[t]);
     g_hazards.owed = true;
     copy_versions_pass_end_locked();
@@ -6541,10 +6594,16 @@ void begin_pass(const DrawState& s, std::uint64_t key, bool hazard = false) {
     end_pass_for_draw_locked();
     if (g_hazards.owed) {
         bool need = hazard;
+        // A target written or sampled since the barrier, anywhere in this
+        // pass's targets' memory (or this target inside a written one).
+        const auto touched = [](std::uint64_t base) {
+            return hazard_holds(g_hazards.written, base) || hazard_inside(g_hazards.written, base) ||
+                   hazard_inside(g_hazards.sampled, base);
+        };
         for (int t = 0; t < 8 && !need; ++t) {
-            if (s.color[t]) need = g_hazards.written.count(s.color[t]->base) || g_hazards.sampled.count(s.color[t]->base);
+            if (s.color[t]) need = touched(s.color[t]->base);
         }
-        if (s.depth && !need) need = g_hazards.written.count(s.depth->base) || g_hazards.sampled.count(s.depth->base);
+        if (s.depth && !need) need = touched(s.depth->base);
         if (need) {
             pay_pass_barrier_locked();
         } else {
@@ -14175,7 +14234,7 @@ static bool draw_impl(const GpuDraw& d) {
             for (const StageImages::Image& im : stage_images[st].images) {
                 if (!im.resolved) continue;
                 const std::uint64_t base = tsharp_base(im.w);
-                if (g_hazards.owed && g_hazards.written.count(base)) sample_hazard = true;
+                if (g_hazards.owed && hazard_holds(g_hazards.written, base)) sample_hazard = true;
                 g_hazards.sampled.insert(base);
             }
         }

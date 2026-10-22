@@ -307,9 +307,47 @@ bool host_desktop_max_size(int* w, int* h) {
     *h = bh;
     return true;
 #else
-    (void)w;
-    (void)h;
-    return false;
+    // bbhost-vk: each connected, enabled DRM connector's modes in sysfs
+    // (/sys/class/drm/card<N>-<connector>/modes, "<w>x<h>" a line, physical
+    // pixels whatever the desktop's scaling), the largest of them. Before the
+    // window exists, so not SDL's. Without it a Linux start fell back to the
+    // Resolution setting's largest entries (5120x2160), and a start at Native
+    // AA on a 4K screen could not split the scene live (the display buffers
+    // must be the output's size).
+    int bw = 0, bh = 0;
+    if (DIR* d = opendir("/sys/class/drm")) {
+        while (const dirent* e = readdir(d)) {
+            const std::string base = std::string("/sys/class/drm/") + e->d_name;
+            if (std::strncmp(e->d_name, "card", 4) != 0 || !std::strchr(e->d_name, '-')) continue;  // connectors only
+            const auto first_line = [](const std::string& path) {
+                char line[64] = {};
+                if (FILE* f = std::fopen(path.c_str(), "r")) {
+                    if (!std::fgets(line, sizeof(line), f)) line[0] = 0;
+                    std::fclose(f);
+                }
+                line[std::strcspn(line, "\n")] = 0;
+                return std::string(line);
+            };
+            if (first_line(base + "/status") != "connected") continue;
+            if (const std::string en = first_line(base + "/enabled"); !en.empty() && en != "enabled") continue;
+            if (FILE* f = std::fopen((base + "/modes").c_str(), "r")) {
+                char line[64];
+                while (std::fgets(line, sizeof(line), f)) {
+                    int mw = 0, mh = 0;
+                    if (std::sscanf(line, "%dx%d", &mw, &mh) == 2 && mw > 0 && mh > 0) {
+                        bw = std::max(bw, mw);
+                        bh = std::max(bh, mh);
+                    }
+                }
+                std::fclose(f);
+            }
+        }
+        closedir(d);
+    }
+    if (bw <= 0 || bh <= 0) return false;
+    *w = bw;
+    *h = bh;
+    return true;
 #endif
 }
 
