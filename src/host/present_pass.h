@@ -15,6 +15,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <cstddef>
 #include <cstdint>
 
 // Presenter-owned, for the swapchain's format; safe to call repeatedly.
@@ -50,5 +51,13 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
 // region `x, y, w, h`) blended over `shown`, inside the open rendering,
 // before the overlay. False when there is nothing to draw it with.
 bool present_pass_motion(VkCommandBuffer cmd, VkRect2D shown, const PresentSource& motion);
+// Helia's Dream: the frosted glass under the overlay's panes - the picture
+// `src` (the one present_pass_begin drew), blurred inside each rounded
+// rectangle (overlay coordinates, mapped onto `area` as the overlay's are).
+// Inside the open rendering, after the picture and before the overlay. False
+// when there is nothing to draw it with.
+struct OverlayGlass;
+bool present_pass_glass(VkCommandBuffer cmd, VkRect2D shown, const PresentSource& src, const OverlayGlass* rects, std::size_t count,
+                        VkRect2D area, float display_w, float display_h);
 // Ends the rendering and moves `dst` to PRESENT_SRC_KHR.
 void present_pass_end(VkCommandBuffer cmd, VkImage dst);

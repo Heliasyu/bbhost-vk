@@ -6,11 +6,14 @@
 
 #include "host/present_spv.h"
 #include "host/shaders/motion_view_frag.spv.h"
+#include "host/shaders/frosted_frag.spv.h"
+#include "host/overlay.h"
 #include "log.h"
 
 #include <atomic>
 #include <cstdlib>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -40,6 +43,10 @@ VkDescriptorPool g_motion_pool = VK_NULL_HANDLE;
 VkDescriptorSet g_motion_set = VK_NULL_HANDLE;
 VkSampler g_point = VK_NULL_HANDLE;
 VkImageView g_motion_view = VK_NULL_HANDLE;
+// Helia's Dream: the frosted glass under the menus (shaders/frosted.frag),
+// blended over the picture, sampling it through g_set.
+VkPipeline g_glass_pipeline = VK_NULL_HANDLE;
+bool g_source_bound = false;  // g_set holds this frame's picture
 // The last source format asked about, and whether it filters linearly.
 VkFormat g_checked = VK_FORMAT_UNDEFINED;
 bool g_checked_ok = false;
@@ -64,7 +71,7 @@ bool build(VkDevice device) {
     if (vkCreateDescriptorSetLayout(device, &dslci, nullptr, &g_dsl) != VK_SUCCESS) return false;
 
     const VkPushConstantRange pcrs[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4},
-                                         {VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(float) * 4}};
+                                         {VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(float) * 8}};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &g_dsl;
@@ -176,6 +183,22 @@ bool build(VkDevice device) {
         }
     }
     if (mfs) vkDestroyShaderModule(device, mfs, nullptr);
+    // The frosted glass: blended by its rounded mask (alpha). Its failure
+    // costs only the blur; the menus then show on their own tint.
+    if (r == VK_SUCCESS) {
+        if (VkShaderModule gfs = make_module(device, k_frosted_frag_spv, sizeof(k_frosted_frag_spv) / 4)) {
+            stages[1].module = gfs;
+            cba.blendEnable = VK_TRUE;
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba.colorBlendOp = VK_BLEND_OP_ADD;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.alphaBlendOp = VK_BLEND_OP_ADD;
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_glass_pipeline) != VK_SUCCESS) g_glass_pipeline = VK_NULL_HANDLE;
+            vkDestroyShaderModule(device, gfs, nullptr);
+        }
+    }
     vkDestroyShaderModule(device, vs, nullptr);
     vkDestroyShaderModule(device, fs, nullptr);
     return r == VK_SUCCESS;
@@ -217,6 +240,8 @@ void present_pass_shutdown(VkDevice device) {
     g_sharpen_pipeline = VK_NULL_HANDLE;
     if (g_motion_view) vkDestroyImageView(device, g_motion_view, nullptr);
     if (g_motion_pipeline) vkDestroyPipeline(device, g_motion_pipeline, nullptr);
+    if (g_glass_pipeline) vkDestroyPipeline(device, g_glass_pipeline, nullptr);
+    g_glass_pipeline = VK_NULL_HANDLE;
     if (g_motion_pool) vkDestroyDescriptorPool(device, g_motion_pool, nullptr);
     if (g_point) vkDestroySampler(device, g_point, nullptr);
     g_motion_view = VK_NULL_HANDLE;
@@ -283,6 +308,7 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
             g_source_view = VK_NULL_HANDLE;
             return false;
         }
+        g_source_bound = true;
         VkDescriptorImageInfo dii{g_sampler, g_source_view, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = g_set;
@@ -400,5 +426,41 @@ bool present_pass_motion(VkCommandBuffer cmd, VkRect2D shown, const PresentSourc
                          static_cast<float>(motion.y + motion.h) * ih};
     vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uv), uv);
     vkCmdDraw(cmd, 3, 1, 0, 0);
+    return true;
+}
+
+bool present_pass_glass(VkCommandBuffer cmd, VkRect2D shown, const PresentSource& src, const OverlayGlass* rects, std::size_t count,
+                        VkRect2D area, float display_w, float display_h) {
+    if (!g_glass_pipeline || !g_source_bound || !count || !src.width || !src.height || display_w <= 0.0f || display_h <= 0.0f) return false;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_glass_pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_set, 0, nullptr);
+    const VkViewport vp{static_cast<float>(shown.offset.x), static_cast<float>(shown.offset.y), static_cast<float>(shown.extent.width),
+                        static_cast<float>(shown.extent.height), 0.0f, 1.0f};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    const float iw = 1.0f / static_cast<float>(src.width), ih = 1.0f / static_cast<float>(src.height);
+    const float uv[4] = {static_cast<float>(src.x) * iw, static_cast<float>(src.y) * ih, static_cast<float>(src.x + src.w) * iw,
+                         static_cast<float>(src.y + src.h) * ih};
+    vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uv), uv);
+    // Overlay coordinates map onto `area` as the overlay's own draw maps them.
+    const float sx = static_cast<float>(area.extent.width) / display_w, sy = static_cast<float>(area.extent.height) / display_h;
+    // The source uv one framebuffer pixel spans, inside `shown`.
+    const float uvx = (uv[2] - uv[0]) / static_cast<float>(shown.extent.width);
+    const float uvy = (uv[3] - uv[1]) / static_cast<float>(shown.extent.height);
+    for (std::size_t i = 0; i < count; ++i) {
+        const OverlayGlass& g = rects[i];
+        const float x0 = static_cast<float>(area.offset.x) + g.x * sx, y0 = static_cast<float>(area.offset.y) + g.y * sy;
+        const float x1 = x0 + g.w * sx, y1 = y0 + g.h * sy;
+        const std::int32_t l = std::max<std::int32_t>(shown.offset.x, static_cast<std::int32_t>(std::floor(x0)));
+        const std::int32_t t = std::max<std::int32_t>(shown.offset.y, static_cast<std::int32_t>(std::floor(y0)));
+        const std::int32_t r = std::min<std::int32_t>(shown.offset.x + static_cast<std::int32_t>(shown.extent.width), static_cast<std::int32_t>(std::ceil(x1)));
+        const std::int32_t b = std::min<std::int32_t>(shown.offset.y + static_cast<std::int32_t>(shown.extent.height), static_cast<std::int32_t>(std::ceil(y1)));
+        if (r <= l || b <= t) continue;
+        const VkRect2D sc{{l, t}, {static_cast<std::uint32_t>(r - l), static_cast<std::uint32_t>(b - t)}};
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        const float blur_px = g.blur * sy;  // the blur's radius, in framebuffer pixels
+        const float pc[8] = {x0, y0, x1, y1, g.radius * sy, blur_px * uvx, blur_px * uvy, g.brightness};
+        vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
     return true;
 }

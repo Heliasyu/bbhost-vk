@@ -46,6 +46,15 @@ float host_overlay_text_width(float scale, const char* text);
 // bold) and Cormorant Garamond for titles. `size` is the line's pixel height;
 // (x, y) the line's top-left. Returns the width drawn.
 enum { kOverlayFontBody = 0, kOverlayFontBold = 1, kOverlayFontTitle = 2 };
+// Frosted glass: the game's picture blurred inside a rounded rectangle, drawn
+// by the presenter under the rest of the overlay (host/present_pass.h). `blur`
+// is the radius in overlay pixels; `brightness` scales the blurred picture.
+struct OverlayGlass {
+    float x, y, w, h, radius, blur, brightness;
+};
+void host_overlay_glass(float x, float y, float w, float h, float radius, float blur = 26.0f, float brightness = 0.78f);
+// The committed frame's glass, copied out for the presenter: how many.
+std::size_t host_overlay_glass_shown(OverlayGlass* out, std::size_t max);
 void host_overlay_round_rect(float x, float y, float w, float h, float r, std::uint32_t top, std::uint32_t bottom);
 void host_overlay_round_frame(float x, float y, float w, float h, float r, float t, std::uint32_t top, std::uint32_t bottom);
 float host_overlay_ui_text(int face, float x, float y, float size, std::uint32_t rgba, const char* text);

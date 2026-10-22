@@ -1148,6 +1148,12 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
                         motion_drawn = present_pass_motion(g_vk.cmd, shown, mv);
                     }
                 }
+                // Frosted glass under the menus' panes (Helia's Dream).
+                if (have) {
+                    OverlayGlass glass[16];
+                    if (const std::size_t n = host_overlay_glass_shown(glass, 16))
+                        present_pass_glass(g_vk.cmd, shown, src, glass, n, area, overlay_w, overlay_h);
+                }
                 const std::uint32_t verts = host_overlay_record(g_vk.cmd, area, overlay_w, overlay_h);
                 // The plugin menu (F9) over everything else (host/ingame_menu.h).
                 const bool menu = ingame_menu_record_in_pass(g_vk.cmd, g_vk.extent);

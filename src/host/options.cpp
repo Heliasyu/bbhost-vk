@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <string>
 #include <mutex>
@@ -402,7 +403,8 @@ int g_sel = 1;  // the first selectable row
 // Where each row was drawn last frame, so the pointer hit-tests what it sees
 // rather than what the layout would be at some other display size.
 float g_row_y[kRowCount] = {};
-float g_row_h = 0.0f, g_row_x = 0.0f, g_row_w = 0.0f;
+float g_row_h = 0.0f;
+float g_row_xs[kRowCount] = {}, g_row_ws[kRowCount] = {};  // each row's left and width (two columns)
 // And where an option row's value was: from just left of its "<" (g_row_vl)
 // to its middle (g_row_vm) is the side a click steps back on.
 float g_row_vl[kRowCount] = {}, g_row_vm[kRowCount] = {};
@@ -429,6 +431,69 @@ bool g_res_reverting = false;  // the change back itself asks nothing
 
 bool selectable(int r) {
     return r >= 0 && r < kRowCount && g_rows[r].kind != Row::Header && g_rows[r].kind != Row::Info;
+}
+
+// The sections: each header row starts one, shown as a tab.
+int g_sections[16];
+int g_section_count = [] {
+    int n = 0;
+    for (int r = 0; r < kRowCount && n < 16; ++r)
+        if (g_rows[r].kind == Row::Header) g_sections[n++] = r;
+    return n;
+}();
+int g_section_sel[16] = {};  // the row last selected in each section
+
+int section_of(int r) {
+    int s = 0;
+    for (int i = 0; i < g_section_count; ++i)
+        if (g_sections[i] <= r) s = i;
+    return s;
+}
+
+// A tab's name: the header's words, capitalised as a title.
+const char* section_name(int s) {
+    static std::string names[16];
+    std::string& n = names[s];
+    if (n.empty()) {
+        const char* h = g_rows[g_sections[s]].text;
+        bool start = true;
+        for (const char* c = h; *c; ++c) {
+            const char ch = *c;
+            n += start ? ch : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            start = ch == ' ';
+        }
+        if (n == "Camera & controls") n = "Camera & Controls";
+        if (n == "Online & account") n = "Online";
+        if (n == "Graphics & effects") n = "Graphics";
+    }
+    return n.c_str();
+}
+
+// Up and Down: the next selectable row inside the section, round its end.
+void move_in_section(int step) {
+    const int s = section_of(g_sel);
+    const int first = g_sections[s] + 1, end = s + 1 < g_section_count ? g_sections[s + 1] : kRowCount;
+    const int n = end - first;
+    if (n <= 0) return;
+    int r = g_sel;
+    for (int i = 0; i < n; ++i) {
+        r = first + ((r - first + step) % n + n) % n;
+        if (selectable(r)) { g_sel = r; break; }
+    }
+    g_section_sel[s] = g_sel;
+}
+
+// A tab: the row last chosen there, else its first selectable one.
+void go_section(int s) {
+    s = ((s % g_section_count) + g_section_count) % g_section_count;
+    g_section_sel[section_of(g_sel)] = g_sel;
+    const int first = g_sections[s] + 1, end = s + 1 < g_section_count ? g_sections[s + 1] : kRowCount;
+    int r = g_section_sel[s];
+    if (r < first || r >= end || !selectable(r)) {
+        r = first;
+        while (r < end && !selectable(r)) ++r;
+    }
+    if (r < end) g_sel = r;
 }
 
 // Whether the resolution entry `index` changes while the game runs. One past
@@ -1173,12 +1238,20 @@ bool host_options_key(int scancode, bool repeat) {
     }
     const int step = scancode == SDL_SCANCODE_UP ? -1 : scancode == SDL_SCANCODE_DOWN ? 1 : 0;
     if (step) {
-        for (int i = 0; i < kRowCount; ++i) {
-            g_sel = (g_sel + step + kRowCount) % kRowCount;
-            if (selectable(g_sel)) {
-                break;
-            }
-        }
+        move_in_section(step);
+        return true;
+    }
+    // The section tabs: Q / E, Page Up / Down, Tab (Shift+Tab back), 1-7.
+    const bool shift = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+    int tab = 0;
+    if (scancode == SDL_SCANCODE_Q || scancode == SDL_SCANCODE_PAGEUP || (scancode == SDL_SCANCODE_TAB && shift)) tab = -1;
+    if (scancode == SDL_SCANCODE_E || scancode == SDL_SCANCODE_PAGEDOWN || (scancode == SDL_SCANCODE_TAB && !shift)) tab = 1;
+    if (tab) {
+        go_section(section_of(g_sel) + tab);
+        return true;
+    }
+    if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_9 && scancode - SDL_SCANCODE_1 < g_section_count) {
+        go_section(scancode - SDL_SCANCODE_1);
         return true;
     }
     const int id = g_rows[g_sel].setting;
@@ -1282,58 +1355,68 @@ std::vector<std::string> wrap_note(const char* text, float width, float scale, s
 
 void options_panel_frame(float display_w, float display_h) {
     edit_poll();
-    // Tall enough for every row: headers take 32 px, rows 40, and the note and
-    // key guide under them 100. A fixed 620 had been outgrown by the rows, and
-    // then so had 1080 lines - so when the display is shorter than that the
-    // pitch closes up to fit (the text keeps its size), rather than the last
-    // rows running under the key guide and off the panel.
-    // The rows outgrew every display once the account section came, so
-    // rather than closing the pitch up until the lines overlap, the
-    // list scrolls: the rows that fit are drawn, the selection is kept in
-    // view, and a hint says there is more above or below.
-    float rows_h = 0.0f;
-    for (const Row& r : g_rows) rows_h += r.kind == Row::Header ? 34.0f : 40.0f;
-    const float room = display_h - 20.0f - 228.0f;
-    const float fit = 1.0f;
-    const bool scrolls = rows_h > room && room > 0.0f;
-    // rc2: the foot holds the note wrapped to three lines and the key guide.
-    constexpr float kFoot = 128.0f;
-    const float pw = 900.0f, ph = std::fmin(100.0f + rows_h + kFoot, display_h - 20.0f);
-    const float px = (display_w - pw) * 0.5f, py = (display_h - ph) * 0.5f;
-    static int g_scroll = 0;  // the first row drawn
-    if (!scrolls) {
-        g_scroll = 0;
-    } else {
-        auto height = [](int r) { return g_rows[r].kind == Row::Header ? 34.0f : 40.0f; };
-        const float avail = ph - 100.0f - kFoot - 24.0f;  // less the two hints
-        // A header just above the selection comes along, so a section never
-        // starts with its title out of view.
-        int top = g_sel;
-        while (top > 0 && (g_rows[top - 1].kind == Row::Header || g_rows[top - 1].kind == Row::Info)) --top;
-        if (g_scroll > top) g_scroll = top;
-        for (;;) {
-            float h = 0.0f;
-            for (int r = g_scroll; r <= g_sel; ++r) h += height(r);
-            if (h <= avail || g_scroll >= g_sel) break;
-            ++g_scroll;
+    // Helia's Dream's layout (the launcher's): a wide glass pane, the sections
+    // as pill tabs along its top, one section at a time in two columns, with
+    // room between the rows. Up and Down move inside the section; Q / E, Tab
+    // or Page Up / Down (and a click on a tab) change it.
+    const float pw = std::fmin(1360.0f, display_w - 80.0f);
+    const float ph = std::fmin(760.0f, display_h - 60.0f);
+    const float px = std::floor((display_w - pw) * 0.5f), py = std::floor((display_h - ph) * 0.5f);
+    constexpr float kHead = 150.0f;  // title, online state, tabs
+    constexpr float kFoot = 150.0f;  // the note and the key guide
+    constexpr float kRowH = 46.0f, kPitch = 56.0f, kColGap = 24.0f;
+    const int sec = section_of(g_sel);
+    const int sec_first = g_sections[sec], sec_end = sec + 1 < g_section_count ? g_sections[sec + 1] : kRowCount;
+
+    // The section's rows, split into two columns when they do not fit one.
+    int rows[kRowCount];
+    int n = 0;
+    for (int r = sec_first + 1; r < sec_end; ++r) rows[n++] = r;
+    const float body_h = ph - kHead - kFoot;
+    const int per_col_fit = std::max(1, static_cast<int>(body_h / kPitch));
+    const bool two = n > 6 || n > per_col_fit;
+    const int col_rows = two ? (n + 1) / 2 : n;
+    const float col_w = two ? (pw - 56.0f - kColGap) * 0.5f : pw - 56.0f;
+    const float pitch = std::fmin(kPitch, col_rows > 0 ? body_h / static_cast<float>(col_rows) : kPitch);
+    const float row_h = std::fmin(kRowH, pitch - 6.0f);
+    for (int r = 0; r < kRowCount; ++r) g_row_y[r] = -10000.0f;  // other sections: the pointer cannot land on them
+    for (int i = 0; i < n; ++i) {
+        const int col = two && i >= col_rows ? 1 : 0;
+        const int k = col ? i - col_rows : i;
+        g_row_xs[rows[i]] = px + 28.0f + static_cast<float>(col) * (col_w + kColGap);
+        g_row_ws[rows[i]] = col_w;
+        g_row_y[rows[i]] = py + kHead + static_cast<float>(k) * pitch;
+    }
+    g_row_h = row_h;
+
+    // The tabs, measured before the pointer is handled.
+    constexpr float kTabFont = 17.0f;
+    float tab_x[16], tab_w[16];
+    const float tab_y = py + 92.0f, tab_h = 38.0f;
+    {
+        float tx = px + 28.0f + 5.0f;
+        for (int t = 0; t < g_section_count; ++t) {
+            tab_w[t] = host_overlay_ui_text_width(kOverlayFontBold, kTabFont, section_name(t)) + 34.0f;
+            tab_x[t] = tx;
+            tx += tab_w[t] + 4.0f;
         }
     }
 
-    // The pointer, before anything is drawn, against last frame's rows - the
-    // layout does not move between frames unless the display size does, and
-    // hit-testing what was actually drawn is the rule the overlay is for.
-    //
-    // Hover selects only when the pointer **moves** (or clicks). Taken every
-    // frame, a pointer resting on the panel held the selection on its row, and
-    // the arrow keys could not move it.
+    // The pointer, against this frame's layout. Hover selects only when the
+    // pointer moves (or clicks), so a pointer resting on the panel does not
+    // hold the selection against the arrow keys.
     const MouseState m = host_mouse_state();
     static float last_x = -1.0f, last_y = -1.0f;
     const bool moved = m.x != last_x || m.y != last_y;
     last_x = m.x;
     last_y = m.y;
+    if (m.in_window && (m.pressed & 1u) && m.y >= tab_y && m.y < tab_y + tab_h) {
+        for (int t = 0; t < g_section_count; ++t)
+            if (m.x >= tab_x[t] && m.x < tab_x[t] + tab_w[t]) go_section(t);
+    }
     if (g_laid_out && m.in_window && (moved || (m.pressed & 3u))) {
         for (int r = 0; r < kRowCount; ++r) {
-            if (!selectable(r) || m.x < g_row_x || m.x > g_row_x + g_row_w) {
+            if (!selectable(r) || m.x < g_row_xs[r] || m.x > g_row_xs[r] + g_row_ws[r]) {
                 continue;
             }
             if (m.y >= g_row_y[r] && m.y < g_row_y[r] + g_row_h) {
@@ -1348,9 +1431,8 @@ void options_panel_frame(float display_w, float display_h) {
                     } else if (g_rows[r].kind == Row::Action) {
                         account_action(g_rows[r].field, g_field[0], g_field[1]);
                     } else if (g_rows[r].setting >= 0) {
-                        // By where it lands, as the arrows are drawn: on the
-                        // value's "<" half it steps back, on its ">" half
-                        // forward. The label steps forward, as Enter does.
+                        // On the value pill's left half it steps back, on its
+                        // right half forward; the label steps forward, as Enter does.
                         const bool back = m.x >= g_row_vl[r] && m.x < g_row_vm[r];
                         set_index(g_rows[r].setting, g_set[g_rows[r].setting].index + (back ? -1 : 1), false);
                     }
@@ -1363,80 +1445,54 @@ void options_panel_frame(float display_w, float display_h) {
             }
         }
     }
-    if (m.wheel != 0.0f) {
-        const int step = m.wheel > 0.0f ? -1 : 1;
-        for (int i = 0; i < kRowCount; ++i) {
-            g_sel = (g_sel + step + kRowCount) % kRowCount;
-            if (selectable(g_sel)) {
-                break;
-            }
-        }
-    }
+    if (m.wheel != 0.0f) move_in_section(m.wheel > 0.0f ? -1 : 1);
 
-    // Panel: Helia's Dream's glass (the launcher's look). A dimmed frame, a
-    // translucent pane with a bright top edge, rows as soft wells, the chosen
-    // one in the moonlit accent, On/Off as switches.
-    constexpr std::uint32_t kText = 0xe9edf5ffu, kSoft = 0xc3cad6ffu, kMuted = 0xa7b0c0ffu, kAccent = 0xa9bfe3ffu;
-    host_overlay_rect(0.0f, 0.0f, display_w, display_h, 0x05060a99u);
-    host_overlay_round_rect(px - 1.0f, py + 6.0f, pw + 2.0f, ph + 10.0f, 26.0f, 0x00000000u, 0x00000066u);  // shadow
-    host_overlay_round_rect(px, py, pw, ph, 24.0f, 0x1a1f2bf2u, 0x0d1017f5u);
-    host_overlay_round_frame(px, py, pw, ph, 24.0f, 1.0f, 0xffffff4cu, 0xffffff14u);
-    // The moon's glint in the corner: a soft disc.
-    host_overlay_round_rect(px + pw - 118.0f, py + 22.0f, 40.0f, 40.0f, 20.0f, 0xe9eefaccu, 0xc8d6f0aau);
-    host_overlay_ui_text(kOverlayFontTitle, px + 30.0f, py + 16.0f, 44.0f, kText, "Helia's Dream");
-    host_overlay_ui_text(kOverlayFontBody, px + 32.0f, py + 60.0f, 17.0f, kMuted, "Settings  -  they apply live in the game");
-    // The online state, always in view whatever the list is scrolled to:
-    // who this is signed in as, and the room when there is one.
+    // Frosted glass: no pane colour, the game behind the panel blurred (the
+    // presenter draws it, host/present_pass.h), with only a bright edge and a
+    // breath of tint - the tint alone is what shows where the blur cannot be
+    // drawn (an FSR 1 picture, which takes the blit's path).
+    constexpr std::uint32_t kText = 0xf2f5faffu, kSoft = 0xdde2eaffu, kMuted = 0xb9c1cfffu, kAccent = 0xc2d3efffu;
+    host_overlay_glass(px, py, pw, ph, 28.0f);
+    host_overlay_round_rect(px, py, pw, ph, 28.0f, 0x0c0f1626u, 0x0c0f1633u);
+    host_overlay_round_frame(px, py, pw, ph, 28.0f, 1.0f, 0xffffff66u, 0xffffff17u);
+    host_overlay_round_rect(px + pw - 86.0f, py + 26.0f, 42.0f, 42.0f, 21.0f, 0xe9eefad0u, 0xc8d6f0a8u);  // the moon
+    host_overlay_ui_text(kOverlayFontTitle, px + 30.0f, py + 18.0f, 46.0f, kText, "Helia's Dream");
+    host_overlay_ui_text(kOverlayFontBody, px + 32.0f, py + 64.0f, 16.0f, kMuted, "Settings apply live in the game");
     {
         const std::string online = hle_np_online_status();
         const float ow = host_overlay_ui_text_width(kOverlayFontBody, 16.0f, online.c_str());
-        host_overlay_ui_text(kOverlayFontBody, px + pw - 140.0f - ow, py + 34.0f, 16.0f, kSoft, online.c_str());
+        host_overlay_ui_text(kOverlayFontBody, px + pw - 110.0f - ow, py + 38.0f, 16.0f, kSoft, online.c_str());
     }
-    host_overlay_rect(px + 28.0f, py + 88.0f, pw - 56.0f, 1.0f, 0xffffff1au);
+    // Tabs: a dark track, the chosen section a bright glass bead.
+    host_overlay_round_rect(px + 28.0f, tab_y - 5.0f, tab_x[g_section_count - 1] + tab_w[g_section_count - 1] + 5.0f - (px + 28.0f),
+                            tab_h + 10.0f, (tab_h + 10.0f) * 0.5f, 0x0000005cu, 0x00000047u);
+    for (int t = 0; t < g_section_count; ++t) {
+        const bool on = t == sec;
+        if (on) host_overlay_round_rect(tab_x[t], tab_y, tab_w[t], tab_h, tab_h * 0.5f, 0xffffffebu, 0xd6e0f2d9u);
+        host_overlay_ui_text(kOverlayFontBold, tab_x[t] + 17.0f, tab_y + (tab_h - kTabFont * 1.2f) * 0.5f, kTabFont,
+                             on ? 0x0b0d12ffu : 0xd5dbe6ffu, section_name(t));
+    }
 
-    float y = py + 100.0f;
-    g_row_h = 36.0f * fit;
-    g_row_x = px + 20.0f;
-    g_row_w = pw - 40.0f;
-    const float y_end = py + ph - kFoot;
-    if (scrolls && g_scroll > 0) {
-        host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y, 15.0f, kMuted, "\x5e  more above");
-        y += 24.0f;
-    }
-    // A label and value line's text, centred in the row.
-    const float text_dy = (g_row_h - 20.0f) * 0.5f - 1.0f;
-    bool more_below = false;
-    for (int r = 0; r < kRowCount; ++r) {
+    const float text_dy = (row_h - 21.0f) * 0.5f;
+    for (int i = 0; i < n; ++i) {
+        const int r = rows[i];
         const Row& row = g_rows[r];
-        const float h = (row.kind == Row::Header ? 34.0f : 40.0f) * fit;
-        if (r < g_scroll || y + h > y_end - (scrolls ? 24.0f : 0.0f)) {
-            g_row_y[r] = -10000.0f;  // not drawn: the pointer cannot land on it
-            if (r >= g_scroll) more_below = true;
-            continue;
-        }
-        g_row_y[r] = y;
-        if (row.kind == Row::Header) {
-            // An eyebrow: small, spaced capitals.
-            float hx = px + 34.0f;
-            for (const char* c = row.text; *c; ++c) {
-                const char one[2] = {*c, 0};
-                hx += host_overlay_ui_text(kOverlayFontBold, hx, y + 12.0f * fit, 13.0f, kMuted, one) + 1.6f;
-            }
-            y += 34.0f * fit;
-            continue;
-        }
+        const float x = g_row_xs[r], w = g_row_ws[r], y = g_row_y[r];
         const bool sel = r == g_sel;
-        if (sel) {
-            host_overlay_round_rect(g_row_x, y, g_row_w, g_row_h, 12.0f, 0xa9bfe347u, 0xa9bfe324u);
-            host_overlay_round_frame(g_row_x, y, g_row_w, g_row_h, 12.0f, 1.0f, 0xc9d6ee80u, 0xa9bfe333u);
-        } else {
-            host_overlay_round_rect(g_row_x, y, g_row_w, g_row_h, 12.0f, 0xffffff0au, 0xffffff06u);
+        if (row.kind != Row::Info) {
+            if (sel) {
+                host_overlay_round_rect(x, y, w, row_h, 14.0f, 0xa9bfe352u, 0xa9bfe32eu);
+                host_overlay_round_frame(x, y, w, row_h, 14.0f, 1.0f, 0xc9d6ee8cu, 0xa9bfe338u);
+            } else {
+                host_overlay_round_rect(x, y, w, row_h, 14.0f, 0x0000003du, 0x00000029u);
+                host_overlay_round_frame(x, y, w, row_h, 14.0f, 1.0f, 0xffffff17u, 0xffffff08u);
+            }
         }
         const std::uint32_t label_c = sel ? kText : kSoft;
+        const float lx = x + 18.0f, right = x + w - 16.0f;
         if (row.kind == Row::Close || row.kind == Row::Action) {
             const bool busy = row.kind == Row::Action && !action_idle(row.field);
-            host_overlay_ui_text(kOverlayFontBold, px + 40.0f, y + text_dy, 19.0f, busy ? 0x6a7080ffu : label_c, row.text);
-            y += 40.0f * fit;
+            host_overlay_ui_text(kOverlayFontBold, lx, y + text_dy, 19.0f, busy ? 0x6a7080ffu : label_c, row.text);
             continue;
         }
         if (row.kind == Row::Info) {
@@ -1444,32 +1500,29 @@ void options_panel_frame(float display_w, float display_h) {
                                      : row.field == 10 ? updater::status()
                                      : row.field == 1  ? account_detail()
                                                        : account_status();
-            host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y + text_dy + 1.0f, 16.0f, kMuted, line.c_str());
-            y += 40.0f * fit;
+            host_overlay_ui_text(kOverlayFontBody, lx, y + text_dy, 17.0f, kMuted, line.c_str());
             continue;
         }
         if (row.kind == Row::Text) {
-            host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y + text_dy, 19.0f, label_c, row.text);
+            host_overlay_ui_text(kOverlayFontBody, lx, y + text_dy, 19.0f, label_c, row.text);
             std::string shown = g_field[row.field];
             if (g_edit_field == row.field) shown += "_";
             if (shown.empty()) shown = "(type here)";
             const float vw = host_overlay_ui_text_width(kOverlayFontBold, 18.0f, shown.c_str());
-            const float vx = px + pw - 52.0f - vw;
-            host_overlay_round_rect(vx - 14.0f, y + 5.0f, vw + 28.0f, g_row_h - 10.0f, 13.0f, 0x0000004du, 0x00000040u);
+            const float vx = right - 16.0f - vw;
+            host_overlay_round_rect(vx - 16.0f, y + 6.0f, vw + 32.0f, row_h - 12.0f, (row_h - 12.0f) * 0.5f, 0x0000004du, 0x00000040u);
             host_overlay_ui_text(kOverlayFontBold, vx, y + text_dy, 18.0f, g_edit_field == row.field ? kAccent : sel ? kText : kSoft,
                                  shown.c_str());
-            y += 40.0f * fit;
             continue;
         }
         const Setting& s = g_set[row.setting];
-        const float lw = host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y + text_dy, 19.0f, label_c, s.label);
+        const float lw = host_overlay_ui_text(kOverlayFontBody, lx, y + text_dy, 19.0f, label_c, s.label);
         const bool toggle = s.values.size() == 2 &&
                             ((std::strcmp(s.values[0], "On") == 0 && std::strcmp(s.values[1], "Off") == 0) ||
                              (std::strcmp(s.values[0], "Off") == 0 && std::strcmp(s.values[1], "On") == 0));
         if (toggle) {
-            // A switch: the accent track with a dark knob on the right when on.
             const bool on = reads_on(s, s.index);
-            const float tw = 46.0f, th = 24.0f, tx = px + pw - 48.0f - tw, ty = y + (g_row_h - th) * 0.5f;
+            const float tw = 48.0f, th = 26.0f, tx = right - tw, ty = y + (row_h - th) * 0.5f;
             host_overlay_round_rect(tx, ty, tw, th, th * 0.5f, on ? 0xbccdeaffu : 0xffffff26u, on ? 0xa9bfe3ffu : 0xffffff1au);
             if (!on) host_overlay_round_frame(tx, ty, tw, th, th * 0.5f, 1.0f, 0xffffff40u, 0xffffff26u);
             const float kx = on ? tx + tw - th + 3.0f : tx + 3.0f;
@@ -1477,33 +1530,28 @@ void options_panel_frame(float display_w, float display_h) {
                                     on ? 0x0b0d12ffu : 0xc3cad6ffu);
             g_row_vl[r] = g_row_vm[r] = 0.0f;  // a click anywhere flips it
         } else {
-            // The value in a pill, with chevrons either side; the pill's left
-            // half steps back, its right half forward (the click rule above).
             const char* v = s.values[static_cast<std::size_t>(s.index)];
             if (std::strcmp(s.key, "window_mode") == 0 && std::strcmp(v, "Fullscreen") == 0) v = "Fullscreen (borderless)";
             const float vw = host_overlay_ui_text_width(kOverlayFontBold, 18.0f, v);
-            const float pr = px + pw - 46.0f;           // the pill's right edge
-            const float pl = pr - vw - 64.0f;            // its left edge
-            const float ty = y + 4.0f, th = g_row_h - 8.0f;
-            host_overlay_round_rect(pl, ty, pr - pl, th, th * 0.5f, sel ? 0x0000005cu : 0x00000040u, sel ? 0x0000004cu : 0x00000033u);
-            host_overlay_round_frame(pl, ty, pr - pl, th, th * 0.5f, 1.0f, sel ? 0xc9d6ee55u : 0xffffff1cu, 0xffffff0fu);
-            host_overlay_ui_text(kOverlayFontBold, pl + 32.0f, y + text_dy, 18.0f, sel ? kText : kSoft, v);
+            const float pr = right + 4.0f, pl = pr - vw - 66.0f;
+            const float ty = y + 6.0f, th = row_h - 12.0f;
+            host_overlay_round_rect(pl, ty, pr - pl, th, th * 0.5f, sel ? 0x00000066u : 0x00000047u, sel ? 0x00000052u : 0x00000038u);
+            host_overlay_round_frame(pl, ty, pr - pl, th, th * 0.5f, 1.0f, sel ? 0xc9d6ee66u : 0xffffff1cu, 0xffffff0fu);
+            host_overlay_ui_text(kOverlayFontBold, pl + 33.0f, y + text_dy, 18.0f, sel ? kText : kSoft, v);
             const std::uint32_t chev_on = sel ? kAccent : 0x8b94a6ffu, chev_off = 0xffffff1fu;
-            const float cy = y + g_row_h * 0.5f;
+            const float cy = y + row_h * 0.5f;
             const std::uint32_t back = s.index > 0 ? chev_on : chev_off;
             const std::uint32_t fwd = s.index + 1 < static_cast<int>(s.values.size()) ? chev_on : chev_off;
-            host_overlay_tri(pl + 20.0f, cy - 6.0f, pl + 20.0f, cy + 6.0f, pl + 13.0f, cy, back);
-            host_overlay_tri(pr - 20.0f, cy - 6.0f, pr - 20.0f, cy + 6.0f, pr - 13.0f, cy, fwd);
+            host_overlay_tri(pl + 21.0f, cy - 6.0f, pl + 21.0f, cy + 6.0f, pl + 14.0f, cy, back);
+            host_overlay_tri(pr - 21.0f, cy - 6.0f, pr - 21.0f, cy + 6.0f, pr - 14.0f, cy, fwd);
             g_row_vl[r] = pl - 10.0f;
             g_row_vm[r] = (pl + pr) * 0.5f;
         }
         if (s.restart && !(row.setting == kResolution && res_live(s.index))) {
-            host_overlay_ui_text(kOverlayFontBody, px + 40.0f + lw + 12.0f, y + text_dy + 3.0f, 14.0f, 0x8b94a6ffu, "restart");
+            const float rx = lx + lw + 10.0f, rw = host_overlay_ui_text_width(kOverlayFontBold, 12.0f, "RESTART") + 14.0f;
+            host_overlay_round_rect(rx, y + (row_h - 20.0f) * 0.5f, rw, 20.0f, 10.0f, 0xffffff1au, 0xffffff12u);
+            host_overlay_ui_text(kOverlayFontBold, rx + 7.0f, y + (row_h - 20.0f) * 0.5f + 3.0f, 12.0f, kMuted, "RESTART");
         }
-        y += 40.0f * fit;
-    }
-    if (more_below) {
-        host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y, 15.0f, kMuted, "v  more below");
     }
     g_laid_out = true;
 
@@ -1528,15 +1576,15 @@ void options_panel_frame(float display_w, float display_h) {
         note = f >= 10 ? kUpdateNotes[f - 10] : kNotes[f];
     }
     // The note in a well of its own, like a launcher tooltip.
-    const float ny = py + ph - 112.0f;
-    host_overlay_round_rect(px + 20.0f, ny, pw - 40.0f, 72.0f, 14.0f, 0x0000004du, 0x0000003au);
-    host_overlay_round_frame(px + 20.0f, ny, pw - 40.0f, 72.0f, 14.0f, 1.0f, 0xffffff1au, 0xffffff0au);
+    const float ny = py + ph - kFoot + 18.0f;
+    host_overlay_round_rect(px + 28.0f, ny, pw - 56.0f, 78.0f, 16.0f, 0x00000047u, 0x00000033u);
+    host_overlay_round_frame(px + 28.0f, ny, pw - 56.0f, 78.0f, 16.0f, 1.0f, 0xffffff1au, 0xffffff0au);
     if (note) {
         // Wrapped by the monospace measure (about as wide as the proportional
         // face at this size), at most three lines, the last cut with "...".
-        const auto lines = wrap_note(note, pw - 80.0f, 0.62f, 3);
+        const auto lines = wrap_note(note, pw - 100.0f, 0.66f, 3);
         for (std::size_t i = 0; i < lines.size(); ++i)
-            host_overlay_ui_text(kOverlayFontBody, px + 36.0f, ny + 9.0f + 20.0f * static_cast<float>(i), 16.0f, kSoft, lines[i].c_str());
+            host_overlay_ui_text(kOverlayFontBody, px + 46.0f, ny + 12.0f + 21.0f * static_cast<float>(i), 17.0f, kSoft, lines[i].c_str());
     }
     // rc2: each selection change in the log with the overlay's size (the
     // F10 bug was a selection that took the vertices past the buffer).
@@ -1552,15 +1600,16 @@ void options_panel_frame(float display_w, float display_h) {
     }
     // The key guide as small pills.
     {
-        static const char* const kKeys[][2] = {{"Arrows", "move and change"}, {"Enter", "toggles"}, {"Click", "sets"}, {"Esc / F10", "closes"}};
-        float kx = px + 24.0f;
-        const float ky = py + ph - 32.0f;
+        static const char* const kKeys[][2] = {
+            {"Up / Down", "move"}, {"Left / Right", "change"}, {"Q / E", "section"}, {"Enter", "toggles"}, {"Esc / F10", "closes"}};
+        float kx = px + 30.0f;
+        const float ky = py + ph - 40.0f;
         for (const auto& k : kKeys) {
             const float kw = host_overlay_ui_text_width(kOverlayFontBold, 14.0f, k[0]);
-            host_overlay_round_rect(kx, ky - 3.0f, kw + 18.0f, 22.0f, 11.0f, 0xffffff1fu, 0xffffff14u);
-            host_overlay_ui_text(kOverlayFontBold, kx + 9.0f, ky, 14.0f, kText, k[0]);
-            kx += kw + 26.0f;
-            kx += host_overlay_ui_text(kOverlayFontBody, kx, ky, 14.0f, kMuted, k[1]) + 22.0f;
+            host_overlay_round_rect(kx, ky - 4.0f, kw + 20.0f, 24.0f, 12.0f, 0xffffff24u, 0xffffff17u);
+            host_overlay_ui_text(kOverlayFontBold, kx + 10.0f, ky, 14.0f, kText, k[0]);
+            kx += kw + 28.0f;
+            kx += host_overlay_ui_text(kOverlayFontBody, kx, ky, 14.0f, kMuted, k[1]) + 26.0f;
         }
     }
 }

@@ -37,6 +37,7 @@ std::mutex g_mu;
 std::vector<Vertex> g_verts;  // being built by the pump (under g_mu)
 std::vector<Vertex> g_shown;  // what presents draw (under g_mu)
 std::atomic<std::size_t> g_shown_count{0};
+std::vector<OverlayGlass> g_glass, g_glass_shown;  // frosted panes, built and shown with the lists (under g_mu)
 
 // Presenter-owned, created once for the swapchain's format.
 VkDevice g_device = VK_NULL_HANDLE;
@@ -107,11 +108,25 @@ VkShaderModule make_module(VkDevice device, const std::uint32_t* words, std::siz
 void host_overlay_reset() {
     std::lock_guard<std::mutex> lk(g_mu);
     g_verts.clear();
+    g_glass.clear();
+}
+
+void host_overlay_glass(float x, float y, float w, float h, float radius, float blur, float brightness) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_glass.size() < 16) g_glass.push_back({x, y, w, h, radius, blur, brightness});
+}
+
+std::size_t host_overlay_glass_shown(OverlayGlass* out, std::size_t max) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    const std::size_t n = std::min(max, g_glass_shown.size());
+    for (std::size_t i = 0; i < n; ++i) out[i] = g_glass_shown[i];
+    return n;
 }
 
 void host_overlay_commit() {
     std::lock_guard<std::mutex> lk(g_mu);
     g_shown.swap(g_verts);
+    g_glass_shown.swap(g_glass);
     g_shown_count.store(g_shown.size(), std::memory_order_release);
 }
 
