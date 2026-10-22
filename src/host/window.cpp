@@ -1466,11 +1466,11 @@ void text_title_locked() {
     if (g_text_want) {
         std::string shown = g_entry.text;
         if (g_text_hidden) shown.assign(g_entry.length(), '*');
-        const std::string t = "Bloodborne (bbhost)  |  " + g_text_label + ": " + shown +
+        const std::string t = "Bloodborne (Helia's Dream)  |  " + g_text_label + ": " + shown +
                               "_   (Enter = OK, Esc = cancel, Ctrl+V = paste)";
         SDL_SetWindowTitle(g_window, t.c_str());
     } else {
-        SDL_SetWindowTitle(g_window, "Bloodborne (bbhost)");
+        SDL_SetWindowTitle(g_window, "Bloodborne (Helia's Dream)");
     }
 #endif
 }

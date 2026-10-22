@@ -25,7 +25,7 @@ rev=$(git -c core.excludesFile=/dev/null describe --tags --match 'v[0-9]*' --alw
 if [ -n "$(git -c core.excludesFile=/dev/null status --porcelain --untracked-files=no 2>/dev/null)" ]; then
     rev="$rev+"
 fi
-name=bbhost-vk-linux-$rev
+name=helias-dream-linux-$rev
 dir=$out/$name
 rm -rf "$dir"
 mkdir -p "$dir/data" "$dir/logs" "$dir/plugins" "$dir/build"
@@ -130,8 +130,8 @@ the PS4's system libraries answered by bbhost and its graphics recompiled for
 Vulkan. Free software under the GNU GPL, version 3 or later (LICENSE); the
 source is at https://github.com/droogie/bbhost.
 
-This is bbhost-vk, a test build of a fork of bbhost with FSR 3.1 and FSR 4.1.1
-upscaling (https://github.com/Heliasyu/bbhost-vk). README-TESTING.txt says how
+This is Helia's Dream, built on bbhost, with FSR 3.1 and FSR 4.1.1 upscaling,
+frame rate caps and DualSense haptics (https://github.com/Heliasyu/helias-dream). README-TESTING.txt says how
 to install it over an existing bbhost, build FSR 4.1.1 and what to test;
 docs/TESTING.md is the full test session. Online is unchanged: the same
 community server as bbhost (https://thehuntersdream.com).

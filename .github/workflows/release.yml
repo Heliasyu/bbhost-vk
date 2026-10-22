@@ -138,7 +138,7 @@ jobs:
           unzip -q -j "$w" "bbhost-win-$v/bbhost.exe" -d dist/x
           mv dist/x/bbhost.exe dist/release/bbhost.exe
           # bbhost-vk: the Linux package is named by tools/package_linux.sh
-          # (bbhost-vk-linux-<git describe>), not after the Windows zip's revision.
+          # (helias-dream-linux-<git describe>), not after the Windows zip's revision.
           l=$(ls dist/linux/bbhost*-linux-*.tar.gz | head -1); ln=$(basename "$l" .tar.gz)
           tar xzf "$l" -C dist/x "$ln/bbhost"
           install -m 755 "dist/x/$ln/bbhost" dist/release/bbhost

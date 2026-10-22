@@ -11,11 +11,11 @@ sd=$PWD/tools/steamdeck
 mkdir -p "$out"
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 (cd "$work" && tar xzf "$lin_tgz")
-# bbhost-vk: the Linux package is bbhost-vk-linux-<rev> (tools/package_linux.sh);
-# the kit keeps the prefix, bbhost-vk-steamdeck-<rev>.
-ldir=$(ls -d "$work"/bbhost-vk-linux-* "$work"/bbhost-linux-* 2>/dev/null | head -1)
+# bbhost-vk: the Linux package is helias-dream-linux-<rev> (tools/package_linux.sh);
+# the kit keeps the prefix, helias-dream-steamdeck-<rev>.
+ldir=$(ls -d "$work"/helias-dream-linux-* "$work"/bbhost-vk-linux-* "$work"/bbhost-linux-* 2>/dev/null | head -1)
 [ -n "$ldir" ] || { echo "no Linux package in $1"; exit 1; }
-name=$(basename "$ldir" | sed -E 's/^bbhost(-vk)?-linux-/bbhost\1-steamdeck-/')
+name=$(basename "$ldir" | sed -E 's/^(bbhost(-vk)?|helias-dream)-linux-/\1-steamdeck-/')
 cp "$sd/bbhost-steamdeck.toml" "$sd/STEAMDECK.md" "$ldir/"
 sed -i 's/^cfg=\${BBHOST_CONFIG:-bbhost.toml}/cfg=${BBHOST_CONFIG:-bbhost-steamdeck.toml}/' "$ldir/run-bbhost.sh"
 grep -q 'bbhost-steamdeck.toml' "$ldir/run-bbhost.sh" || { echo "run-bbhost.sh: config line not found"; exit 1; }

@@ -36,7 +36,7 @@ void start();
 void check_once();
 
 // The F10 rows and the setup window.
-std::string status();      // "bbhost v0.1.0 - up to date", "bbhost v0.2.0 is available (this is v0.1.0)", ...
+std::string status();      // "Helia's Dream v0.1.0 - up to date", "Helia's Dream v0.2.0 is available (this is v0.1.0)", ...
 std::string detail();      // why a check failed, or the newer release's page
 bool busy();               // a check is running
 void check_now();          // look again (the "Check for updates" row)
