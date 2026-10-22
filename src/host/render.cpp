@@ -302,7 +302,7 @@ struct Pass {
 Pass g_pass;
 const std::string* g_pass_profile_name = nullptr;  // the profile name of the draw beginning the next pass (BBHOST_GPU_PROFILE=3)
 
-// ---- Lazy pass barriers (on by default since bbhost-vk b7; BBHOST_PASS_BARRIERS=full: off) ----
+// ---- Lazy pass barriers (BBHOST_PASS_BARRIERS=lazy; off by default) ----
 // Every pass end put a full barrier behind it, attachment writes made visible
 // to everything after: ~45 a frame, ~2.5% of the Steam Deck's GPU frame and up
 // to 7% of the RTX 4070's (priced by leaving them all out). Ended between two
@@ -318,7 +318,11 @@ const std::string* g_pass_profile_name = nullptr;  // the profile name of the dr
 // read of a target this tracking does not see (a T# whose base is inside the
 // target rather than at it, or an image bound another way), which the
 // validation layer cannot see through the bindless set either.
-// bbhost-vk b7: on by default. The hazards are matched by range now (a T#
+// bbhost-vk b7 turned them on by default; b8 turns them off again: on the RX
+// 9070 XT, loading into the Hunter's Dream flashed white blocks at the top
+// and bottom of the screen with them and not with BBHOST_PASS_BARRIERS=full
+// (2026-10-21, round 4) - a hazard the tracking below still misses.
+// What b7 had going for it: The hazards are matched by range now (a T#
 // inside a target included: hazard_holds / hazard_inside below), the pass's
 // timestamp pair is closed on a lazy end (the GPU sampler's hang), and on
 // the RX 9070 XT the validation layer's synchronization checks found no
@@ -333,7 +337,7 @@ struct PassHazards {
 PassHazards g_hazards;
 const bool g_lazy_barriers = [] {
     const char* e = std::getenv("BBHOST_PASS_BARRIERS");
-    return !(e && std::strcmp(e, "full") == 0);
+    return e && std::strcmp(e, "lazy") == 0;
 }();
 
 // bbhost-vk: the hazards by range, not by base. A T# can point inside a

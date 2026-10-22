@@ -2205,8 +2205,8 @@ bool init_locked() {
     g.profile_gaps = g.profile && std::getenv("BBHOST_GPU_PROFILE")[0] == '2';
     // =3: a timestamp pair around each render pass, named by its first draw's
     // pipeline. With BBHOST_PASS_BARRIERS=full a barrier ends every pass, so a
-    // pass's pair is its own GPU time; with lazy barriers (the default since
-    // b7) a pass may start before the one before it has finished, and pairs
+    // pass's pair is its own GPU time; with lazy barriers (BBHOST_PASS_BARRIERS=lazy)
+    // a pass may start before the one before it has finished, and pairs
     // can overlap - compare passes across samples, not as exact shares.
     g.profile_passes = g.profile && std::getenv("BBHOST_GPU_PROFILE")[0] == '3';
     // rc2: the GPU sampler (sampler_begin_recording_locked): the timestamp
