@@ -147,6 +147,8 @@ enum SettingId {
     kGameLanguage,
     kMenuLanguage,
     kHdrUi,
+    // More > Performance (experimental): BBHOST_SUBMIT_SPLIT as a setting.
+    kSubmitSplit,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -425,6 +427,11 @@ Setting g_set[kSettingCount] = {
     {"hdr_ui_brightness", "UI brightness",
      {"Like the picture", "50%", "60%", "70%", "80%", "90%", "100%", "110%", "120%", "130%", "140%", "150%", "160%", "170%", "180%", "190%", "200%"}, 0,
      "HDR: the HUD, menus and subtitles at this share of paper white, kept out of the highlight boost. Like the picture: they are boosted as the rest.", false},
+    // test7's BBHOST_SUBMIT_SPLIT (host/gpu.cpp submit_split_point): every n-th
+    // draw, if the GPU has run dry, the recording so far is submitted mid-job.
+    // Live; the env var wins. Launcher only (More > Performance), no F10 row.
+    {"submit_split", "Submit split", {"Off", "32", "64", "128", "256"}, 0,
+     "Experimental: every N draws, if the GPU has nothing left to do, hand it the work recorded so far instead of waiting for the job's end.", false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -563,7 +570,7 @@ const bool g_table_order_ok = [] {
     };
     return at(kUpscaler, "upscaler") && at(kHaptics, "haptics") && at(kHdr, "hdr") && at(kMipBias, "mip_bias") && at(kPadIcons, "pad_icons") &&
            at(kCompileNote, "compile_note") && at(kGameLanguage, "game_language") && at(kMenuLanguage, "menu_language") &&
-           at(kHdrUi, "hdr_ui_brightness");
+           at(kHdrUi, "hdr_ui_brightness") && at(kSubmitSplit, "submit_split");
 }();
 
 std::array<int, kSettingCount> g_default_index = [] {
@@ -947,6 +954,7 @@ void apply(int id) {
         case kGameLanguage:
         case kMenuLanguage:
         case kHdrUi:
+        case kSubmitSplit:
             break;  // the settings object carries them (host/settings.h)
         case kSsao:
         case kMotionBlur:
@@ -1040,6 +1048,7 @@ bool on_of(int id) { return reads_on(g_set[id], g_set[id].index); }
 int index_of(int id) { return g_set[id].index; }
 
 std::atomic<float> g_mip_bias{0.0f};  // host_opt_mip_bias(): the samplers read it on every lookup
+std::atomic<unsigned> g_submit_split{0};  // host_opt_submit_split(): read at every draw
 
 void rebuild_settings() {
     HostSettings h;
@@ -1115,6 +1124,11 @@ void rebuild_settings() {
     {
         const int i = index_of(kHdrUi);
         h.hdr_ui_brightness = i <= 0 ? 0.0f : 0.4f + 0.1f * static_cast<float>(i);  // 1: 50%
+    }
+    {
+        const int i = index_of(kSubmitSplit);
+        h.submit_split = i > 0 ? static_cast<unsigned>(std::strtoul(g_set[kSubmitSplit].values[static_cast<std::size_t>(i)], nullptr, 10)) : 0u;
+        g_submit_split.store(h.submit_split, std::memory_order_relaxed);
     }
     {
         // The PS4's language codes, in the setting's order.
@@ -2073,6 +2087,7 @@ std::string host_account_detail() { return account_detail(); }
 bool host_account_take_save() { return g_acct_save.exchange(false); }
 
 float host_opt_mip_bias() { return g_mip_bias.load(std::memory_order_relaxed); }
+unsigned host_opt_submit_split() { return g_submit_split.load(std::memory_order_relaxed); }
 
 std::vector<std::string> host_options_menu_strings() {
     std::vector<std::string> out;
