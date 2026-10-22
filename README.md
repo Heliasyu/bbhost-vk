@@ -24,14 +24,15 @@ No game files, AMD DLLs or FSR 4.1.1 assets are in this repository or its releas
   - `bbtest` test sessions;
   - a GPU pass timer;
   - FSR stage dumps.
+- **DualSense and DualSense Edge (USB):** HD haptics from the game's rumble and sound effects (music and ambience filtered out), menu taps, and adaptive triggers that follow what the character does - R2's charged heavy attack, L2's trigger break that goes slack when no Quicksilver Bullets are carried.
 - **A launcher wrapper** for KDE/Wayland (`packaging/vk/bbhost`) that sizes the setup window correctly on monitors with or without display scaling.
 
 ## Status
 | | |
 |---|---|
-| Latest release | [`v0.2.18-vk.1`](https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.2.18-vk.1) (2026-10-18 build) |
-| `main` | vk.1 plus the rc2-rc7 performance work |
-| Measured (Old Yharnam, FSR 4.1.1 Performance, 4K, 120 cap) | 114-122 fps average, 1% lows 82-111. Heavy smoke still drops below 120. |
+| Latest release | [`v0.2.18-vk.2`](https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.2.18-vk.2) (2026-10-22) |
+| `main` | vk.2 |
+| Measured (Old Yharnam, FSR 4.1.1 Performance, 4K, 120 cap) | ~121-122 fps average, 1% lows ~110. Heavy smoke still drops below 120. |
 | The limit now | The single command-processor thread (`bb-cp0`, ~7 ms of an 8.33 ms frame) and a GPU frame at ~90% |
 | Not done yet | The launcher overhaul (mockups only, `docs/vk/mock/`), the `bb-cp0` split, the FSR 4.1.1 check against the DLL |
 
@@ -69,6 +70,7 @@ FSR 4.1.1 can't be redistributed, so you build its assets from your own copy of 
 - **Upscaler reactive mask** and **Upscaler jitter.**
 - **Show motion vectors** and **Show upscaler GPU time.** The GPU time view puts a `pass-timer:` line in the log every 10 s.
 - **Frame rate:** 30, 60, 90, 120 or Uncapped.
+- **Controller** (F10 > CONTROLLER, live): Haptics (Off, Rumble or HD), Haptics strength, Adaptive triggers, Trigger strength, Menu haptics. HD needs a DualSense or DualSense Edge on USB with its Bluetooth link off, and its sound card in the **Direct** profile (not Pro Audio).
 - **Where they're saved:** `~/.config/bbhost/bbhost-options.toml`. The FSR 4.1.1 DLL path (`upscaler.fsr4_dll`) is in `~/.config/bbhost/bbhost.toml`.
 
 Even frame pacing, post-processing at render size and the motion-blur skip are always on in `main`; their launcher switches were removed after vk.1. Environment variables still turn them off for comparison or if something looks wrong: `BBHOST_PRESENT_PACE=0`, `BBHOST_POST_AT_RENDER=0`, `BBHOST_MOTION_BLUR_SKIP=0`.

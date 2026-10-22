@@ -1,5 +1,20 @@
 # Known issues (bbhost-vk)
 
+## DualSense HD haptics: nothing is felt
+- **On Bluetooth with the cable in:** a DualSense already connected over Bluetooth stays on
+  Bluetooth when the USB cable goes in (it only charges), and ignores the sound card Linux
+  shows for it. Disconnect it in the Bluetooth settings and replug the cable. bbhost shows a
+  message when a DualSense is on Bluetooth.
+- **Pro Audio profile:** in PipeWire's Pro Audio profile the card's channels are AUX0..AUX3
+  and a 4-channel stream is mixed down onto the speaker's two. Set the card to **Direct**
+  (KDE: System Settings > Sound). The log says when the card is in Pro Audio.
+
+## Adaptive triggers on other weapons
+The R2 charge (032600 / 032610 / 032630) and the gun's shot (117051000) and empty pull
+(117054500) are the animations of the weapon and pistol they were tuned on. Weapons whose
+charged attacks or firearms use other animation numbers get the resting wall and break only;
+`BBHOST_HAPTICS_ANIM_LOG=1` logs the numbers to add.
+
 ## Vicar Amelia's textures come out broken, as rainbow noise
 - **Seen on:** rc7 (`v0.2.18-vk.1-18-gb369d66`), the Vicar Amelia fight, FSR 4.1.1 at Native AA
   (reported 2026-10-21). Not yet known whether stock bbhost shows it.

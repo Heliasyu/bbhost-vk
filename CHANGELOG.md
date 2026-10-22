@@ -1,5 +1,47 @@
 # Changelog (bbhost-vk)
 
+## vk.2 (2026-10-22, `v0.2.18-vk.2`)
+
+Everything since vk.1: the rc2-rc7 performance work below, batch 1's fixes, and DualSense
+haptics. Release notes for players: `docs/vk/RELEASE-v0.2.18-vk.2.md`.
+
+### DualSense / DualSense Edge (`src/host/haptics.cpp`)
+- **HD haptics over USB.** The controller is a 4-channel sound card; channels 3 and 4 drive
+  its motors. They play the game's rumble (each motor a tone) and its sound effects from the
+  main audio port's 7.1 mix - which carries the music too (the BGM port the game opens stays
+  silent): the centre, LFE, surrounds and backs through a transient gate (a hit is twice the
+  last 800 ms), the front pair - the music's - only at four times, then an expander that fades
+  what stays under 0.04. Tuned offline on recordings of the main port (`BBHOST_AUDIO_DUMP`).
+  `BBHOST_HAPTICS_TUNE=cutoff=,sustain=,floor=,ratio=,front=,slow=,expand=,carrier=,gain=,rumble=`
+  and `BBHOST_HAPTICS_CHANNELS=` for tuning.
+- **Menu taps:** a cursor move in any of the game's lists (engine/menu_pointer.cpp's list
+  update), a decide, a back; 0.55 / 0.65 / 0.60 of full scale, not scaled by Haptics strength.
+- **Adaptive triggers** through SDL's DualSense effect report, by the player's animation
+  (`world_player_anim`: SprjChrTimeActModule +0x20, found with `BBHOST_CHR_SCAN`): R2's wall
+  at zone 4 with the press registering at 0.55 (`BBHOST_R2_FIRE`), wind-up 032600
+  resistance, charge 032610 a growing hum, charged swing 032630 a kick, nothing after an
+  attack until R2 is let go; L2's break with the press at 0.65 (`BBHOST_L2_FIRE`), a recoil
+  kick on a shot (117051000), slack while no Quicksilver Bullets are carried
+  (`world_player_bullets`: goods 900 and 901 in the game data's inventory entries, found with
+  `BBHOST_FIND_BULLETS`). `BBHOST_HAPTICS_ANIM_LOG=1` logs each animation.
+- The controller's ALSA playback volume is raised to its maximum when HD opens (Linux leaves
+  it at -20 dB); HD only while a DualSense is connected by USB, with a message for one on
+  Bluetooth and a log line for a sound card in PipeWire's Pro Audio profile.
+- F10 > CONTROLLER: Haptics (Off / Rumble / HD), Haptics strength, Adaptive triggers,
+  Trigger strength, Menu haptics.
+
+### Fixes and tools (batch 1)
+- Linux: `host_desktop_max_size` reads the DRM connectors, so the display buffers are the
+  largest display's size and a Native AA start can split the scene live.
+- Upscaling quality changes live; AA Auto keeps the game's AA at Native AA.
+- Lazy pass barriers: hazards matched by range; a hang (an unclosed GPU-timer pair read with
+  WAIT) fixed; off by default again after white flashes at load-in (`BBHOST_PASS_BARRIERS=lazy`).
+- No layout change inside a render pass when a target is made mid-pass; `occlusion.spv.h`
+  rebuilt as valid SPIR-V.
+- `tools/vvl_game.sh` (a game session under synchronization validation),
+  `packaging/vk/run-tests.sh` (one command for a round of tests), `BBHOST_GPU_SAMPLE_SLOW=1`.
+- In-game help text for PC Upscaling and Vignette.
+
 ## vk.1-rc7 (2026-10-20, test build "build 6"/rc7, branch `phase-5-test-release`; not released)
 
 On top of rc6 (bddd030). Same rules: no picture, HDR, chromatic-aberration or menu change,
