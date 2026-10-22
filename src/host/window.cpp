@@ -15,6 +15,7 @@
 #include "host/options.h"
 #include "host/settings.h"
 #include "host/overlay.h"
+#include "host/trophies.h"
 #include "host/perf_capture.h"
 #include "host/present_pass.h"
 #include "host/ingame_menu.h"
@@ -2509,6 +2510,16 @@ bool host_window_pump() {
                                          (fs.fps_colour << 8) | alpha(fs.fps_opacity * 0.6f), (fs.fps_colour << 8) | alpha(fs.fps_opacity * 0.6f));
             host_overlay_text(x, y, scale, (fs.fps_colour << 8) | alpha(fs.fps_opacity), text.c_str());
         }
+    }
+    // A trophy just earned: its pop-up (host/trophies.h).
+    {
+        float pw = 1920.0f, ph = 1080.0f;
+        {
+            std::lock_guard<std::mutex> ml(g_mouse_mu);
+            if (g_display_w) pw = static_cast<float>(g_display_w);
+            if (g_display_h) ph = static_cast<float>(g_display_h);
+        }
+        trophy_popup_frame(pw, ph);
     }
     // bbhost-vk (debug_upscaler_time): the presenter's passes on the GPU,
     // under the FPS counter (host/gpu_timer.h; also in the log every 300

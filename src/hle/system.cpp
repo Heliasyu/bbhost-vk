@@ -16,6 +16,7 @@
 #include "host/ingame_menu.h"
 #include "host/options.h"
 #include "host/settings.h"
+#include "host/trophies.h"
 #include "host/window.h"
 #include "net/account.h"
 #include "net/session.h"
@@ -1072,6 +1073,20 @@ bool trophy_unlocked(int id, std::int64_t* when) {
     return found;
 }
 // sceNpTrophyUnlockTrophy(ctx, handle, trophyId, SceNpTrophyId* platinumId)
+// Helia's Dream: the earned count, and the platinum - the console's to award,
+// once every base-game trophy is earned (The Old Hunters does not count).
+int trophies_earned() {
+    int n = 0;
+    for (int i = 0; i < trophy_count(); ++i) n += trophy_unlocked(i, nullptr);
+    return n;
+}
+void trophy_record(int id) {
+    std::FILE* f = std::fopen(trophy_file().c_str(), "a");
+    if (f) {
+        std::fprintf(f, "%d %lld\n", id, static_cast<long long>(std::time(nullptr)));
+        std::fclose(f);
+    }
+}
 GUEST_ABI int hle_trophy_unlock(int ctx, int handle, int id, int* platinum_id) {
     std::lock_guard<std::mutex> lock(g_trophy_mu);
     if (platinum_id) {
@@ -1080,12 +1095,22 @@ GUEST_ABI int hle_trophy_unlock(int ctx, int handle, int id, int* platinum_id) {
     if (trophy_unlocked(id, nullptr)) {
         return static_cast<int>(0x80551513u);  // SCE_NP_TROPHY_ERROR_ALREADY_UNLOCKED
     }
-    std::FILE* f = std::fopen(trophy_file().c_str(), "a");
-    if (f) {
-        std::fprintf(f, "%d %lld\n", id, static_cast<long long>(std::time(nullptr)));
-        std::fclose(f);
-    }
+    trophy_record(id);
     host_log("sceNpTrophyUnlockTrophy ctx=%d handle=%d id=%d", ctx, handle, id);
+    trophy_popup(id, trophies_earned(), trophy_count());
+    if (id != 0 && !trophy_unlocked(0, nullptr)) {
+        bool all = true;
+        for (int i = 1; i < trophy_count() && all; ++i) {
+            const TrophyInfo* t = trophy_info(i);
+            if (t && !t->dlc && !trophy_unlocked(i, nullptr)) all = false;
+        }
+        if (all) {
+            trophy_record(0);
+            if (platinum_id) *platinum_id = 0;
+            host_log("sceNpTrophyUnlockTrophy: every base-game trophy earned - the platinum");
+            trophy_popup(0, trophies_earned(), trophy_count());
+        }
+    }
     return 0;
 }
 // SceNpTrophyGameDetails { size, numGroups, numTrophies, numPlatinum, numGold, numSilver, numBronze, title[128], description[1024] }
@@ -1094,7 +1119,8 @@ GUEST_ABI int hle_trophy_game_info(int, int, std::uint8_t* details, std::uint8_t
     constexpr std::uint32_t kTrophies = 40;
     if (details) {
         std::memset(details + 8, 0, 0x480 - 8);
-        std::uint32_t v[7] = {0x488, 1, kTrophies, 1, 3, 8, 28};
+        std::uint32_t v[7] = {0x488, 1, kTrophies, static_cast<std::uint32_t>(trophy_count_of_grade(1)), static_cast<std::uint32_t>(trophy_count_of_grade(2)),
+                              static_cast<std::uint32_t>(trophy_count_of_grade(3)), static_cast<std::uint32_t>(trophy_count_of_grade(4))};
         std::memcpy(details + 8, v + 1, 24);
         std::strncpy(reinterpret_cast<char*>(details + 32), "Bloodborne", 127);
     }
@@ -1118,10 +1144,12 @@ GUEST_ABI int hle_trophy_info(int, int, int id, std::uint8_t* details, std::uint
     if (details) {
         std::memset(details + 8, 0, 0x490 - 8);
         std::int32_t* d = reinterpret_cast<std::int32_t*>(details + 8);
+        const TrophyInfo* t = trophy_info(id);
         d[0] = id;
-        d[1] = 4;  // bronze
+        d[1] = t ? t->grade : 4;
         d[2] = 0;
-        std::snprintf(reinterpret_cast<char*>(details + 24), 127, "Trophy %d", id);
+        std::snprintf(reinterpret_cast<char*>(details + 24), 127, "%s", t ? t->name : "Trophy");
+        if (t) std::snprintf(reinterpret_cast<char*>(details + 24 + 128), 1023, "%s", t->description);
     }
     if (data) {
         std::int64_t when = 0;

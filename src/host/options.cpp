@@ -128,6 +128,7 @@ enum SettingId {
     kHdrPeak,
     kHdrBoost,
     kMenuKey,
+    kTrophyPopups,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -378,6 +379,8 @@ Setting g_set[kSettingCount] = {
      "How far the brightest parts of the picture (lamps, fire, the moon) rise above paper white. Off keeps the SDR look.", false},
     // The key that opens this menu (host/window.cpp reads it).
     {"menu_key", "Menu key", {"F10", "Insert", "Home", "F1"}, 0, "The key that opens this menu. F10 always works too.", false},
+    {"trophy_popups", "Trophy pop-ups", {"On", "Off"}, 0,
+     "A card in the top right corner when you earn a trophy, with its grade and your progress.", false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -458,6 +461,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kRebirth},
     {Row::Option, nullptr, kFivePlayers},
     {Row::Option, nullptr, kSkipLogos},
+    {Row::Option, nullptr, kTrophyPopups},
     // The private server's account. No passwords: link this PC to
     // the account signed into on the website with Discord, or make one held
     // by this PC with a recovery code. The token is kept in the options file.
@@ -981,6 +985,7 @@ void rebuild_settings() {
     h.hdr_peak = std::strtof(g_set[kHdrPeak].values[static_cast<std::size_t>(index_of(kHdrPeak))], nullptr);
     h.hdr_boost = 0.25f * static_cast<float>(index_of(kHdrBoost));
     h.menu_key = index_of(kMenuKey);
+    h.trophy_popups = on_of(kTrophyPopups);
     {
         // BBHOST_RES=WxH still wins, so an A/B run started with one behaves
         // the way its command line says.

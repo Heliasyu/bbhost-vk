@@ -118,6 +118,7 @@ add_executable(bbhost
   src/host/bindings.cpp
   src/host/audio.cpp
   src/host/haptics.cpp
+  src/host/trophies.cpp
   src/host/frame_stats.cpp
   src/host/main_wait.cpp
   src/host/flip_trace.cpp
