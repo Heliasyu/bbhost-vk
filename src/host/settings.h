@@ -37,6 +37,7 @@ struct HostSettings {
     float hdr_peak = 1000.0f;        // nits, when not from the display
     float hdr_boost = 0.25f;         // 0..1: the share of the room above paper white the highlights use
     bool trophy_popups = true;
+    bool compile_note = true;        // "Building shaders" while pipelines are built in play
     // Texture detail (the samplers' LOD bias, added to the game's own): -1 a mip
     // sharper. NAN is Auto: log2(render / output) under FSR 3.1 / 4.1.1.
     float mip_bias = 0.0f;       // the in-game pop-up when a trophy is earned (host/trophies.h)
@@ -61,6 +62,7 @@ struct HostSettings {
     // plugged in, 1 always the bound key, 2 always the pad's glyph
     // (engine/key_prompts.h).
     int button_prompts = 0;
+    int pad_icons = 0;          // 0 Auto (the pad in use), 1 PlayStation, 2 Xbox
 
     // The controller (host/haptics.h): DualSense and DualSense Edge.
     int haptics = 2;                // 0 Off, 1 Rumble (the classic two motors), 2 HD (wired; Rumble without the device)

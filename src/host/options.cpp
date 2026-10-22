@@ -26,6 +26,7 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <deque>
 #include <vector>
 
 #if defined(_WIN32)
@@ -53,6 +54,15 @@ struct Setting {
     const char* note = nullptr;      // shown under the row when it is selected
     bool restart = false;            // takes effect on the next run
 };
+
+// "lo", "lo+1" .. "hi": a setting in steps of one (HDR's nits). The strings
+// live as long as the program.
+std::vector<const char*> number_labels(int lo, int hi) {
+    static std::deque<std::string> kept;
+    std::vector<const char*> out;
+    for (int v = lo; v <= hi; ++v) out.push_back(kept.emplace_back(std::to_string(v)).c_str());
+    return out;
+}
 
 enum SettingId {
     kWindowMode,
@@ -130,6 +140,8 @@ enum SettingId {
     kMenuKey,
     kTrophyPopups,
     kMipBias,
+    kPadIcons,
+    kCompileNote,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -371,10 +383,10 @@ Setting g_set[kSettingCount] = {
      "The picture on an HDR screen in HDR10, with brighter highlights. Needs HDR turned on for the display in your "
      "desktop's settings (KDE: Display Configuration).",
      true},
-    {"hdr_paper_white", "Paper white", {"80", "100", "120", "140", "160", "180", "200", "220", "240", "260", "280", "300", "320", "340", "360", "380", "400", "420", "440", "460", "480", "500"}, 6, "How bright the game's white is on an HDR screen, in nits.", false},
+    {"hdr_paper_white", "Paper white", number_labels(10, 500), 190, "How bright the game's white is on an HDR screen, in nits.", false},
     {"hdr_peak_auto", "Peak from the display", {"On", "Off"}, 0,
      "On: the peak brightness the display reports (its EDID). Off: Peak brightness below.", false},
-    {"hdr_peak", "Peak brightness", {"200", "250", "300", "350", "400", "500", "600", "800", "1000", "1500", "2000", "4000"}, 8,
+    {"hdr_peak", "Peak brightness", number_labels(10, 4000), 990,
      "Your display's peak brightness, in nits, when it is not taken from the display.", false},
     {"hdr_boost", "Highlight boost", {"Off", "Low", "Medium", "High", "Max"}, 1,
      "How far the brightest parts of the picture (lamps, fire, the moon) rise above paper white. Off keeps the SDR look.", false},
@@ -389,6 +401,14 @@ Setting g_set[kSettingCount] = {
      "The texture sharpness bias. Auto matches the upscaler's render scale (sharper textures when upscaling; can shimmer). "
      "0.0 is the game's own; below 0 sharper, above 0 softer.",
      false},
+    // engine/key_prompts.h: with a controller's icons showing, the game's own
+    // (PlayStation) or an Xbox pad's buttons by name. Auto follows the pad.
+    {"pad_icons", "Controller icons", {"Auto", "PlayStation", "Xbox"}, 0,
+     "The button icons a controller's prompts show. Auto: PlayStation's with a PlayStation controller, the Xbox buttons by name with any other.", false},
+    // host/window.cpp's pump: a small note under the FPS counter's corner while
+    // pipelines are built in play (host_pipelines_building).
+    {"compile_note", "Building shaders note", {"On", "Off"}, 0,
+     "\"Building shaders\" in a corner while the game builds shaders for something it shows for the first time (a brief stutter is normal then).", false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -459,6 +479,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kMouseAutoRotation},
     {Row::Option, nullptr, kDrawCursor},
     {Row::Option, nullptr, kButtonPrompts},
+    {Row::Option, nullptr, kPadIcons},
     {Row::Header, "CONTROLLER"},
     {Row::Option, nullptr, kHaptics},
     {Row::Option, nullptr, kHapticsStrength},
@@ -870,6 +891,8 @@ void apply(int id) {
         case kMouseAutoRotation:
         case kDrawCursor:
         case kButtonPrompts:
+        case kPadIcons:
+        case kCompileNote:
             break;  // the settings object carries them (host/settings.h)
         case kSsao:
         case kMotionBlur:
@@ -991,7 +1014,7 @@ void rebuild_settings() {
     h.contrast = 1.0f + 0.08f * static_cast<float>(index_of(kContrast) - 5);
     h.hue_degrees = static_cast<float>(-180 + 15 * index_of(kHue));
     h.hdr = on_of(kHdr);
-    h.hdr_paper_white = static_cast<float>(80 + 20 * index_of(kHdrPaperWhite));
+    h.hdr_paper_white = std::strtof(g_set[kHdrPaperWhite].values[static_cast<std::size_t>(index_of(kHdrPaperWhite))], nullptr);
     h.hdr_peak_auto = on_of(kHdrPeakAuto);
     h.hdr_peak = std::strtof(g_set[kHdrPeak].values[static_cast<std::size_t>(index_of(kHdrPeak))], nullptr);
     h.hdr_boost = 0.25f * static_cast<float>(index_of(kHdrBoost));
@@ -1032,6 +1055,8 @@ void rebuild_settings() {
     h.mouse_auto_rotation = on_of(kMouseAutoRotation);
     h.draw_cursor = on_of(kDrawCursor);
     h.button_prompts = index_of(kButtonPrompts) < 0 ? 0 : index_of(kButtonPrompts);
+    h.pad_icons = std::clamp(index_of(kPadIcons), 0, 2);
+    h.compile_note = on_of(kCompileNote);
     h.haptics = std::clamp(index_of(kHaptics), 0, 2);
     h.haptics_strength = static_cast<float>(std::clamp(index_of(kHapticsStrength), 0, 10)) / 5.0f;
     h.adaptive_triggers = on_of(kAdaptiveTriggers);
@@ -1084,6 +1109,14 @@ void rebuild_settings() {
     h.debug_upscaler_time = on_of(kDebugUpscalerTime);
     std::lock_guard<std::mutex> lk(g_settings_mu);
     g_settings = h;
+}
+
+// The index one step on from a setting's: a long one (HDR's nits, in ones)
+// goes 10 at a time and stops at its ends; Shift takes single steps.
+int stepped(int id, int dir, bool fine) {
+    const int n = static_cast<int>(g_set[id].values.size());
+    if (n <= 100) return g_set[id].index + dir;
+    return std::clamp(g_set[id].index + dir * (fine ? 1 : 10), 0, n - 1);
 }
 
 void set_index(int id, int index, bool from_file) {
@@ -1394,12 +1427,8 @@ bool host_options_key(int scancode, bool repeat) {
         return true;
     }
     const int id = g_rows[g_sel].setting;
-    if (scancode == SDL_SCANCODE_LEFT && id >= 0) {
-        set_index(id, g_set[id].index - 1, false);
-        return true;
-    }
-    if (scancode == SDL_SCANCODE_RIGHT && id >= 0) {
-        set_index(id, g_set[id].index + 1, false);
+    if ((scancode == SDL_SCANCODE_LEFT || scancode == SDL_SCANCODE_RIGHT) && id >= 0) {
+        set_index(id, stepped(id, scancode == SDL_SCANCODE_LEFT ? -1 : 1, shift), false);
         return true;
     }
     if (scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_KP_ENTER ||
@@ -1573,7 +1602,7 @@ void options_panel_frame(float display_w, float display_h) {
                         // On the value pill's left half it steps back, on its
                         // right half forward; the label steps forward, as Enter does.
                         const bool back = m.x >= g_row_vl[r] && m.x < g_row_vm[r];
-                        set_index(g_rows[r].setting, g_set[g_rows[r].setting].index + (back ? -1 : 1), false);
+                        set_index(g_rows[r].setting, stepped(g_rows[r].setting, back ? -1 : 1, (SDL_GetModState() & SDL_KMOD_SHIFT) != 0), false);
                     }
                 } else if (m.pressed & 2u) {
                     if (g_rows[r].kind == Row::Option) {

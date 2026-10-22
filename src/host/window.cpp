@@ -254,6 +254,88 @@ void warn_deck_double_input() {
     host_message_show("Start bbhost from Steam: outside it, Deck buttons also send keys", 8.0f);
 }
 
+// Started by Steam - a non-Steam shortcut too - SDL is handed
+// SDL_GAMECONTROLLER_IGNORE_DEVICES: every controller Steam has, so that only
+// Steam Input's virtual pad drives the game. With Steam Input off for the game
+// there is no virtual pad, and the list still hid the real one: no controller
+// at all (Helia's Dream note 1). So the list is kept here and taken from SDL
+// (window_start_impl), and the pads on it are skipped only while a Steam
+// virtual pad is there to stand in for them.
+std::vector<std::pair<unsigned, unsigned>> g_steam_hidden;  // vendor, product
+void take_steam_pad_filter() {
+    const char* e = std::getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES");
+    if (!e || !*e) return;
+    for (const char* c = e; *c;) {
+        unsigned v = 0, pr = 0;
+        if (std::sscanf(c, "0x%x/0x%x", &v, &pr) == 2 || std::sscanf(c, "%x/%x", &v, &pr) == 2) g_steam_hidden.emplace_back(v, pr);
+        const char* comma = std::strchr(c, ',');
+        if (!comma) break;
+        c = comma + 1;
+    }
+    host_log("input: %zu controller(s) on Steam's ignore list (%s); used unless Steam Input's own pad is connected", g_steam_hidden.size(), e);
+    SDL_SetHintWithPriority(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, "", SDL_HINT_OVERRIDE);
+    SDL_SetHintWithPriority(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, "", SDL_HINT_OVERRIDE);
+}
+bool steam_virtual(SDL_Gamepad* g) { return SDL_GetGamepadVendor(g) == 0x28de && SDL_GetGamepadProduct(g) == 0x11ff; }
+// BBHOST_GAMEPAD (the launcher's controller choice): a part of the pad's name,
+// or its SDL GUID. Unset or "auto": every pad drives the game.
+const char* chosen_pad() {
+    static const char* want = [] {
+        const char* e = std::getenv("BBHOST_GAMEPAD");
+        return e && *e && SDL_strcasecmp(e, "auto") != 0 ? e : nullptr;
+    }();
+    return want;
+}
+bool pad_is_chosen(SDL_Gamepad* g, const char* want) {
+    char guid[33];
+    SDL_GUIDToString(SDL_GetGamepadGUIDForID(SDL_GetGamepadID(g)), guid, sizeof(guid));
+    const char* name = SDL_GetGamepadName(g);
+    return SDL_strcasecmp(guid, want) == 0 || (name && SDL_strcasestr(name, want));
+}
+// The pads whose input counts (the window thread's, as g_pads): all of them, less those Steam's
+// virtual pad stands in for, or only the chosen one while it is connected.
+std::vector<SDL_Gamepad*> live_pads() {
+    std::vector<SDL_Gamepad*> out;
+    bool virtual_there = false;
+    for (SDL_Gamepad* g : g_pads) virtual_there = virtual_there || steam_virtual(g);
+    const char* want = chosen_pad();
+    bool chosen_there = false;
+    for (SDL_Gamepad* g : g_pads) chosen_there = chosen_there || (want && pad_is_chosen(g, want));
+    for (SDL_Gamepad* g : g_pads) {
+        if (chosen_there) {
+            if (pad_is_chosen(g, want)) out.push_back(g);
+            continue;
+        }
+        bool hidden = false;
+        for (const auto& [v, pr] : g_steam_hidden) hidden = hidden || (SDL_GetGamepadVendor(g) == v && SDL_GetGamepadProduct(g) == pr);
+        if (hidden && virtual_there) continue;
+        out.push_back(g);
+    }
+    return out;
+}
+
+// Whether the controller last used is a PlayStation one: the button prompts'
+// Auto icons (engine/key_prompts.h). Until a button is pressed, the first pad.
+std::atomic<int> g_pad_playstation{-1};  // -1 none seen yet
+std::atomic<std::uint64_t> g_input_serial{0};  // host_input_serial()
+bool is_playstation(SDL_Gamepad* g) {
+    switch (SDL_GetGamepadType(g)) {
+        case SDL_GAMEPAD_TYPE_PS3:
+        case SDL_GAMEPAD_TYPE_PS4:
+        case SDL_GAMEPAD_TYPE_PS5: return true;
+        default: return false;
+    }
+}
+void note_pad_used(SDL_Gamepad* g, bool pressed) {
+    if (pressed || g_pad_playstation.load(std::memory_order_relaxed) < 0) {
+        const int ps = is_playstation(g) ? 1 : 0;
+        if (g_pad_playstation.exchange(ps, std::memory_order_relaxed) != ps) {
+            g_input_serial.fetch_add(1, std::memory_order_relaxed);
+            host_log("input: %s in use (%s icons)", SDL_GetGamepadName(g), ps ? "PlayStation" : "Xbox");
+        }
+    }
+}
+
 void pad_open(SDL_JoystickID id) {
     if (pads_ignored() || !pad_matches(id)) return;
     std::lock_guard<std::mutex> lock(g_pads_mu);
@@ -311,7 +393,6 @@ void pad_close(SDL_JoystickID id) {
 // pushed past its dead zone, for a controller. A pad that is merely plugged in
 // changes nothing.
 std::atomic<int> g_input_device{0};  // InputDevice
-std::atomic<std::uint64_t> g_input_serial{0};
 void note_input(InputDevice d) {
     if (g_input_device.exchange(static_cast<int>(d), std::memory_order_relaxed) != static_cast<int>(d)) {
         g_input_serial.fetch_add(1, std::memory_order_relaxed);
@@ -1730,9 +1811,10 @@ void update_pad() {
     // The controller button that ended a text entry stays out of the pad
     // until it is let go, as the key does (g_text_end_key).
     int end_button = g_text_end_button.load(std::memory_order_relaxed);
+    const std::vector<SDL_Gamepad*> pads = live_pads();
     if (end_button >= 0) {
         bool held = false;
-        for (SDL_Gamepad* g : g_pads) held = held || SDL_GetGamepadButton(g, static_cast<SDL_GamepadButton>(end_button));
+        for (SDL_Gamepad* g : pads) held = held || SDL_GetGamepadButton(g, static_cast<SDL_GamepadButton>(end_button));
         if (!held) {
             g_text_end_button.store(-1, std::memory_order_relaxed);
             end_button = -1;
@@ -1741,8 +1823,13 @@ void update_pad() {
     // Each pad's buttons are or-ed together, and each stick axis and trigger
     // is whichever pad pushes it furthest, so two pads never fight.
     bool touch_done = false, back_held = false;
-    for (SDL_Gamepad* g_gamepad : g_pads) {
+    for (SDL_Gamepad* g_gamepad : pads) {
         p.connected = true;
+        {
+            bool any = false;
+            for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && !any; ++b) any = SDL_GetGamepadButton(g_gamepad, static_cast<SDL_GamepadButton>(b));
+            note_pad_used(g_gamepad, any);
+        }
         auto btn = [&](SDL_GamepadButton b, std::uint32_t bit) {
             if (static_cast<int>(b) != end_button && SDL_GetGamepadButton(g_gamepad, b)) {
                 p.buttons |= bit;
@@ -2029,6 +2116,7 @@ bool host_window_start(int width, int height, const char* title) {
 #if defined(BBHOST_HAVE_SDL3)
 namespace {
 bool window_start_impl(int width, int height, const char* title) {
+    take_steam_pad_filter();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         host_log("SDL_Init failed: %s", SDL_GetError());
         return false;
@@ -2511,6 +2599,30 @@ bool host_window_pump() {
             host_overlay_text(x, y, scale, (fs.fps_colour << 8) | alpha(fs.fps_opacity), text.c_str());
         }
     }
+    // "Building shaders" (compile_note): while pipelines are built in play -
+    // a brief stutter then is the compile, not the game - a small note in
+    // the counter's corner, under it when it shows. Held a second past the
+    // last compile so a burst reads as one; not on loading screens, which
+    // build behind the loading screen anyway.
+    if (host_settings().compile_note && !hle_video_loading() && perf::compiling_recently(1000000000ull)) {
+        float dw = 1920.0f, dh = 1080.0f;
+        {
+            std::lock_guard<std::mutex> ml(g_mouse_mu);
+            if (g_display_w) dw = static_cast<float>(g_display_w);
+            if (g_display_h) dh = static_cast<float>(g_display_h);
+        }
+        const HostSettings fs = host_settings();
+        const char* note = "Building shaders...";
+        const float scale = 0.6f * fs.fps_scale, w = host_overlay_text_width(scale, note), th = 24.0f * scale;
+        const float pad = 6.0f * fs.fps_scale, margin = 14.0f;
+        const float below = fs.fps_counter ? 24.0f * 0.8f * fs.fps_scale + 8.0f * fs.fps_scale * 1.2f + 8.0f : 0.0f;
+        const bool bottom = fs.fps_position == 2 || fs.fps_position == 3;
+        float x = dw - w - margin - pad, y = bottom ? dh - th - margin - pad - below : margin + below;
+        if (fs.fps_position == 1 || fs.fps_position == 3) x = margin + pad;
+        if (fs.fps_position == 4) x = (dw - w) * 0.5f;
+        host_overlay_round_rect(x - pad, y - pad * 0.6f, w + 2.0f * pad, th + 1.2f * pad, 6.0f * fs.fps_scale, 0x0f0f0f99u, 0x0f0f0f99u);
+        host_overlay_text(x, y, scale, 0xe8d9a8ffu, note);
+    }
     // A trophy just earned: its pop-up (host/trophies.h).
     {
         float pw = 1920.0f, ph = 1080.0f;
@@ -2990,6 +3102,8 @@ std::uint64_t host_input_serial() {
     return 0;
 #endif
 }
+
+bool host_pad_playstation() { return g_pad_playstation.load(std::memory_order_relaxed) != 0; }
 
 bool host_pad_present() {
 #if defined(BBHOST_HAVE_SDL3)

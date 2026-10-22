@@ -229,8 +229,12 @@ Wanted wanted() {
 // The controller's own playback volume, all the way up. Linux leaves the
 // DualSense's ALSA "PCM Playback Volume" at 80 of 100 - on its -100..0 dB
 // scale, -20 dB, a tenth of the motors' strength - and PipeWire does not
-// raise it. Haptics strength (F10) is the level from there.
-void max_controller_volume() {
+// raise it. Haptics strength (F10) is the level from there. A controller
+// plugged in again gets its old level back from WirePlumber a moment after
+// its card appears - after this ran - so it is checked again every few
+// seconds while HD output is open (haptics_game_audio); `quiet`: say nothing
+// when it was already at its maximum.
+void max_controller_volume(bool quiet = false) {
 #if defined(__linux__)
     std::FILE* f = std::fopen("/proc/asound/cards", "r");
     if (!f) return;
@@ -245,9 +249,10 @@ void max_controller_volume() {
     const std::string path = "/dev/snd/controlC" + std::to_string(card);
     const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
     if (fd < 0) {
-        host_log("haptics: cannot open %s to raise the controller's volume", path.c_str());
+        if (!quiet) host_log("haptics: cannot open %s to raise the controller's volume", path.c_str());
         return;
     }
+    bool changed = false;
     const auto set_max = [&](const char* name, bool boolean) {
         snd_ctl_elem_info info{};
         info.id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
@@ -256,13 +261,22 @@ void max_controller_volume() {
         snd_ctl_elem_value v{};
         v.id = info.id;
         const long top = boolean ? 1 : info.value.integer.max;
+        if (::ioctl(fd, SNDRV_CTL_IOCTL_ELEM_READ, &v) == 0) {
+            bool at_top = true;
+            for (unsigned i = 0; i < info.count && i < 128; ++i) at_top = at_top && v.value.integer.value[i] == top;
+            if (at_top) return top;
+        }
         for (unsigned i = 0; i < info.count && i < 128; ++i) v.value.integer.value[i] = top;
-        return ::ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v) < 0 ? -1L : top;
+        if (::ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v) < 0) return -1L;
+        changed = true;
+        return top;
     };
     set_max("PCM Playback Switch", true);
     const long top = set_max("PCM Playback Volume", false);
     ::close(fd);
-    host_log("haptics: the controller's playback volume %s (card %d)", top >= 0 ? "at its maximum" : "could not be set", card);
+    if (!quiet || changed || top < 0)
+        host_log("haptics: the controller's playback volume %s (card %d)",
+                 top < 0 ? "could not be set" : changed ? "raised to its maximum" : "at its maximum", card);
 #endif
 }
 
@@ -523,6 +537,11 @@ void haptics_game_audio(const float* frames, unsigned count, float gain) {
         scan_locked(want_hd);
     }
     if (!g_stream || count == 0) return;
+    static std::chrono::steady_clock::time_point volume_checked{};
+    if (const auto now = std::chrono::steady_clock::now(); now - volume_checked > std::chrono::seconds(2)) {
+        volume_checked = now;
+        max_controller_volume(true);
+    }
     g_out.resize(static_cast<std::size_t>(count) * 4);
     render(frames, count, gain, w, g_out.data());
     // Felt late is felt wrong: past 30 ms queued (the device stalled or the

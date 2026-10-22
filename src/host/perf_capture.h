@@ -73,6 +73,9 @@ void publish_post(const std::string& text);
 // processor's own thread); `waited`: a frame waited on it (built inline on the
 // command processor, or the command processor waited for a worker's build).
 void note_compile(const char* kind, const std::string& name, std::uint64_t us, bool worker, bool waited);
+// Whether a frame waited on a shader or pipeline compile in the last `within_ns` (the
+// "Building shaders" note, host/window.cpp).
+bool compiling_recently(std::uint64_t within_ns);
 // Marks the calling thread as a precompile worker (note_compile's default).
 void set_worker_thread();
 bool on_worker_thread();

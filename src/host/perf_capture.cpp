@@ -778,7 +778,16 @@ std::string banner() {
     return steady_ns() < g_banner_until ? g_banner : std::string();
 }
 
+std::atomic<std::uint64_t> g_last_compile_ns{0};
+
+bool compiling_recently(std::uint64_t within_ns) {
+    const std::uint64_t t = g_last_compile_ns.load(std::memory_order_relaxed);
+    return t && static_cast<std::uint64_t>(steady_ns()) - t < within_ns;
+}
+
 void note_compile(const char* kind, const std::string& name, std::uint64_t us, bool worker, bool waited) {
+    // Only one a frame waited for: the workers building ahead is not felt.
+    if (waited) g_last_compile_ns.store(static_cast<std::uint64_t>(steady_ns()), std::memory_order_relaxed);
     const int k = kind[0] == 't' ? 0 : kind[0] == 'g' ? 2 : 4;
     g_ct[k + (worker ? 0 : 1)].fetch_add(1, std::memory_order_relaxed);
     if (waited) {
