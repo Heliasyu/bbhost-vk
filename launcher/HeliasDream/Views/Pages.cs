@@ -98,8 +98,8 @@ public static class Pages
             facts.Children.Add(w);
         }
         var quick = Ui.Col(10,
-            QuickRow("Frame rate", Ui.Segmented(new[] { "60", "90", "120" }, ctx.Options.Get("frame_cap", "30"), v => { ctx.Options.Set("frame_cap", v); ctx.Changed(); })),
-            QuickRow("Upscaling", Ui.Segmented(new[] { "Quality", "Balanced", "Performance" }, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); })));
+            Ui.Tip(QuickRow("Frame rate", Ui.Segmented(new[] { "60", "90", "120" }, ctx.Options.Get("frame_cap", "30"), v => { ctx.Options.Set("frame_cap", v); ctx.Changed(); })), OptionSchema.Tips["frame_cap"]),
+            Ui.Tip(QuickRow("Upscaling", Ui.Segmented(new[] { "Quality", "Balanced", "Performance" }, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); })), OptionSchema.Tips["upscale_quality"]));
         var hunt = Ui.Glass(Ui.Col(14, Ui.Eyebrow("This hunt"), facts, quick), 22);
 
         var trophies = Trophies.Load(cfg.DataDir);
@@ -223,7 +223,8 @@ public static class Pages
         var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
         g.Children.Add(Ui.Col(2, Ui.Text("Presentation mode", 14, null, FontWeight.Medium), help));
         Grid.SetColumn(combo, 1); g.Children.Add(combo);
-        var card = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Delivery"), Ui.Well(g)), 18);
+        var card = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Delivery"), Ui.Tip(Ui.Well(g),
+            "How finished frames reach the screen. Mailbox: never tears, and a newer frame replaces one still waiting, so latency stays low (recommended). FIFO: classic V-Sync, every frame waits its turn. FIFO Relaxed: V-Sync, but a late frame tears instead of stuttering. Immediate: lowest latency, can tear. Auto: Mailbox with V-Sync on, Immediate with it off. Applies when the game starts.")), 18);
         ((Control)card.Child!).Margin = new Thickness(0);
         page.Children.Insert(1, card);
         return page;
@@ -237,7 +238,7 @@ public static class Pages
         void Refresh() => sceneText.Text = $"Scene {SceneSize(res, o.Get("upscaler", "FSR 1"), o.Get("upscale_quality", "Native AA"))} → {res.Replace("x", "×")}";
         Refresh();
 
-        var upscaler = Ui.Segmented(OptionSchema.Upscaler.Values, o.Get("upscaler", "FSR 1"), v => { o.Set("upscaler", v); Refresh(); ctx.Changed(); }, fontSize: 14, stretch: true);
+        var upscaler = Ui.Tip(Ui.Segmented(OptionSchema.Upscaler.Values, o.Get("upscaler", "FSR 1"), v => { o.Set("upscaler", v); Refresh(); ctx.Changed(); }, fontSize: 14, stretch: true), OptionSchema.Tips["upscaler"]);
 
         var tiles = new UniformGrid { Columns = 5 };
         var tileButtons = new List<Button>();
@@ -260,6 +261,7 @@ public static class Pages
             tiles.Children.Add(b);
         }
 
+        Ui.Tip(tiles, OptionSchema.Tips["upscale_quality"]);
         var sharpRow = Ui.OptionRow(OptionSchema.Sharpness, o, ctx.Changed);
         var left = Ui.Glass(Ui.Col(22,
             Header("Upscaling", "Changes apply live in the game too (F10)."),
@@ -329,22 +331,26 @@ public static class Pages
         });
         var folderRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
         folderRow.Children.Add(Ui.Col(2, Ui.Text("Game folder", 14, null, FontWeight.Medium), dirText));
+        Ui.Tip(folderRow, "The folder with the engine in it (bbhost, or bbhost.bin beside its wrapper). Found by itself when the launcher sits in or next to that folder.");
         Grid.SetColumn(choose, 1); folderRow.Children.Add(choose);
 
-        Control Toggle(string label, string help, bool value, Action<bool> set)
+        Control Toggle(string label, string help, bool value, Action<bool> set, string? tip = null)
         {
             var sw = new ToggleSwitch { IsChecked = value };
             sw.IsCheckedChanged += (_, _) => { set(sw.IsChecked == true); s.Save(); ctx.Changed(); };
             var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
             g.Children.Add(Ui.Col(2, Ui.Text(label, 14, null, FontWeight.Medium), Ui.Text(help, 12, "muted")));
             Grid.SetColumn(sw, 1); g.Children.Add(sw);
-            return Ui.Well(g);
+            return Ui.Tip(Ui.Well(g), tip ?? help);
         }
 
         var launcher = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Launcher"), Ui.Well(folderRow),
-            Toggle("Reduce motion", "No parallax or sliding pages.", s.ReduceMotion, v => s.ReduceMotion = v),
-            Toggle("Game art background", "Your game's key art, blurred behind the glass (read from your dump).", s.GameArtBackground, v => s.GameArtBackground = v),
-            Toggle("Close when the game starts", "Otherwise the launcher waits and comes back when you quit.", s.CloseOnPlay, v => s.CloseOnPlay = v)), 18);
+            Toggle("Reduce motion", "No parallax or sliding pages.", s.ReduceMotion, v => s.ReduceMotion = v,
+                "Turns off the background's parallax and the pages' slide and fade, for anyone who finds motion uncomfortable. Pages then switch at once."),
+            Toggle("Game art background", "Your game's key art, blurred behind the glass (read from your dump).", s.GameArtBackground, v => s.GameArtBackground = v,
+                "Shows the key art from your own game files (sce_sys/pic1.png), blurred and darkened behind the glass panes. Nothing of the game ships with the launcher. Applies the next time the launcher opens."),
+            Toggle("Close when the game starts", "Otherwise the launcher waits and comes back when you quit.", s.CloseOnPlay, v => s.CloseOnPlay = v,
+                "Off: the launcher minimizes while you play, comes back when the game quits, and shows any trophies you earned. On: it closes as the game starts.")), 18);
         launcher.VerticalAlignment = VerticalAlignment.Top;
 
         var col = Ui.Col(18, Header("More", "Game options, debug switches and the launcher itself."));

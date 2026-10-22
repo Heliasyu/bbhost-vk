@@ -38,6 +38,56 @@ public static class OptionSchema
         "Quality" => 1.5, "Balanced" => 1.7, "Performance" => 2.0, "Ultra Performance" => 3.0, _ => 1.0,
     };
 
+    /// The longer explanation each setting shows on hover, after the engine's own help
+    /// (src/host/options.cpp), in plain words.
+    public static readonly System.Collections.Generic.Dictionary<string, string> Tips = new()
+    {
+        ["resolution"] = "What the game renders at, before any upscaling. 1920x1080 is what it shipped with. Wide (21:9, 32:9) and 16:10 screens are filled, with the HUD kept 16:9. The largest sizes can need a restart, because their memory is set aside when the game starts.",
+        ["window_mode"] = "Fullscreen is a borderless window over the whole display at the desktop resolution: no mode switch when you alt-tab, and overlays and pop-ups (trophies, the FPS counter, Steam, Discord) show over it. Windowed keeps the title bar.",
+        ["vsync"] = "On waits for the display before showing a frame (no tearing). Off shows frames as soon as they are ready, which can tear. With a variable refresh rate (FreeSync, G-Sync) monitor either works well; the Presentation mode setting decides exactly how frames are delivered.",
+        ["frame_cap"] = "The game's pace. 30 is how it shipped. 60 and 90 run the game's logic at that fixed rate. 120 and Uncapped step it by the real frame time, so the game keeps real speed if the frame rate dips. 120 never goes above 120 fps; Uncapped follows the display (up to 240 with V-Sync off). Physics and timings are made for these rates; above 120 is less tested.",
+        ["fps_counter"] = "Frames per second actually shown on screen, in the top right corner.",
+        ["fov"] = "How wide the camera sees. +0% is the game's own (about 43 degrees up and down); each step widens it 5%. +50% is about 97 degrees across.",
+        ["camera_distance"] = "How far behind your character the camera sits. 5 is the game's own; each step is 10% nearer or farther.",
+        ["camera_height"] = "How high above your character the camera looks. 5 is the game's own.",
+        ["upscaler"] = "FSR 4.1.1: AMD's newest upscaler, the sharpest; it needs assets built once from your own copy of AMD's DLL, and falls back to FSR 3.1 without them. FSR 3.1: temporal, uses motion vectors, works on any GPU. FSR 1: simple and light, no motion vectors. Off renders at the full resolution.",
+        ["upscale_quality"] = "How much smaller the 3D scene renders before it is upscaled: Native AA 100% (just anti-aliasing), Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Lower is faster. Menus, text and the HUD always stay at the full resolution. Changes apply live.",
+        ["upscale_sharpness"] = "How much FSR 3.1 and FSR 4.1.1 sharpen the upscaled picture. 0 turns sharpening off; 0.8 matches FSR 1's default. FSR 1 keeps its own sharpening.",
+        ["upscale_reactive"] = "Marks particles, fog, Blood Echoes, the lantern's glow and other transparent effects for the upscaler, so they do not smear or leave ghost trails. Leave on; off is for comparison.",
+        ["upscale_jitter"] = "The 3D scene shifts by a fraction of a pixel each frame so the upscaler can rebuild fine detail. Off gives a softer, more aliased picture; it is for comparison only.",
+        ["anti_alias"] = "The game's own anti-aliasing pass. Auto turns it off while FSR 4.1.1 upscales (it smooths edges itself, and the pass costs about 0.35 ms at 4K) and on otherwise.",
+        ["ssao"] = "Screen-space ambient occlusion: soft shadows in corners and where objects meet. Off is faster and flatter.",
+        ["motion_blur"] = "The blur on fast camera and character movement. Off also saves a little GPU time.",
+        ["depth_of_field"] = "Blurs distant scenery, as the game does in some views. Indoors there is rarely anything far enough to blur.",
+        ["chromatic_aberration"] = "The colour fringing at the edges of the frame, like an old lens.",
+        ["vignette"] = "The darkened frame edges some areas use. Most areas have none, so Off often changes nothing.",
+        ["bloom"] = "The glow around bright light. 10 is the area's own; lower dims it, 0 removes it.",
+        ["ao_strength"] = "How dark ambient occlusion makes corners and contact shadows. 5 is the game's own; 0 none, 10 twice as dark.",
+        ["saturation"] = "Colour intensity. 5 is the game's own; 0 is black and white, 10 twice as vivid.",
+        ["fog"] = "How thick distance and height fog are. 10 is the area's own; 0 clears it.",
+        ["shadow_distance"] = "How far the sun and moon cast shadows. Farther spreads each shadow map wider, so shadows nearby get a little softer.",
+        ["model_detail"] = "Normal is the game's own. Low and Lowest swap in simpler models sooner (faster); Full always uses the finest models.",
+        ["haptics"] = "HD: a DualSense or DualSense Edge plugged in by USB plays the game's rumble and its sound effects (hits, gunshots, footsteps, doors) on its haptic motors, with music and ambience filtered out. Rumble: classic vibration. Over Bluetooth, or with another controller, HD is Rumble.",
+        ["haptics_strength"] = "How strong HD haptics are. 5 is the default, 0 nothing, 10 twice as strong.",
+        ["adaptive_triggers"] = "DualSense and DualSense Edge: L2 (your gun) has a trigger break that goes slack when you are out of Quicksilver Bullets; R2 resists on a heavy attack's wind-up, rumbles as it charges and kicks on release. Relaxed in menus and loading screens.",
+        ["trigger_strength"] = "How hard the adaptive triggers push back.",
+        ["menu_haptics"] = "HD haptics: a light tap as the cursor moves through the title menu, pause menu, inventory and System menu, and a firmer one on confirm and back.",
+        ["mouse_camera"] = "The mouse turns the camera whenever no menu is open. Off leaves the camera to the controller.",
+        ["mouse_sens"] = "How far a given mouse movement turns the camera. 5 is the default.",
+        ["mouse_invert_x"] = "Reverses the mouse's horizontal camera movement.",
+        ["mouse_invert_y"] = "Reverses the mouse's vertical camera movement.",
+        ["mouse_auto_rotation"] = "Off: while you use the mouse, the camera stays where you put it instead of swinging behind you as you move. A controller always gets the game's own camera.",
+        ["mouse_menu"] = "In menus: click confirms, right-click goes back, the wheel moves the cursor. A click only reaches menus while one is open, so it never swings a weapon.",
+        ["button_prompts"] = "What the game's own button prompts and tutorial notes show. Auto follows the device you used last, keyboard or controller.",
+        ["skip_logos"] = "Skips the three company logos before the title screen, and the warning shown when the last session did not end with Exit Game.",
+        ["change_appearance"] = "The Hunter's Dream mirror opens the character appearance editor (the game's unused \"Put on Disguise\").",
+        ["rebirth"] = "With the Yharnam Stone, the Altar of Despair resets your level and attributes so you can rebuild your character.",
+        ["five_players"] = "Allows two invaders in Mensis, Mergo's Loft, the Frontier and the DLC. Every player in the session needs it on.",
+        ["debug_camera"] = "Lance McDonald's restored debug camera: hold Interact (E) and press L3 (Left Ctrl) to cycle the free camera's modes. The debug menu's load tests crash while it is on.",
+        ["debug_motion_vectors"] = "Draws the scene's motion vectors over the picture: red and green for sideways and up-down movement, blue where a moving object moved a pixel. For checking the upscaler.",
+        ["debug_upscaler_time"] = "Shows the upscaler's and the presenter's GPU time under the FPS counter, and logs it every 10 seconds.",
+    };
+
     public static readonly OptionGroup[] Display =
     {
         new("Screen", new[]

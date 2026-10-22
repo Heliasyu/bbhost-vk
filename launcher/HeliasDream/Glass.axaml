@@ -197,6 +197,15 @@
     <Setter Property="BorderBrush" Value="#24FFFFFF" />
     <Setter Property="MinWidth" Value="180" />
   </Style>
+  <Style Selector="ToolTip">
+    <Setter Property="Background" Value="#F0121620" />
+    <Setter Property="BorderBrush" Value="#3DFFFFFF" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="Padding" Value="14,11" />
+    <Setter Property="Foreground" Value="#E9EDF5" />
+    <Setter Property="MaxWidth" Value="380" />
+  </Style>
   <Style Selector="ScrollViewer">
     <Setter Property="Background" Value="Transparent" />
   </Style>

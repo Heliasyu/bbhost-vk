@@ -160,7 +160,7 @@ public static class Ui
             control = Row(12, slider, readout);
         }
         else if (def.Values.Length <= 5)
-            control = Segmented(def.Values, value, Set);
+            control = Segmented(def.Values, value, Set, label: v => def.Key == "window_mode" && v == "Fullscreen" ? "Fullscreen (borderless)" : v);
         else
         {
             var combo = new ComboBox { ItemsSource = def.Values, SelectedItem = value };
@@ -174,7 +174,18 @@ public static class Ui
         g.Children.Add(labels);
         Grid.SetColumn(control, 1);
         g.Children.Add(control);
-        return Well(g);
+        var row = Well(g);
+        Tip(row, OptionSchema.Tips.TryGetValue(def.Key, out var tip) ? tip : def.Help);
+        return row;
+    }
+
+    /// A hover explanation on a row or control, in the glass tooltip style.
+    public static T Tip<T>(T control, string text) where T : Control
+    {
+        ToolTip.SetTip(control, new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 340, FontSize = 13, LineHeight = 19 });
+        ToolTip.SetShowDelay(control, 450);
+        ToolTip.SetPlacement(control, PlacementMode.Top);
+        return control;
     }
 
     public static Control Group(OptionGroup group, OptionsFile opts, Action? changed = null)
