@@ -301,9 +301,11 @@ namespace {
 std::atomic<int> g_bullets_now{-1};
 
 // The carried Quicksilver Bullets (world_player_bullets): every entry in the
-// game data's first 0x20000 bytes whose two item ids are goods 901, summed.
-// The entries found go to the log whenever the list of them changes, so a
-// second one (the item box's, if it were there) would show.
+// game data's first 0x40000 bytes whose two item ids are goods 900 or 901,
+// summed. Round 17: Blood Bullets make 901, while the bullets taken from the
+// item box were not 901 - 900 is the item's own. Every entry of goods
+// 896..911 goes to the log whenever the list changes, so another id (or a
+// second entry, the item box's) would show.
 void bullets_read() {
     static auto next = std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
@@ -315,8 +317,8 @@ void bullets_read() {
         g_bullets_now = -1;
         return;
     }
-    constexpr std::uint64_t kSpan = 0x20000;
-    constexpr std::uint32_t kTagged = 0xb0000385, kGoods = 0x40000385;
+    constexpr std::uint64_t kSpan = 0x40000;
+    constexpr std::uint32_t kGoodsLo = 0x40000380, kGoodsHi = 0x4000038f;
     static std::vector<std::uint32_t> words(kSpan / 4);
     for (std::uint64_t o = 0; o < kSpan; o += 0x1000) {
         if (!host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(record + o)), words.data() + o / 4, 0x1000)) {
@@ -326,11 +328,12 @@ void bullets_read() {
     int total = 0;
     std::string where;
     for (std::size_t i = 1; i + 1 < words.size(); ++i) {
-        if (words[i] != kGoods || words[i - 1] != kTagged) continue;
+        if (words[i] < kGoodsLo || words[i] > kGoodsHi || words[i - 1] != (0xb0000000u | (words[i] & 0x0fffffffu))) continue;
         const auto count = static_cast<std::int32_t>(words[i + 1]);
-        if (count > 0) total += count;
-        char buf[48];
-        std::snprintf(buf, sizeof(buf), " +0x%zx=%d", (i + 1) * 4, count);
+        const unsigned id = words[i] & 0x0fffffffu;
+        if (count > 0 && (id == 900 || id == 901)) total += count;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), " goods %u at +0x%zx=%d", id, (i + 1) * 4, count);
         where += buf;
     }
     static std::string said = "?";
