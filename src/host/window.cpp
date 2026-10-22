@@ -1636,10 +1636,9 @@ void update_pad() {
         // A DualSense's L2 with its trigger break on (host/haptics.h): pressed
         // only past the snap, so the gun fires where the trigger gives way;
         // the travel before it reads as rest.
-        const float l2_fire = haptics_is_dualsense(SDL_GetGamepadVendor(g_gamepad), SDL_GetGamepadProduct(g_gamepad))
-                                  ? haptics_l2_fire_point()
-                                  : 0.0f;
-        const float r2_fire = l2_fire > 0.0f ? haptics_r2_fire_point() : 0.0f;  // a DualSense with its triggers on
+        const bool dualsense = haptics_is_dualsense(SDL_GetGamepadVendor(g_gamepad), SDL_GetGamepadProduct(g_gamepad));
+        const float l2_fire = dualsense ? haptics_l2_fire_point() : 0.0f;
+        const float r2_fire = dualsense ? haptics_r2_fire_point() : 0.0f;
         const bool l2_held = l2_fire > 0.0f ? lt >= static_cast<int>(l2_fire * 32767.0f) : lt > 8000;
         const bool r2_held = r2_fire > 0.0f ? rt >= static_cast<int>(r2_fire * 32767.0f) : rt > 8000;
         p.l2 = std::max(p.l2, l2_fire > 0.0f && !l2_held ? std::uint8_t{0} : static_cast<std::uint8_t>(lt / 128));

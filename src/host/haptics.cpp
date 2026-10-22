@@ -450,13 +450,21 @@ float haptics_r2_fire_point() {
     return wanted().triggers ? fire : 0.0f;
 }
 
+// Whether the gun is known to be empty (round 13's recording): its pull plays
+// 117054500 with no Quicksilver Bullets, 117051000 when a shot goes. Set by an
+// empty pull; cleared by a shot, by Blood Bullets (100141), and by any menu or
+// loading screen - where bullets are taken from storage or restocked at a
+// lamp. The pump thread only.
+bool g_gun_empty = false;
+
 float haptics_l2_fire_point() {
     static const float fire = [] {
         const char* e = std::getenv("BBHOST_L2_FIRE");
         const float v = e && *e ? std::strtof(e, nullptr) : 0.0f;
         return v > 0.05f && v < 1.0f ? v : 0.65f;  // the break (zone 6 of 10) gives way just before
     }();
-    return wanted().triggers ? fire : 0.0f;
+    // Empty, L2 is slack: no break to wait for, the usual light pull.
+    return wanted().triggers && !g_gun_empty ? fire : 0.0f;
 }
 
 void haptics_menu_tick(int kind) {
@@ -591,9 +599,11 @@ void haptics_trigger_vibration(std::uint8_t out[11], int position, int amplitude
     out[9] = static_cast<std::uint8_t>(std::min(frequency, 255));
 }
 
+
 TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relaxed) {
     TriggerEffects t;
     const Wanted w = wanted();
+    if (relaxed) g_gun_empty = false;
     if (!w.triggers || relaxed) {
         haptics_trigger_off(t.left);
         haptics_trigger_off(t.right);
@@ -624,17 +634,26 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
             return e && e[0] == '1';
         }();
         if (log_anims) host_log("haptics: animation %d (category %d, %06d)", anim, category, motion);
+        if (anim == 117054500 && !g_gun_empty) {
+            g_gun_empty = true;
+            host_log("haptics: the gun is empty - L2 slack until a shot, Blood Bullets, a menu or a load");
+        } else if ((anim == 117051000 || anim == 100141) && g_gun_empty) {
+            g_gun_empty = false;
+            host_log("haptics: the gun has bullets again (%s)", anim == 100141 ? "Blood Bullets" : "a shot");
+        }
         st.motion = motion;
         st.category = category;
         st.since = now;
     }
     const float in_ms = std::chrono::duration<float, std::milli>(now - st.since).count();
 
-    // L2, the gun: a break two-fifths of the way down; and a recoil kick as
-    // a shot's animation starts (category 117, the left hand's firearm), so a
-    // pull that fires nothing gets none.
-    if (category == 117 && motion >= 50000 && motion < 60000 && in_ms < 120.0f) {
+    // L2, the gun: a break two-fifths of the way down, and a recoil kick as
+    // a shot's animation starts (category 117, the left hand's firearm; 054500
+    // is the empty gun's, which fires nothing). Empty: slack, no kick.
+    if (category == 117 && motion >= 50000 && motion < 60000 && motion != 54500 && in_ms < 120.0f) {
         haptics_trigger_vibration(t.left, 0, kHum[s], 60);
+    } else if (g_gun_empty) {
+        haptics_trigger_off(t.left);
     } else {
         haptics_trigger_weapon(t.left, 3, 6, kBreak[s]);
     }
