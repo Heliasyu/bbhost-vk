@@ -157,7 +157,21 @@ public static class Ui
                 if (readout.Text == v) return;
                 readout.Text = v; Set(v);
             };
-            control = Row(12, slider, readout);
+            if (def.Values.Length > 100)
+            {
+                // A long range (HDR's nits, in ones): the slider for the rough value, a step
+                // of one either way for the fine one (the arrow keys on the slider do the same).
+                Button Step(string glyph, int by)
+                {
+                    var b = new Button { Content = glyph, Classes = { "flat", "ghost" }, Width = 34, Height = 34, Padding = new Thickness(0), FontSize = 16, HorizontalContentAlignment = HorizontalAlignment.Center };
+                    b.Click += (_, _) => slider.Value = Math.Clamp(Math.Round(slider.Value) + by, 0, def.Values.Length - 1);
+                    return b;
+                }
+                readout.MinWidth = 52;
+                slider.SmallChange = 1;
+                control = Row(8, Step("−", -1), slider, Step("+", 1), readout);
+            }
+            else control = Row(12, slider, readout);
         }
         else if (def.Values.Length <= 5 && def.Values.Sum(v => v.Length) <= 30)
             control = Segmented(def.Values, value, Set, label: v => def.Key == "window_mode" && v == "Fullscreen" ? "Fullscreen (borderless)" : v);

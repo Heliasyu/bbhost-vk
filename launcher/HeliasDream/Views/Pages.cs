@@ -35,24 +35,27 @@ public sealed class Ctx
     public required Func<string, string?, System.Threading.Tasks.Task<string?>> PickFile { get; init; }
     /// Makes another player profile the one the launcher and the game use.
     public required Action<string> SwitchProfile { get; init; }
+    /// The Console page's view: the game's log while it runs, or a tool's.
+    public required ConsoleView Console { get; init; }
 }
 
 public static class Pages
 {
-    public const int PlayTab = 0, TrophiesTab = 6, SetupPage = 8;
+    public const int PlayTab = 0, TrophiesTab = 6, SetupPage = 8, ConsolePage = 9;
 
-    public static readonly string[] Names = { "Play", "Display", "Upscaling", "Graphics", "Controller", "Online", "Trophies", "More" };
+    public static readonly string[] Names = { "Play", "Display", "Upscaling", "Graphics", "Controls", "Online", "Trophies", "More" };
 
     public static Control Build(int index, Ctx ctx) => index switch
     {
         0 => Play(ctx),
         1 => Display(ctx),
         2 => Upscaling(ctx),
-        3 => Settings("Graphics", "Effects and the look of the world. All apply live in the game too.", OptionSchema.Graphics, ctx),
-        4 => Controller(ctx),
+        3 => Graphics(ctx),
+        4 => Controls(ctx),
         5 => Online(ctx),
         6 => TrophiesPage(ctx),
         SetupPage => Setup(ctx),
+        ConsolePage => ctx.Console,
         _ => More(ctx),
     };
 
@@ -111,8 +114,11 @@ public static class Pages
         }
         var quick = Ui.Col(10,
             Ui.Tip(QuickRow("Frame rate", Ui.Segmented(OptionSchema.FrameCap.Values, ctx.Options.Get("frame_cap", "30"), v => { ctx.Options.Set("frame_cap", v); ctx.Changed(); })), OptionSchema.Tips["frame_cap"]),
-            Ui.Tip(QuickRow("Upscaling", Ui.Segmented(OptionSchema.Quality.Values, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); },
+            Ui.Tip(QuickRow("Upscaler", Ui.Segmented(OptionSchema.Upscaler.Values, upscaler, v => { ctx.Options.Set("upscaler", v); ctx.Changed(); },
+                label: v => v == "Off" ? "Native" : v, fontSize: 12)), OptionSchema.Tips["upscaler"]),
+            Ui.Tip(QuickRow("Quality", Ui.Segmented(OptionSchema.Quality.Values, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); },
                 label: v => v switch { "Native AA" => "Native", "Performance" => "Perf.", "Ultra Performance" => "Ultra", _ => v }, fontSize: 12)), OptionSchema.Tips["upscale_quality"]));
+        if (upscaler == "FSR 4.1.1") quick.Children.Add(Fsr4Note(ctx, compact: true));
         var hunt = Ui.Glass(Ui.Col(14, Ui.Eyebrow("This hunt"), facts, quick), 22);
 
         var trophies = Trophies.Load(cfg.DataDir);
@@ -316,24 +322,33 @@ public static class Pages
 
         var frame = Ui.Col(8, Ui.Eyebrow("Frame rate"), Ui.OptionRow(OptionSchema.FrameCap, o, ctx.Changed));
 
-        // FPS counter, what it shows folded under Advanced.
-        var fps = Ui.Col(8, Ui.Eyebrow("FPS counter"), Ui.OptionRow(OptionSchema.FpsShow, o, ctx.Changed));
-        foreach (var d in OptionSchema.FpsLook) fps.Children.Add(Ui.OptionRow(d, o, ctx.Changed));
-        fps.Children.Add(Ui.Advanced("What the FPS counter shows", OptionSchema.FpsParts.Select(d => Ui.OptionRow(d, o, ctx.Changed)).ToArray()));
+        // FPS counter: on, where, and the building-shaders note; its look and what it shows
+        // folded under Advanced.
+        var fps = Ui.Col(8, Ui.Eyebrow("FPS counter"), Ui.OptionRow(OptionSchema.FpsShow, o, ctx.Changed),
+            Ui.OptionRow(OptionSchema.FpsPosition, o, ctx.Changed), Ui.OptionRow(OptionSchema.CompileNote, o, ctx.Changed));
+        var fpsMore = OptionSchema.FpsLook.Select(d => Ui.OptionRow(d, o, ctx.Changed)).ToList();
+        fpsMore.Add(Ui.Eyebrow("What it shows"));
+        fpsMore[^1].Margin = new Thickness(4, 8, 0, 2);
+        fpsMore.AddRange(OptionSchema.FpsParts.Select(d => Ui.OptionRow(d, o, ctx.Changed)));
+        fps.Children.Add(Ui.Advanced("Advanced", fpsMore.ToArray()));
+
+        // Language: the game's own (its text and voices from the disc's message bundles).
+        var lang = Ui.Col(8, Ui.Eyebrow("Language"), Ui.OptionRow(OptionSchema.GameLanguage, o, ctx.Changed));
 
         // HDR, with what the desktop says about the monitor.
         string? connector = string.IsNullOrEmpty(st.Monitor) ? monitors.FirstOrDefault(m => m.Primary).Name : st.Monitor;
         var desk = DesktopHdr.IsOn(connector);
-        var hint = Ui.Text(desk == true ? $"HDR is on for {connector} in your desktop's settings: ready."
-                           : desk == false ? $"HDR is off for {connector} in your desktop's settings. Turn it on there (KDE: System Settings > Display Configuration > {connector} > HDR) for HDR output to work."
+        var mon = string.IsNullOrEmpty(connector) ? "your monitor" : connector;
+        var hint = Ui.Text(desk == true ? $"HDR is on for {mon} in your desktop's settings: ready."
+                           : desk == false ? $"HDR is off for {mon} in your desktop's settings. Turn it on there (KDE: System Settings > Display Configuration > {mon} > HDR) for HDR output to work."
                            : "Turn HDR on for your monitor in your desktop's display settings first.", 12, desk == true ? "soft" : "muted");
         hint.Margin = new Thickness(4, 0, 4, 4);
         var hdr = Ui.Col(8, Ui.Eyebrow("HDR"), hint);
         foreach (var d in OptionSchema.Hdr) hdr.Children.Add(Ui.OptionRow(d, o, ctx.Changed));
 
-        var page = Ui.Col(18, Header("Display", "Monitor, resolution, frame rate, the FPS counter and HDR."));
+        var page = Ui.Col(18, Header("Display", "Monitor, resolution, frame rate, HDR, the FPS counter and language."));
         page.Children[0].Margin = new Thickness(8, 6, 8, 0);
-        page.Children.Add(Columns(Ui.Col(18, Ui.Glass(screen, 18), Ui.Glass(frame, 18)), Ui.Col(18, Ui.Glass(fps, 18), Ui.Glass(hdr, 18))));
+        page.Children.Add(Columns(Ui.Col(18, Ui.Glass(screen, 18), Ui.Glass(frame, 18), Ui.Glass(lang, 18)), Ui.Col(18, Ui.Glass(hdr, 18), Ui.Glass(fps, 18))));
         return page;
     }
 
@@ -389,7 +404,8 @@ public static class Pages
         Grid.SetColumn(badge, 1); fsrHead.Children.Add(badge);
         var fsr = Ui.Glass(Ui.Col(14, fsrHead,
             Ui.Text("Built once from your own copy of AMD's DLL with build-fsr4.sh in the release folder. Nothing from AMD ships with Helia's Dream.", 13, "soft"),
-            Ui.Well(Ui.Col(4, Ui.Text("Assets", 12, "muted"), Ui.Text(built ? Paths.Fsr4Assets : "Not found", 13, null, FontWeight.SemiBold)))), 22);
+            Ui.Well(Ui.Col(4, Ui.Text("Assets", 12, "muted"), Ui.Text(built ? Paths.Fsr4Assets : "Not found", 13, null, FontWeight.SemiBold))),
+            Fsr4Note(ctx, compact: false)), 22);
 
         var what = Ui.Glass(Ui.Col(14, Ui.Text("What you get", 16, null, FontWeight.SemiBold),
             Ui.Text("The HUD and menus always render at the full resolution; only the 3D scene is upscaled.", 13, "soft")), 22);
@@ -410,19 +426,178 @@ public static class Pages
         return g;
     }
 
+    const string Website = "https://thehuntersdream.com", DiscordInvite = "https://discord.gg/ZTrJ28aX7K";
+
+    static void OpenUrl(string url)
+    {
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(OperatingSystem.IsWindows() ? "explorer" : "xdg-open", url) { UseShellExecute = false }); }
+        catch (Exception) { }
+    }
+
     static Control Online(Ctx ctx)
     {
         var cfg = ctx.Config();
-        var signed = ctx.Options.SignedIn;
-        var card = Ui.Glass(Ui.Col(12,
-            Ui.Eyebrow("Account"),
-            Ui.Well(Ui.Col(4, Ui.Text(signed ? "Signed in" : "Not signed in", 15, null, FontWeight.SemiBold),
-                Ui.Text(signed ? (ctx.Options.AccountName ?? "") : "Sign in from F10 in the game (Account section). The live server plays only with signed-in players.", 12, "muted"))),
-            Ui.Well(Ui.Col(4, Ui.Text("Server", 15, null, FontWeight.SemiBold), Ui.Text(cfg.OnlineHost, 12, "muted")))), 18);
-        var col = Ui.Col(18, Header("Online", "Co-op, invasions and messages through the community server."), card);
+        var o = ctx.Options;
+
+        // Account: signed in or not, linking this PC with Discord through the website, signing out.
+        var status = Ui.Text("", 15, null, FontWeight.SemiBold);
+        var detail = Ui.Text("", 12, "muted");
+        var code = Ui.Text("", 30, "display");
+        code.IsVisible = false;
+        code.LetterSpacing = 4;
+        System.Threading.CancellationTokenSource? waiting = null;
+        Button link = null!, signOut = null!, openSite = null!, cancel = null!;
+        void Show()
+        {
+            o.Reload();
+            bool signed = o.SignedIn;
+            status.Text = signed ? $"Signed in as {o.AccountName}" : "Not signed in";
+            detail.Text = signed ? $"This profile ({ctx.Settings.Profile}) plays online as {o.AccountName}. The game reads it when it starts."
+                                 : "The live server plays only with signed-in hunters. Link this PC with your Discord account on the website: no password.";
+            link.IsVisible = !signed && waiting == null;
+            signOut.IsVisible = signed && waiting == null;
+            cancel.IsVisible = waiting != null;
+            ctx.Changed();
+        }
+        link = Ui.Ghost("Link with Discord", async () =>
+        {
+            waiting = new System.Threading.CancellationTokenSource();
+            Show();
+            status.Text = "Asking the server for a code…";
+            try
+            {
+                var l = await Account.Start(cfg.AuthServer);
+                code.Text = l.UserCode; code.IsVisible = true;
+                status.Text = "Approve this code on the website";
+                detail.Text = $"Your browser opened {l.Uri}: sign in there with Discord and approve the code. It is good for {l.ExpiresIn / 60} minutes.";
+                openSite.Tag = $"{l.Uri}?code={l.UserCode}";
+                openSite.IsVisible = true;
+                OpenUrl((string)openSite.Tag);
+                var name = await Account.Wait(cfg.AuthServer, l, o, waiting.Token);
+                waiting = null; code.IsVisible = false; openSite.IsVisible = false;
+                Show();
+                detail.Text = $"Linked. You play online as {name}" + (GameRunner.Running() ? " from the next start of the game." : ".");
+            }
+            catch (Exception e)
+            {
+                waiting = null; code.IsVisible = false; openSite.IsVisible = false;
+                Show();
+                detail.Text = e is OperationCanceledException ? "Cancelled." : e.Message;
+            }
+        });
+        cancel = Ui.Ghost("Cancel", () => waiting?.Cancel());
+        openSite = Ui.Ghost("Open the website again", () => { if (openSite.Tag is string u) OpenUrl(u); });
+        openSite.IsVisible = false;
+        bool armed = false;
+        signOut = Ui.Ghost("Sign out", async () =>
+        {
+            if (!armed) { armed = true; signOut.Content = "Click again to sign out"; return; }
+            armed = false; signOut.Content = "Sign out";
+            await Account.SignOut(cfg.AuthServer, o);
+            Show();
+        });
+        Show();
+        var account = Ui.Glass(Ui.Col(12, Ui.Eyebrow("Account"), Ui.Well(Ui.Col(6, status, detail, code)), Ui.Row(8, link, openSite, cancel, signOut)), 18);
+        Ui.Tip(account, "Your account on the Hunter's Dream server, the same one the in-game menu (F10, Online) links. Linking shows a code; approve it on the website signed in with Discord, and this PC gets a sign-in of its own (no password is stored). Each player profile has its own account. Sign out tells the server to forget this PC.");
+
+        // The server: which one, and whether it answers.
+        var ping = Ui.Text("checking…", 12, "muted");
+        _ = ReadyCheck.PingServer(cfg.OnlineHost).ContinueWith(t => Dispatcher.UIThread.Post(() =>
+            ping.Text = t.Result is int ms ? $"Answering · {ms} ms" : "Not answering right now"));
+        bool live = cfg.OnlineHost == "thehuntersdream.com";
+        var server = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Server"),
+            Ui.Row2(live ? "The Hunter's Dream (live)" : cfg.OnlineHost, live ? "thehuntersdream.com · co-op, invasions, messages, bloodstains" : "A server set in bbhost.toml", ping)), 18);
+
+        // The community: the server's own numbers, and where to find people.
+        var nums = new UniformGrid { Columns = 3 };
+        void Stat(string k, string v)
+        {
+            var w = Ui.Well(Ui.Col(4, Ui.Text(k, 12, "muted"), Ui.Text(v, 17, null, FontWeight.SemiBold)));
+            w.Margin = new Thickness(0, 0, 10, 10);
+            nums.Children.Add(w);
+        }
+        var statsNote = Ui.Text("Loading the server's numbers…", 12, "muted");
+        if (live)
+            _ = CommunityStats.Fetch(cfg.OnlineHost).ContinueWith(t => Dispatcher.UIThread.Post(() =>
+            {
+                var c = t.Result;
+                if (c == null) { statsNote.Text = "The server's numbers are not available right now."; return; }
+                statsNote.Text = "From thehuntersdream.com, live.";
+                Stat("Co-op signs down", c.CoopSigns.ToString("N0"));
+                Stat("Invaders waiting", c.InvadeSigns.ToString("N0"));
+                Stat("Hunters", c.Hunters.ToString("N0"));
+                Stat("Summons", c.Summons.ToString("N0"));
+                Stat("Messages", c.Messages.ToString("N0"));
+                Stat("Bosses felled", c.BossClears.ToString("N0"));
+            }));
+        else statsNote.Text = "Numbers are shown for the live server.";
+        var links = new WrapPanel { ItemSpacing = 8, LineSpacing = 8 };
+        foreach (var b in new[] {
+            Ui.Ghost("Website", () => OpenUrl(Website)),
+            Ui.Ghost("Your account", () => OpenUrl(Website + "/account")),
+            Ui.Ghost("Messages map", () => OpenUrl(Website + "/map")),
+            Ui.Ghost("Leaderboards", () => OpenUrl(Website + "/leaderboards")),
+            Ui.Ghost("Discord", () => OpenUrl(DiscordInvite)) }) links.Children.Add(b);
+        var community = Ui.Glass(Ui.Col(10, Ui.Eyebrow("The Hunter's Dream"),
+            Ui.Text("The community server for Bloodborne on PC: summon and be summoned, invade, leave and rate messages, see bloodstains and ghosts of other hunters. Its website has the map of every message, the leaderboards and your own hunter's page; its Discord is where players meet up and the server's news comes first.", 13, "soft"),
+            nums, statsNote, links), 18);
+
+        // Discord itself: what linking does, step by step.
+        var steps = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Setting up with Discord"),
+            StepRow("1", "Press Link with Discord", "Your browser opens the website's link page with a code."),
+            StepRow("2", "Sign in with Discord", "On thehuntersdream.com: only your Discord name is used, to make your hunter's name."),
+            StepRow("3", "Approve the code", "The same code as here. This PC is then signed in; nothing else to type."),
+            StepRow("4", "Join the Discord", "Optional: discord.gg/ZTrJ28aX7K, for co-op partners and the server's news.")), 18);
+
+        var col = Ui.Col(18, Header("Online", "Co-op, invasions and messages on The Hunter's Dream community server."));
         col.Children[0].Margin = new Thickness(8, 6, 8, 0);
-        card.MaxWidth = 640; card.HorizontalAlignment = HorizontalAlignment.Left;
+        col.Children.Add(Columns(Ui.Col(18, account, server, steps), community));
         return col;
+    }
+
+    static Control StepRow(string n, string title, string help)
+    {
+        var dot = new Border { Width = 28, Height = 28, CornerRadius = new CornerRadius(14), Background = Brush.Parse("#2AC9D6EE"), Child = Ui.Text(n, 13, null, FontWeight.Bold) };
+        ((TextBlock)dot.Child).HorizontalAlignment = HorizontalAlignment.Center;
+        ((TextBlock)dot.Child).VerticalAlignment = VerticalAlignment.Center;
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 14 };
+        g.Children.Add(dot);
+        var t = Ui.Col(2, Ui.Text(title, 14, null, FontWeight.Medium), Ui.Text(help, 12, "muted"));
+        Grid.SetColumn(t, 1); g.Children.Add(t);
+        return Ui.Well(g);
+    }
+
+    // FSR 4.1.1's assets: whether they are built, what the GPU makes of it, and the build
+    // itself (build-fsr4.sh from the release folder on the player's own AMD DLL, its output
+    // on the Console page).
+    static Control Fsr4Note(Ctx ctx, bool compact)
+    {
+        bool built = Directory.Exists(Paths.Fsr4Assets) && Directory.EnumerateFileSystemEntries(Paths.Fsr4Assets).Any();
+        var (w, h) = ctx.ScreenSize();
+        var hw = HardwareInfo.Detect(w, h);
+        var gpu = hw.Rdna4 ? "" : " On this GPU it may run slower than FSR 3.1, or fall back to it where the GPU lacks what its passes need; it is at its best on a Radeon RX 9000 (RDNA 4).";
+        var text = built
+            ? "FSR 4.1.1's assets are built." + (compact ? "" : " Build them again after a new AMD DLL.") + gpu
+            : "FSR 4.1.1 needs assets built once from your own copy of AMD's upscaler DLL (amd_fidelityfx_upscaler_dx12.dll, 4.1.x, e.g. from OptiScaler's release). Until then it runs as FSR 3.1." + gpu;
+        var note = Ui.Text(text, 12, built ? "muted" : "soft");
+        var dir = ctx.GameDir();
+        var script = dir == null ? null : System.IO.Path.Combine(dir, "build-fsr4.sh");
+        var go = Ui.Ghost(built ? "Rebuild…" : "Set up…", async () =>
+        {
+            if (script == null || !File.Exists(script)) { note.Text = "build-fsr4.sh is not in the game folder (it comes with the release)."; return; }
+            var dll = await ctx.PickFile("Your AMD upscaler DLL (amd_fidelityfx_upscaler_dx12.dll, 4.1.x)", null);
+            if (dll == null) return;
+            if (!System.IO.Path.GetFileName(dll).EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) { note.Text = "That is not a DLL: choose amd_fidelityfx_upscaler_dx12.dll."; return; }
+            ctx.Console.RunTool("Building FSR 4.1.1", "bash", new[] { script, dll }, dir!, code =>
+                ctx.Console.Add(code == 0 ? "FSR 4.1.1 is ready: choose it as the upscaler (Play or Upscaling)." : "The build did not finish; the lines above say why (README-TESTING.txt lists what it needs)."));
+            ctx.GoTo(ConsolePage);
+        });
+        Ui.Tip(go, "Choose your own amd_fidelityfx_upscaler_dx12.dll (4.1.x): build-fsr4.sh turns AMD's passes and weights into Vulkan shaders in " + Paths.Fsr4Assets + ", once. It needs Proton (GE-Proton 10+, Proton-CachyOS or Experimental), python3 and the SPIR-V tools; the Console page shows its progress. Nothing from AMD ships with Helia's Dream.");
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 14 };
+        g.Children.Add(note);
+        go.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(go, 1); g.Children.Add(go);
+        return compact ? Ui.Well(g) : g;
     }
 
     static Control More(Ctx ctx)
@@ -465,7 +640,7 @@ public static class Pages
         var g2 = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 18 };
         var left = Ui.Col(18, OptionSchema.More.Select(gr => Ui.Group(gr, ctx.Options, ctx.Changed)).ToArray());
         g2.Children.Add(left);
-        var right = Ui.Col(18, launcher, SavesCard(ctx), BestCard(ctx));
+        var right = Ui.Col(18, launcher, SavesCard(ctx));
         right.VerticalAlignment = VerticalAlignment.Top;
         Grid.SetColumn(right, 1); g2.Children.Add(right);
         col.Children.Add(g2);
@@ -615,11 +790,79 @@ public static class Pages
         return page;
     }
 
-    static Control Controller(Ctx ctx)
+    static Control Graphics(Ctx ctx)
     {
-        var page = (StackPanel)Settings("Controller", "DualSense haptics and adaptive triggers, mouse and keyboard.", OptionSchema.Controller, ctx);
+        var page = (StackPanel)Settings("Graphics", "Effects and the look of the world. All apply live in the game too.", OptionSchema.Graphics, ctx);
+        page.Children.Insert(1, BestCard(ctx));
+        return page;
+    }
+
+    static Control Controls(Ctx ctx)
+    {
+        var page = (StackPanel)Settings("Controls", "Any controller: PlayStation, Xbox or another. Haptics, icons, mouse and keyboard.", OptionSchema.Controller, ctx);
+        page.Children.Insert(1, PadsCard(ctx));
         page.Children.Add(BindingsCard(ctx));
         return page;
+    }
+
+    // The controllers plugged in, which one the game listens to, and what each can do.
+    static Control PadsCard(Ctx ctx)
+    {
+        var st = ctx.Settings;
+        var list = Ui.Col(6);
+        var choice = new ComboBox { MinWidth = 260, VerticalAlignment = VerticalAlignment.Center };
+        var hint = Ui.Text("", 12, "muted");
+        List<Controllers.Pad> pads = new();
+        string seen = "";
+        bool filling = false;
+        void Fill()
+        {
+            pads = Controllers.List();
+            var key = string.Join("|", pads.Select(x => x.Name + x.Usb));
+            if (key == seen) return;
+            seen = key;
+            list.Children.Clear();
+            if (pads.Count == 0)
+                list.Children.Add(CheckRow(new CheckItem("No controller connected", "Plug one in by USB, or pair it by Bluetooth. The keyboard and mouse always work.", CheckState.Note)));
+            foreach (var x in pads)
+            {
+                string what = x.Kind switch
+                {
+                    Controllers.Kind.Steam => "Steam Input's own pad: Steam's layout drives the game",
+                    _ when x.DualSense && x.Usb => "USB · HD haptics and adaptive triggers ready",
+                    _ when x.DualSense => "Bluetooth · rumble and adaptive triggers; HD haptics need USB",
+                    Controllers.Kind.PlayStation => (x.Usb ? "USB" : "Bluetooth") + " · rumble",
+                    Controllers.Kind.Xbox => (x.Usb ? "USB" : "Wireless") + " · rumble · Xbox icons on Auto",
+                    _ => (x.Usb ? "USB" : "Wireless") + " · rumble where it has it",
+                };
+                list.Children.Add(CheckRow(new CheckItem(x.Short, what, CheckState.Ok)));
+            }
+            filling = true;
+            var items = new List<string> { "Automatic: the one you use" };
+            items.AddRange(pads.Where(x => x.Kind != Controllers.Kind.Steam).Select(x => x.Short));
+            if (st.Gamepad != "auto" && !items.Contains(st.Gamepad)) items.Add(st.Gamepad);
+            choice.ItemsSource = items;
+            choice.SelectedItem = st.Gamepad == "auto" ? items[0] : st.Gamepad;
+            filling = false;
+            bool steam = pads.Any(x => x.Kind == Controllers.Kind.Steam);
+            bool hd = pads.Any(x => x.DualSense && x.Usb);
+            hint.Text = (steam ? "Steam Input is on for the game: for HD haptics and the adaptive triggers, turn it off for Bloodborne in Steam (its controller settings). " : "") +
+                        (hd ? "" : "HD haptics need an HD-haptics controller: a DualSense or DualSense Edge plugged in by USB. Other controllers rumble.");
+        }
+        choice.SelectionChanged += (_, _) =>
+        {
+            if (filling || choice.SelectedItem is not string s) return;
+            st.Gamepad = choice.SelectedIndex <= 0 ? "auto" : s;
+            st.Save();
+        };
+        Fill();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        timer.Tick += (_, _) => Fill();
+        list.AttachedToVisualTree += (_, _) => timer.Start();
+        list.DetachedFromVisualTree += (_, _) => timer.Stop();
+        var use = Ui.Tip(Ui.Row2("Controller the game uses", "Automatic takes input from every controller, the one you press switching the icons.", choice),
+            "Automatic: every controller drives the game and the icons follow the one you last pressed; with Steam Input on, Steam's own pad stands in for the controllers Steam handles, so nothing is pressed twice. Choose one to have the game listen to it alone while it is connected (another plugged in for good, like a wheel or a second pad, is then left alone). Applies when the game starts.");
+        return Ui.Glass(Ui.Col(10, Ui.Eyebrow("Controllers"), list, use, hint), 18);
     }
 
     // Keyboard and mouse bindings (Core/Bindings.cs): per action a key and a mouse input.

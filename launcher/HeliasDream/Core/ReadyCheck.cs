@@ -156,25 +156,84 @@ public static class DesktopHdr
     }
 }
 
-/// <summary>Starts the game and tells when it ends.</summary>
+/// <summary>
+/// Starts the game and tells when it ends. Its output (the engine's log) goes line by line to
+/// `onLine` - the Console page - and to logs/bbhost-&lt;date&gt;.log in the game folder, as the
+/// bbhost wrapper's own runs kept it.
+/// </summary>
 public static class GameRunner
 {
-    public static Process? Start(string gameDir, string presentMode, string? monitor, string? profileConfig, Action onExit)
+    public static string? LogFile { get; private set; }
+    static Process? _running;
+
+    public static Process? Start(string gameDir, string presentMode, string? monitor, string? profileConfig, string? gamepad,
+                                 Action<string>? onLine, Action onExit)
     {
         var engine = Paths.EngineIn(gameDir);
         if (engine == null) return null;
-        var psi = new ProcessStartInfo(engine) { WorkingDirectory = gameDir, UseShellExecute = false };
+        var psi = new ProcessStartInfo(engine)
+        {
+            // No reader (the launcher closes as the game starts): the output goes where it always did.
+            WorkingDirectory = gameDir, UseShellExecute = false, RedirectStandardOutput = onLine != null, RedirectStandardError = onLine != null,
+        };
         if (profileConfig != null) { psi.ArgumentList.Add("--config"); psi.ArgumentList.Add(profileConfig); }
         // The launcher has already shown everything bbhost's own setup window would.
         psi.Environment["BBHOST_SETUP_WINDOW"] = "0";
         if (!string.IsNullOrEmpty(monitor)) psi.Environment["BBHOST_DISPLAY"] = monitor;
         if (presentMode is "mailbox" or "fifo" or "relaxed" or "immediate" or "latest")
             psi.Environment["BBHOST_PRESENT_MODE"] = presentMode;
-        var p = Process.Start(psi);
-        if (p == null) return null;
+        if (!string.IsNullOrEmpty(gamepad) && gamepad != "auto") psi.Environment["BBHOST_GAMEPAD"] = gamepad;
+        StreamWriter? log = null;
+        if (onLine != null) try
+        {
+            var dir = Path.Combine(gameDir, "logs");
+            Directory.CreateDirectory(dir);
+            LogFile = Path.Combine(dir, $"bbhost-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+            log = new StreamWriter(LogFile) { AutoFlush = true };
+        }
+        catch (Exception) { LogFile = null; }
+        var gate = new object();
+        void Line(string? l)
+        {
+            if (l == null) return;
+            lock (gate) { try { log?.WriteLine(l); } catch (Exception) { } }
+            onLine?.Invoke(l);
+        }
+        Process? p;
+        try { p = Process.Start(psi); }
+        catch (Exception e) { log?.Dispose(); onLine?.Invoke("Could not start the game: " + e.Message); return null; }
+        if (p == null) { log?.Dispose(); return null; }
+        p.OutputDataReceived += (_, e) => Line(e.Data);
+        p.ErrorDataReceived += (_, e) => Line(e.Data);
         p.EnableRaisingEvents = true;
-        p.Exited += (_, _) => onExit();
+        p.Exited += (_, _) =>
+        {
+            try { p.WaitForExit(); } catch (Exception) { }  // the last lines of output first
+            lock (gate) { log?.Dispose(); log = null; }
+            _running = null;
+            onExit();
+        };
+        if (onLine != null)
+        {
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
+        }
+        _running = p;
         return p;
+    }
+
+    /// Ends the game the launcher started (the Console page's Stop): asked to close first, as
+    /// the window's close button does.
+    public static void Stop()
+    {
+        var p = _running;
+        if (p == null) return;
+        try
+        {
+            if (OperatingSystem.IsLinux()) Process.Start("kill", ["-TERM", p.Id.ToString()])?.WaitForExit(2000);
+            else p.Kill(true);
+        }
+        catch (Exception) { }
     }
 
     public static bool Running() =>

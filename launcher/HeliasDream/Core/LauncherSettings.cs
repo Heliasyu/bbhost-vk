@@ -21,6 +21,9 @@ public sealed class LauncherSettings
     public string Profile { get; set; } = "Default";
     /// The art Add to Steam uses (bbp.png, bb.png, bb_hero.jpg, bb_logo.png, bb_icon.png).
     public string? SteamArt { get; set; }
+    /// The controller the game takes input from (BBHOST_GAMEPAD, part of its name), or "auto":
+    /// every controller, Steam Input's own pad standing in for the ones it handles.
+    public string Gamepad { get; set; } = "auto";
 
     public static LauncherSettings Load()
     {

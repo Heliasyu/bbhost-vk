@@ -43,6 +43,9 @@ public sealed class MainWindow : Window
     readonly Border _bead;
     readonly TranslateTransform _beadMove = new();
     readonly Ctx _ctx;
+    readonly ConsoleView _console = new();
+    readonly Button _consoleBtn;
+    ScrollViewer? _scroll;
     int _current = -1;
     string? _gameDir;
 
@@ -79,7 +82,15 @@ public sealed class MainWindow : Window
             },
             GameDir = () => _gameDir = Paths.FindGameDir(_settings.GameDir),
             GoTo = i => GoTo(i),
-            Changed = () => { UpdateSummary(); _scene!.ReduceMotion = _settings.ReduceMotion; _glide.Reduced = _settings.ReduceMotion; },
+            Changed = () =>
+            {
+                UpdateSummary();
+                _scene!.ReduceMotion = _settings.ReduceMotion; _glide.Reduced = _settings.ReduceMotion;
+                // Play's ready check and "This hunt" are built from the settings: built again in
+                // place (after the click that changed them is done).
+                if (_current == Pages.PlayTab) Dispatcher.UIThread.Post(Rebuild);
+            },
+            Console = _console,
             PickFolder = PickFolder,
             Monitors = Monitors,
             Capture = (mouse, done) => { _captureMouse = mouse; _capture = done; },
@@ -122,9 +133,18 @@ public sealed class MainWindow : Window
         tabRow.LayoutUpdated += (_, _) => { if (_bead.Opacity == 0 && _current >= 0) PlaceBead(false); };
 
         var min = IconButton("M3,8 L13,8", "Minimize", () => WindowState = WindowState.Minimized);
+        var max = IconButton("M3.5,3.5 L12.5,3.5 L12.5,12.5 L3.5,12.5 Z", "Maximize", ToggleMaximized);
+        PropertyChanged += (_, e) =>
+        {
+            if (e.Property != WindowStateProperty) return;
+            // Maximized: two overlapping squares, the usual "restore" mark.
+            ((Path)max.Content!).Data = Geometry.Parse(WindowState == WindowState.Maximized
+                ? "M5.5,3.5 L12.5,3.5 L12.5,10.5 M3.5,5.5 L10.5,5.5 L10.5,12.5 L3.5,12.5 Z" : "M3.5,3.5 L12.5,3.5 L12.5,12.5 L3.5,12.5 Z");
+            AutomationProperties.SetName(max, WindowState == WindowState.Maximized ? "Restore" : "Maximize");
+        };
         var close = IconButton("M4,4 L12,12 M12,4 L4,12", "Close", Close);
         close.Classes.Add("close");
-        var winButtons = Ui.Row(8, min, close);
+        var winButtons = Ui.Row(8, min, max, close);
         winButtons.VerticalAlignment = VerticalAlignment.Center;
 
         var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"), Background = Brushes.Transparent };
@@ -140,15 +160,19 @@ public sealed class MainWindow : Window
         // Footer
         _play = new Button { Content = new TextBlock { Text = "PLAY", LetterSpacing = 5, Foreground = Brush.Parse("#FFF4F2") }, Classes = { "flat", "play" } };
         _play.Click += (_, _) => Play();
-        var footerRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 12 };
+        var footerRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"), ColumnSpacing = 12 };
         _summary.VerticalAlignment = VerticalAlignment.Center;
         footerRow.Children.Add(_summary);
-        var settingsBtn = Ui.Ghost("Settings", () => GoTo(Pages.SetupPage));
-        Ui.Tip(settingsBtn, "Game setup: the game's files, the update, mods, The Old Hunters, save import and Add to Steam.");
-        Grid.SetColumn(settingsBtn, 1); footerRow.Children.Add(settingsBtn);
+        _consoleBtn = Ui.Ghost("Console", () => GoTo(Pages.ConsolePage));
+        _consoleBtn.IsVisible = false;
+        Ui.Tip(_consoleBtn, "The game's log, live while it runs (and the FSR 4.1.1 build's). The whole run is also kept in logs/ in the game folder.");
+        Grid.SetColumn(_consoleBtn, 1); footerRow.Children.Add(_consoleBtn);
+        var setupBtn = Ui.Ghost("Setup", () => GoTo(Pages.SetupPage));
+        Ui.Tip(setupBtn, "Game setup: the game's files, the update, mods, The Old Hunters, save import and Add to Steam.");
+        Grid.SetColumn(setupBtn, 2); footerRow.Children.Add(setupBtn);
         var quit = Ui.Ghost("Quit", Close);
-        Grid.SetColumn(quit, 2); footerRow.Children.Add(quit);
-        Grid.SetColumn(_play, 3); footerRow.Children.Add(_play);
+        Grid.SetColumn(quit, 3); footerRow.Children.Add(quit);
+        Grid.SetColumn(_play, 4); footerRow.Children.Add(_play);
         var footer = new Border { Classes = { "dark" }, CornerRadius = new CornerRadius(22), Padding = new Thickness(22, 12, 12, 12), Child = footerRow };
 
         var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), RowSpacing = 18, Margin = new Thickness(26, 22) };
@@ -326,15 +350,40 @@ public sealed class MainWindow : Window
         bool forward = index > _current;
         _current = index;
         _options.Reload();
-        var page = Pages.Build(index, _ctx);
-        page.Margin = new Thickness(0, 0, 14, 6);
-        var scroll = new ScrollViewer { Content = page, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, RenderTransform = new TranslateTransform() };
-        scroll.ScrollChanged += (_, _) => _scene.Scrolled(scroll.Offset.Y);
-        _scene.Scrolled(0);
         _page.IsTransitionReversed = !forward;
-        _page.Content = scroll;
+        _scene.Scrolled(0);
+        if (index == Pages.ConsolePage)
+        {
+            // The console fills the page and scrolls itself.
+            _consoleBtn.IsVisible = true;
+            _scroll = null;
+            if (_console.Parent is Border old) old.Child = null;
+            _console.Margin = new Thickness(0, 0, 0, 6);
+            _page.Content = new Border { Child = _console, RenderTransform = new TranslateTransform() };
+        }
+        else
+        {
+            var page = Pages.Build(index, _ctx);
+            page.Margin = new Thickness(0, 0, 14, 6);
+            var scroll = new ScrollViewer { Content = page, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, RenderTransform = new TranslateTransform() };
+            scroll.ScrollChanged += (_, _) => _scene.Scrolled(scroll.Offset.Y);
+            _scroll = scroll;
+            _page.Content = scroll;
+        }
         _scene.ShowPage(index);
         PlaceBead(true);
+    }
+
+    /// The page shown, built again where it is (its scroll position kept), with no transition.
+    void Rebuild()
+    {
+        if (_scroll == null || _current < 0 || _current == Pages.ConsolePage) return;
+        var at = _scroll.Offset;
+        _options.Reload();
+        var page = Pages.Build(_current, _ctx);
+        page.Margin = new Thickness(0, 0, 14, 6);
+        _scroll.Content = page;
+        Dispatcher.UIThread.Post(() => _scroll.Offset = at, DispatcherPriority.Loaded);
     }
 
     void PlaceBead(bool animate)
@@ -379,25 +428,32 @@ public sealed class MainWindow : Window
     {
         _gameDir = Paths.FindGameDir(_settings.GameDir);
         if (_gameDir == null) { GoTo(7); return; }
-        var p = GameRunner.Start(_gameDir, _settings.PresentMode,
-            string.IsNullOrEmpty(_settings.Monitor) ? Monitors().FirstOrDefault(m => m.Primary).Name : _settings.Monitor,
-            Profiles.ConfigFile(_settings.Profile), () => Dispatcher.UIThread.Post(GameEnded));
-        if (p == null) return;
-        if (_settings.CloseOnPlay) { Close(); return; }
+        var monitor = string.IsNullOrEmpty(_settings.Monitor) ? Monitors().FirstOrDefault(m => m.Primary).Name : _settings.Monitor;
+        // Closing as it starts: nothing to read the game's output, which goes where it always did.
+        if (_settings.CloseOnPlay)
+        {
+            if (GameRunner.Start(_gameDir, _settings.PresentMode, monitor, Profiles.ConfigFile(_settings.Profile), _settings.Gamepad, null, () => { }) != null) Close();
+            return;
+        }
+        var started = DateTime.Now;
+        _console.Begin($"Bloodborne · {_settings.Profile}", null, GameRunner.Stop);
+        var p = GameRunner.Start(_gameDir, _settings.PresentMode, monitor, Profiles.ConfigFile(_settings.Profile), _settings.Gamepad,
+            _console.Add, () => Dispatcher.UIThread.Post(() => GameEnded(started)));
+        if (p == null) { _console.End("Did not start"); GoTo(Pages.ConsolePage); return; }
+        _console.SetLog(GameRunner.LogFile);
         _play.IsEnabled = false;
         _play.Content = new TextBlock { Text = "RUNNING", LetterSpacing = 5, Foreground = Brush.Parse("#C8B4B4") };
-        WindowState = WindowState.Minimized;
+        GoTo(Pages.ConsolePage);
     }
 
-    void GameEnded()
+    void GameEnded(DateTime started)
     {
+        var played = DateTime.Now - started;
+        _console.End($"The game quit after {(played.TotalHours >= 1 ? $"{(int)played.TotalHours} h {played.Minutes} min" : $"{Math.Max(1, (int)played.TotalMinutes)} min")}");
         _play.Content = new TextBlock { Text = "PLAY", LetterSpacing = 5, Foreground = Brush.Parse("#FFF4F2") };
-        WindowState = WindowState.Normal;
-        Activate();
-        int keep = _current;
-        _current = -1;
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         UpdateSummary();
-        GoTo(keep);
+        Rebuild();
     }
 
     async Task<string?> PickFile(string title, string? start)

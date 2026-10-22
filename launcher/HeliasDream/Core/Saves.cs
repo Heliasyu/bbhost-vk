@@ -198,7 +198,7 @@ public sealed record HardwareInfo(string Gpu, uint Vendor, uint Device, long Vra
             s.Add(("upscaler", "FSR 4.1.1"));
             s.Add(("upscale_quality", ScreenW >= 3840 ? "Performance" : ScreenW >= 2560 ? "Balanced" : "Quality"));
             s.Add(("frame_cap", "120"));
-            why = "RDNA 4 runs FSR 4.1.1's FP8 model: the sharpest upscaler, at 120 fps.";
+            why = "RDNA 4 runs FSR 4.1.1 at full speed: the sharpest upscaler, at 120 fps.";
         }
         else if (SteamDeck)
         {

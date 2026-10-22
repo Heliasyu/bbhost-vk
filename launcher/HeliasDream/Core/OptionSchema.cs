@@ -1,3 +1,5 @@
+using System.Linq;
+
 namespace HeliasDream.Core;
 
 /// <summary>
@@ -16,6 +18,8 @@ public static class OptionSchema
     static readonly string[] OnOff = { "On", "Off" };
     static readonly string[] OffOn = { "Off", "On" };
     static readonly string[] Zero10 = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
+    /// "lo" .. "hi" in ones, as the engine's number_labels (HDR's nits).
+    static string[] Range(int lo, int hi) => System.Linq.Enumerable.Range(lo, hi - lo + 1).Select(v => v.ToString()).ToArray();
 
     public static readonly OptionDef Resolution = new("resolution", "Resolution",
         new[] { "1280x720", "1600x900", "1920x1080", "2560x1440", "3200x1800", "3840x2160", "2560x1080", "3440x1440",
@@ -90,7 +94,7 @@ public static class OptionSchema
         ["fog"] = "How thick distance and height fog are. 10 is the area's own; 0 clears it.",
         ["shadow_distance"] = "How far the sun and moon cast shadows. Farther spreads each shadow map wider, so shadows nearby get a little softer.",
         ["model_detail"] = "Normal is the game's own. Low and Lowest swap in simpler models sooner (faster); Full always uses the finest models.",
-        ["haptics"] = "HD: a DualSense or DualSense Edge plugged in by USB plays the game's rumble and its sound effects (hits, gunshots, footsteps, doors) on its haptic motors, with music and ambience filtered out. Rumble: classic vibration. Over Bluetooth, or with another controller, HD is Rumble.",
+        ["haptics"] = "HD needs an HD-haptics controller: a DualSense or DualSense Edge plugged in by USB. It plays the game's rumble and its sound effects (hits, gunshots, footsteps, doors) on its haptic motors, with music and ambience filtered out. Rumble: classic vibration. Over Bluetooth, or with another controller, HD is Rumble.",
         ["haptics_strength"] = "How strong HD haptics are. 5 is the default, 0 nothing, 10 twice as strong.",
         ["adaptive_triggers"] = "DualSense and DualSense Edge: L2 (your gun) has a trigger break that goes slack when you are out of Quicksilver Bullets; R2 resists on a heavy attack's wind-up, rumbles as it charges and kicks on release. Relaxed in menus and loading screens.",
         ["trigger_strength"] = "How hard the adaptive triggers push back.",
@@ -101,6 +105,9 @@ public static class OptionSchema
         ["mouse_invert_y"] = "Reverses the mouse's vertical camera movement.",
         ["mouse_auto_rotation"] = "Off: while you use the mouse, the camera stays where you put it instead of swinging behind you as you move. A controller always gets the game's own camera.",
         ["mouse_menu"] = "In menus: click confirms, right-click goes back, the wheel moves the cursor. A click only reaches menus while one is open, so it never swings a weapon.",
+        ["pad_icons"] = "The button icons the game's prompts show while you play with a controller. Auto: the game's own PlayStation icons with a PlayStation controller, and the Xbox buttons by name ([A], [RB], D-pad Up) with an Xbox or any other controller. The world's \"Examine\" prompts drawn on the HUD keep the PlayStation icons for now.",
+        ["compile_note"] = "Shows \"Building shaders...\" under the FPS counter's corner while the game builds a shader for something it shows for the first time, so a brief stutter then reads as what it is. Built shaders are kept, so it shows less and less.",
+        ["game_language"] = "The language of the game's own text, menus and subtitles, from the message bundles on your disc. Takes effect at the next start. The in-game settings menu (F10) is in English.",
         ["button_prompts"] = "What the game's own button prompts and tutorial notes show. Auto follows the device you used last, keyboard or controller.",
         ["trophy_popups"] = "When you earn a trophy, a frosted glass card slides into the top right corner with its medal, its name and your progress, and a DualSense gives a firm tap. The platinum is awarded once every base-game trophy is earned.",
         ["mip_bias"] = "How sharp textures stay at a distance. With an upscaler the scene renders smaller, so the game picks blurrier texture levels sooner; Auto puts back what the render scale took (Performance: one level sharper), as AMD recommends for FSR. 0.0 is the game's own. Sharper can shimmer on fine patterns. Changes live.",
@@ -127,9 +134,14 @@ public static class OptionSchema
     public static readonly OptionDef MenuKey = new("menu_key", "In-game menu key", new[] { "F10", "Insert", "Home", "F1" }, 0,
         "What opens the in-game settings menu. F10 always works too.");
     public static readonly OptionDef FpsShow = new("fps_counter", "Show FPS", OffOn, 0, "Frames per second, in the corner you choose.");
+    public static readonly OptionDef FpsPosition =
+        new("fps_position", "Position", new[] { "Top right", "Top left", "Bottom right", "Bottom left", "Top centre" }, 0, "Where the counter sits.");
+    public static readonly OptionDef CompileNote = new("compile_note", "Note while shaders build", OnOff, 0,
+        "\"Building shaders...\" under the counter while the game builds them.");
+    public static readonly OptionDef GameLanguage = new("game_language", "Game language",
+        new[] { "English", "French", "Spanish", "German", "Italian", "Russian", "Japanese" }, 0, "The game's own text and voices.", true);
     public static readonly OptionDef[] FpsLook =
     {
-        new("fps_position", "Position", new[] { "Top right", "Top left", "Bottom right", "Bottom left", "Top centre" }, 0, "Where the counter sits."),
         new("fps_size", "Size", new[] { "75%", "100%", "125%", "150%", "175%", "200%" }, 1, "How large its text is."),
         new("fps_colour", "Text colour", new[] { "White", "Yellow", "Green", "Cyan", "Red", "Orange", "Pink", "Black" }, 0, "The counter's text colour."),
         new("fps_opacity", "Text opacity", new[] { "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%" }, 9, "How solid the text is."),
@@ -148,10 +160,10 @@ public static class OptionSchema
     public static readonly OptionDef[] Hdr =
     {
         new("hdr", "HDR output", OffOn, 0, "The picture on an HDR screen in HDR10, with brighter highlights.", true),
-        new("hdr_paper_white", "Paper white", new[] { "80", "100", "120", "140", "160", "180", "200", "220", "240", "260", "280", "300", "320", "340", "360", "380", "400", "420", "440", "460", "480", "500" }, 6, "How bright the game's white is, in nits."),
+        new("hdr_paper_white", "Paper white", Range(10, 500), 190, "How bright the game's white is, in nits (10 to 500)."),
         new("hdr_peak_auto", "Peak brightness from the display", OnOff, 0, "The peak the display reports. Off: the value below."),
-        new("hdr_peak", "Peak brightness", new[] { "200", "250", "300", "350", "400", "500", "600", "800", "1000", "1500", "2000", "4000" }, 8,
-            "Your display's peak, in nits, when not taken from the display."),
+        new("hdr_peak", "Peak brightness", Range(10, 4000), 990,
+            "Your display's peak, in nits (10 to 4000), when not taken from the display."),
         new("hdr_boost", "Highlight boost", new[] { "Off", "Low", "Medium", "High", "Max" }, 1,
             "Off keeps the game's own look; higher makes lamps, fire and the sky brighter."),
     };
@@ -202,9 +214,10 @@ public static class OptionSchema
 
     public static readonly OptionGroup[] Controller =
     {
-        new("DualSense", new[]
+        new("Gamepad", new[]
         {
-            new OptionDef("haptics", "Haptics", new[] { "Off", "Rumble", "HD" }, 2, "HD: a DualSense on USB feels the game's rumble and sound effects."),
+            new OptionDef("pad_icons", "Controller icons", new[] { "Auto", "PlayStation", "Xbox" }, 0, "Auto: PlayStation's with a PlayStation pad, Xbox buttons with any other."),
+            new OptionDef("haptics", "Haptics", new[] { "Off", "Rumble", "HD" }, 2, "HD needs a DualSense or DualSense Edge on USB; other pads rumble."),
             new OptionDef("haptics_strength", "Haptics strength", Zero10, 5, "5 is the default; 10 is twice as strong."),
             new OptionDef("adaptive_triggers", "Adaptive triggers", OnOff, 0, "L2's trigger break and R2's charge resistance."),
             new OptionDef("trigger_strength", "Trigger strength", new[] { "Light", "Medium", "Strong" }, 1, "How hard the triggers push back."),

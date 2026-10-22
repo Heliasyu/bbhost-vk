@@ -183,4 +183,6 @@ public sealed class BbhostToml
     public string? Eboot => this["paths.eboot"];
     public string DataDir => this["paths.data"] ?? Path.Combine(Paths.BbhostDataDir, "data");
     public string OnlineHost => this["online.host"] ?? "thehuntersdream.com";
+    /// The account server (the website), as the engine's [online] auth_server.
+    public string AuthServer => this["online.auth_server"] ?? $"https://{OnlineHost}";
 }
