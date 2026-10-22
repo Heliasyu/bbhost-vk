@@ -638,7 +638,7 @@ Toggle g_up_toggles[] = {
     {"debug_upscaler_time", kUpGpuTime, 0, 0xff},
 };
 constexpr int kUpToggleCount = static_cast<int>(sizeof(g_up_toggles) / sizeof(g_up_toggles[0]));
-const Choice kUpscalers[] = {{0, 125030}, {1, 125031}, {2, 125032}, {3, 125033}, {4, 125034}, {5, 125035}};
+const Choice kUpscalers[] = {{0, 125030}, {1, 125031}, {2, 125032}, {3, 125033}, {4, 125034}, {5, 125035}, {6, 125036}};
 std::int32_t g_upscaler = 1, g_upscaler_last = -1;
 constexpr int kUpscaleRows = kUpToggleCount + 1;
 Slider g_up_sharpness{"upscale_sharpness", kUpSharpness, 8, 0xff};

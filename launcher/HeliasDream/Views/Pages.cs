@@ -213,7 +213,7 @@ public static class Pages
     {
         var p = res.Split('x');
         if (p.Length != 2 || !int.TryParse(p[0], out var w) || !int.TryParse(p[1], out var h)) return res;
-        var s = upscaler is "FSR 3.1" or "FSR 4.1.1" or "FSR 4" ? OptionSchema.ScaleOf(quality) : 1.0;  // Native TAA: the full size
+        var s = upscaler is "FSR 3.1" or "FSR 4.1.1" or "FSR 4" or "DLSS" ? OptionSchema.ScaleOf(quality) : 1.0;  // Native TAA: the full size
         return $"{(int)Math.Round(w / s)}×{(int)Math.Round(h / s)}";
     }
 

@@ -5,6 +5,8 @@
 #include "host/gpu_internal.h"
 #include "host/fsr4_pass.h"
 #include "host/fsr4v07_pass.h"
+#include "host/dlss_pass.h"
+#include "host/upscaler_presets.h"
 #include "host/perf_capture.h"
 #include "host/settings.h"
 #include "host/shader_patch.h"
@@ -2583,6 +2585,8 @@ bool init_locked() {
     fsr4_device_features(f2.features, f12, f13, dext, &f13.pNext);
     // Helia's Dream: FSR 4 (INT8 v07), only with its assets downloaded (host/fsr4v07_pass.h).
     fsr4v07_device_features(f2.features, f12, f13, &f13.pNext);
+    // Helia's Dream: DLSS's NGX extensions, only with DLSS chosen (host/dlss_pass.h).
+    if (host_settings().upscaler == upscaler::kDlss) dlss_device_extensions(dext);
     // DB_DEPTH_CONTROL bit 3: the deferred lights cull by depth range.
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(g.phys, &supported);

@@ -307,7 +307,7 @@ Setting g_set[kSettingCount] = {
     // the presenter's EASU + RCAS when the game renders smaller than the
     // window (host/fsr.cpp). Phase 1: with an upscaler on, the quality renders the
     // scene smaller than the output (engine/scene_split.h).
-    {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA", "FSR 4"}, 1,
+    {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA", "FSR 4", "DLSS"}, 1,
      "FSR 1 is simple and light. FSR 3.1 is temporal, from Upscaling quality's size. FSR 4 and FSR 4.1.1 are AMD's machine-learning upscalers, sharper; they need their assets (the launcher sets them up), else FSR 3.1 runs. Native TAA is anti-aliasing at the full resolution.",
      true},
     // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
@@ -1167,7 +1167,7 @@ void rebuild_settings() {
     h.anti_alias_auto = index_of(kAntiAlias) == 2;
     // Native TAA is FSR 3.1's own anti-aliasing: Auto leaves the game's pass off under it too.
     h.anti_alias = h.anti_alias_auto ? !((h.upscaler == 3 && h.upscale_quality > 0 && !g_fsr4_unavailable.load()) || h.upscaler == upscaler::kTaa ||
-                                         (h.upscaler == upscaler::kFsr4 && h.upscale_quality > 0))
+                                         ((h.upscaler == upscaler::kFsr4 || h.upscaler == upscaler::kDlss) && h.upscale_quality > 0))
                                      : on_of(kAntiAlias);
     h.upscale_sharpness = static_cast<float>(std::clamp(index_of(kUpscaleSharpness), 0, 10)) / 10.0f;
     h.upscale_reactive = on_of(kUpscaleReactive);

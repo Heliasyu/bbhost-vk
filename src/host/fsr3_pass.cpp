@@ -26,6 +26,7 @@
 #include "host/fsr3_upscaler.h"
 #include "host/fsr4_pass.h"
 #include "host/fsr4v07_pass.h"
+#include "host/dlss_pass.h"
 #include "host/fsr_dump.h"
 #include "host/pass_timer.h"
 #include "host/gpu_internal.h"
@@ -86,6 +87,7 @@ std::uint64_t g_last_frame = ~0ull;  // the flip last dispatched (a second scale
 Fallback g_last_fallback = Fallback::kCount;
 bool g_fsr4_off = false;  // FSR 4.1.1 cannot run in this session (assets, device): FSR 3.1
 bool g_fsr4v07_off = false;  // nor FSR 4 (INT8 v07, host/fsr4v07_pass.h)
+bool g_dlss_off = false;     // nor DLSS (host/dlss_pass.h)
 temporal::Fsr3History g_history4;
 std::uint64_t g_last_frame4 = ~0ull;
 VkImage g_last_out4 = VK_NULL_HANDLE;
@@ -278,9 +280,10 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
     if (target->format != VK_FORMAT_R16G16B16A16_SFLOAT && !blit_ok(target->format)) return fall_back(Fallback::Format);
     // FSR 4.1.1 (host/fsr4_pass.h), replayed from the user's DLL, or FSR 4
     // (host/fsr4v07_pass.h), AMD's INT8 model; FSR 3.1 below when they cannot.
-    const bool v07 = hs.upscaler == upscaler::kFsr4;
-    const char* const name4 = v07 ? "FSR 4" : "FSR 4.1.1";
-    if ((hs.upscaler == upscaler::kFsr411 && !g_fsr4_off) || (v07 && !g_fsr4v07_off)) {
+    // DLSS (host/dlss_pass.h) takes the same path.
+    const bool v07 = hs.upscaler == upscaler::kFsr4, dlss = hs.upscaler == upscaler::kDlss;
+    const char* const name4 = dlss ? "DLSS" : v07 ? "FSR 4" : "FSR 4.1.1";
+    if ((hs.upscaler == upscaler::kFsr411 && !g_fsr4_off) || (v07 && !g_fsr4v07_off) || (dlss && !g_dlss_off)) {
         begin_recording_locked();
         render_end_pass_locked();
         VkCommandBuffer cmd4 = g_cmd();
@@ -314,8 +317,9 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
         VkImage out4 = VK_NULL_HANDLE;
         bool fatal = false;
         std::string why4;
-        const bool ok4 = v07 ? fsr4v07_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4)
-                             : fsr4_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4);
+        const bool ok4 = dlss  ? dlss_record_locked(cmd4, in, out.w, out.h, p4, hs.upscale_quality, &out4, &fatal, &why4)
+                         : v07 ? fsr4v07_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4)
+                               : fsr4_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4);
         pass_timer_end_locked(cmd4, slot4);
         if (ok4) {
             if (p4.reset) ++g_window.resets;
@@ -341,9 +345,9 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
             ++g_window.dispatches;
             ++g_window.fsr4;
             pass_timer_upscaler_is_fsr4(true);
-            if (const std::string d = v07 ? fsr4v07_describe_locked() : fsr4_describe_locked(); d != g_fsr4_described) {
+            if (const std::string d = dlss ? dlss_describe_locked() : v07 ? fsr4v07_describe_locked() : fsr4_describe_locked(); d != g_fsr4_described) {
                 g_fsr4_described = d;
-                host_log("fsr4: %s, %s (scene %ux%u -> %ux%u)", v07 ? "FSR 4 (INT8 v07)" : "FSR 4.1.1 replay", d.c_str(), in.render_w, in.render_h, out.w, out.h);
+                host_log("fsr4: %s, %s (scene %ux%u -> %ux%u)", dlss ? "DLSS" : v07 ? "FSR 4 (INT8 v07)" : "FSR 4.1.1 replay", d.c_str(), in.render_w, in.render_h, out.w, out.h);
             }
             g_last_fallback = Fallback::None;
             // test6: the 3000-frame summary for FSR 4.1.1 too (test5 had none,
@@ -357,7 +361,8 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
         if (dump4) fsr_dump_finish_locked(in.frame);  // the inputs at least
         g_history4 = {};
         if (fatal) {
-            if (v07) g_fsr4v07_off = true;
+            if (dlss) g_dlss_off = true;
+            else if (v07) g_fsr4v07_off = true;
             else {
                 g_fsr4_off = true;
                 host_opt_fsr4_unavailable();  // anti_alias Auto: the game's AA back on
