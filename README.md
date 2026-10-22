@@ -1,110 +1,134 @@
 # bbhost-vk
 
-**bbhost-vk** is a personal fork of [droogie's bbhost](https://github.com/droogie/bbhost), the native host that runs Bloodborne (CUSA03173, game version 1.09) on Linux. Everything that makes the game run is bbhost's work. This fork adds temporal upscaling and frame-rate work on top, aimed at one setup: **1080p render → 4K output with FSR 4.1.1 Performance, locked at 120 fps**, on an RX 9070 XT and a Ryzen 9 5950X under KDE Plasma (Wayland).
+**bbhost-vk** runs Bloodborne (CUSA03173, game version 1.09) natively on Linux with modern
+PC features: temporal upscaling up to FSR 4.1.1, a smooth 120 fps, DualSense HD haptics and
+adaptive triggers, and built-in performance tools. It started as a fork of
+[droogie's bbhost](https://github.com/droogie/bbhost), which does the core work of running
+the game, and has grown into its own project on top of it. A new name and a new launcher
+are on the way (see [Roadmap](#roadmap)).
 
-It's developed in public as a record of the work, not as a supported release. If it gets solid enough it may be shared more widely later. Until then, expect rough edges, and use [upstream bbhost](https://github.com/droogie/bbhost) if you just want to play.
+It's tuned on one PC (RX 9070 XT, Ryzen 9 5950X, KDE Plasma on Wayland), targeting
+**1080p render → 4K output with FSR 4.1.1 Performance at a locked 120 fps.**
 
-No game files, AMD DLLs or FSR 4.1.1 assets are in this repository or its releases. Online play is untouched: the same thehuntersdream.com servers, sign-in and networking code as upstream.
+No game files, AMD DLLs or FSR 4.1.1 assets are in this repository or its releases.
+Online play is unchanged from bbhost: the same thehuntersdream.com servers, sign-in and
+networking code.
 
-## What it adds
-- **Temporal upscaling:**
-  - FSR 3.1, through [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan).
-  - FSR 4.1.1, replayed on Vulkan from passes captured from *your own* `amd_fidelityfx_upscaler_dx12.dll`. It uses the FP8 variant on RDNA4 and INT8 elsewhere, and falls back to FSR 3.1 when the assets or GPU features are missing.
-- **Quality presets:** Native AA, Quality 67%, Balanced 58%, Performance 50% and Ultra Performance 33%, plus sharpness. The game's own anti-aliasing switches off automatically under FSR 4.1.1.
-- **Scene/UI split:** the 3D scene renders at the preset's size while the HUD and menus stay sharp at full resolution (Kyo's Decoupled UI sites, as data).
-- **Motion vectors and jitter** for the upscalers (camera and object motion).
-- **Post-processing at render size:** depth of field, the fog/colour pass and motion blur run before FSR at the render size. Chromatic aberration, bloom, tonemap, grain and the HUD stay at full resolution.
-- **Frame rate and pacing:**
-  - a 120 fps cap;
-  - even frame pacing at fixed caps (in testing: 1% lows of ~119-120 at 4K/120 with pacing on, against 88-100 with it off);
-  - motion blur off becomes one copy instead of two passes.
-- **CPU-side work:** hot threads placed on the preferred cores' L3 domain, asynchronous logging, a PGO build, and a cached key path in the command processor.
-- **Tools:**
-  - F11 performance snapshots (the last 30 s of frame times, GPU time per pass, CPU per thread);
-  - `bbtest` test sessions;
-  - a GPU pass timer;
-  - FSR stage dumps.
-- **DualSense and DualSense Edge (USB):** HD haptics from the game's rumble and sound effects (music and ambience filtered out), menu taps, and adaptive triggers that follow what the character does - R2's charged heavy attack, L2's trigger break that goes slack when no Quicksilver Bullets are carried.
-- **A launcher wrapper** for KDE/Wayland (`packaging/vk/bbhost`) that sizes the setup window correctly on monitors with or without display scaling.
+## Features
 
-## Status
-| | |
-|---|---|
-| Latest release | [`v0.2.18-vk.2`](https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.2.18-vk.2) (2026-10-22) |
-| `main` | vk.2 |
-| Measured (Old Yharnam, FSR 4.1.1 Performance, 4K, 120 cap) | ~121-122 fps average, 1% lows ~110. Heavy smoke still drops below 120. |
-| The limit now | The single command-processor thread (`bb-cp0`, ~7 ms of an 8.33 ms frame) and a GPU frame at ~90% |
-| Not done yet | The launcher overhaul (mockups only, `docs/vk/mock/`), the `bb-cp0` split, the FSR 4.1.1 check against the DLL |
+### Upscaling and image quality
+- **FSR 4.1.1** on Vulkan, built from your own copy of AMD's DLL. FP8 on RDNA4, INT8
+  elsewhere, with an automatic fallback to FSR 3.1.
+- **FSR 3.1** and **FSR 1** as well.
+- **Presets:** Native AA, Quality, Balanced, Performance and Ultra Performance, plus
+  sharpness. They change live in the game, with no restart.
+- **Sharp HUD and menus:** the 3D scene renders at the preset's size, the interface at full
+  resolution.
+- **Motion vectors and camera jitter** fed to the upscaler, for a stable image in motion.
+- **Post-processing at render size:** depth of field, fog and motion blur run before the
+  upscaler, so they cost less and upscale cleanly.
 
-The plan, with what's next and why: [docs/vk/PLAN.md](docs/vk/PLAN.md). Known issues: [docs/vk/KNOWN_ISSUES.md](docs/vk/KNOWN_ISSUES.md).
+### Frame rate
+- **A 120 fps cap with even frame pacing.**
+- Measured at 4K with FSR 4.1.1 Performance in Old Yharnam: about **120-122 fps average,
+  1% lows around 110.** Heavy smoke can still dip below 120; that's the current focus.
+- Work done so far: a latency limit, hot threads on the fastest cores, asynchronous
+  logging, cheaper GPU submissions and a profile-guided (PGO) build.
 
-## Install over an existing bbhost setup
-You need a working [bbhost](https://github.com/droogie/bbhost) install first: the game dump with the 1.09 update, its decrypted eboot, and a Vulkan 1.3 driver. bbhost-vk only replaces the binary.
+### DualSense and DualSense Edge
+- **HD haptics (USB):** the game's rumble and its sound effects (hits, gunshots,
+  footsteps, doors) played on the controller's haptic motors. Music and ambience are
+  filtered out, and left and right follow where a sound comes from.
+- **Adaptive triggers** that follow what your character is doing:
+  - **R2:** resistance on a charged heavy attack's wind-up, a rumble that builds while it
+    charges, and a kick on the release.
+  - **L2:** a trigger break with a recoil kick on each shot. It goes slack when you're out
+    of Quicksilver Bullets.
+- **Menu taps** when moving through menus, firmer ones on confirm and back.
+- All adjustable live in F10 > CONTROLLER.
 
-1. **Back up:**
-   - the binary: in your bbhost folder, `cp bbhost.bin bbhost.bin.upstream`;
-   - your settings: `~/.config/bbhost/bbhost-options.toml` (the F10 settings and your account sign-in) and `~/.config/bbhost/bbhost.toml`. bbhost-vk adds its own keys; upstream ignores them.
-2. **Download and check** the release tarball and `SHA256SUMS` from [Releases](https://github.com/Heliasyu/bbhost-vk/releases), then run `sha256sum -c SHA256SUMS`.
+### Tools
+- **F11 performance snapshots:** the last 30 seconds of frame times, GPU time per pass and
+  CPU time per thread, saved in one keypress.
+- **`bbtest`:** logged test sessions with screenshots, markers and snapshots.
+- **A KDE/Wayland launcher wrapper** that sizes the setup window correctly with or without
+  display scaling.
+
+## Install
+You need a working [bbhost](https://github.com/droogie/bbhost) setup first: the game dump
+with the 1.09 update, its decrypted eboot, and a Vulkan 1.3 driver. bbhost-vk replaces only
+the binary.
+
+1. **Back up** your `bbhost.bin` (`cp bbhost.bin bbhost.bin.upstream`) and your settings in
+   `~/.config/bbhost/`.
+2. **Download** the latest tarball and `SHA256SUMS` from
+   [Releases](https://github.com/Heliasyu/bbhost-vk/releases), then check them with
+   `sha256sum -c SHA256SUMS`.
 3. **Copy the binary in:**
    ```sh
    tar xzf bbhost-vk-linux-*.tar.gz
    cp bbhost-vk-linux-*/bbhost /path/to/your/bbhost/bbhost.bin
    ```
-   Keep your own `plugins/` folder: the official plugins are signed by upstream, and the release's copies are not.
-4. **Start it** as usual (your wrapper, `./run-bbhost.sh`, or `bbtest`).
-5. **To go back:** `cp bbhost.bin.upstream bbhost.bin`.
+   Keep your own `plugins/` folder (the official plugins are signed by upstream).
+4. **Start it** as usual. To go back: `cp bbhost.bin.upstream bbhost.bin`.
 
 ### FSR 4.1.1 (optional, once per PC)
-FSR 4.1.1 can't be redistributed, so you build its assets from your own copy of AMD's DLL:
-1. Take `amd_fidelityfx_upscaler_dx12.dll` (4.1.x) from an [OptiScaler release](https://github.com/optiscaler/OptiScaler/releases).
-2. Install a Proton (GE-Proton 10+, Proton-CachyOS or Proton Experimental), plus `mingw-w64-gcc cmake ninja python spirv-tools git`. The script builds dxil-spirv itself and needs the network for that.
-3. From the unpacked release folder, run `./build-fsr4.sh /path/to/amd_fidelityfx_upscaler_dx12.dll`. It runs the DLL once under Proton and writes the assets to `~/.local/share/bbhost/fsr4_411` (a few minutes, ~300 MB of work space in `~/.cache/bbhost/fsr4cap`).
-4. Pick **Upscaler: FSR 4.1.1**. The log's `fsr4:` lines say which variant runs (e.g. `FSR 4.1.1 replay, FP8 t2160_m0`), or why it fell back to FSR 3.1.
+FSR 4.1.1 can't be redistributed, so its assets are built from your own copy of AMD's DLL:
+1. Get `amd_fidelityfx_upscaler_dx12.dll` (4.1.x), for example from an
+   [OptiScaler release](https://github.com/optiscaler/OptiScaler/releases).
+2. Install a Proton (GE-Proton 10+, Proton-CachyOS or Proton Experimental) and
+   `mingw-w64-gcc cmake ninja python spirv-tools git`.
+3. In the unpacked release folder: `./build-fsr4.sh /path/to/amd_fidelityfx_upscaler_dx12.dll`
+   (a few minutes).
+4. Pick **Upscaler: FSR 4.1.1** in the settings.
+
+### HD haptics
+Plug the DualSense in by USB **with its Bluetooth link off** (disconnect it in your
+Bluetooth settings, then replug), and keep its sound card in the **Direct** profile, not
+Pro Audio. Over Bluetooth you get classic rumble and the adaptive triggers.
 
 ## Settings
-- **Where to set them:** the setup window (`--setup`), F10 > UPSCALING, and the game's own System menu (PC Upscaling, Upscaling Quality).
-- **Upscaler:** Off, FSR 1, FSR 3.1 or FSR 4.1.1.
-- **Upscaling quality:** the preset.
-- **Upscaling sharpness:** 0.0-1.0.
-- **Anti-aliasing:** On, Off or Auto. Auto turns the game's own AA off under FSR 4.1.1.
-- **Upscaler reactive mask** and **Upscaler jitter.**
-- **Show motion vectors** and **Show upscaler GPU time.** The GPU time view puts a `pass-timer:` line in the log every 10 s.
-- **Frame rate:** 30, 60, 90, 120 or Uncapped.
-- **Controller** (F10 > CONTROLLER, live): Haptics (Off, Rumble or HD), Haptics strength, Adaptive triggers, Trigger strength, Menu haptics. HD needs a DualSense or DualSense Edge on USB with its Bluetooth link off, and its sound card in the **Direct** profile (not Pro Audio).
-- **Where they're saved:** `~/.config/bbhost/bbhost-options.toml`. The FSR 4.1.1 DLL path (`upscaler.fsr4_dll`) is in `~/.config/bbhost/bbhost.toml`.
+Settings live in the setup window (`--setup`), the F10 overlay in the game (UPSCALING,
+CONTROLLER) and the game's own System menu. They are saved in
+`~/.config/bbhost/bbhost-options.toml`.
 
-Even frame pacing, post-processing at render size and the motion-blur skip are always on in `main`; their launcher switches were removed after vk.1. Environment variables still turn them off for comparison or if something looks wrong: `BBHOST_PRESENT_PACE=0`, `BBHOST_POST_AT_RENDER=0`, `BBHOST_MOTION_BLUR_SKIP=0`.
+## Roadmap
+- **Smoke-proof 120 fps:** 1% lows of 115+ in the heaviest areas (Old Yharnam, the
+  Forbidden Woods, Yahar'gul).
+- **A new launcher, built from scratch:** easier to use, with a Bloodborne look.
+- **A new name** for the project, to match what it has become.
+- **More GPUs:** FSR 4 presets for RDNA2/3 and the Steam Deck, then Windows.
 
-## Testing and performance data
-- **F11 in the game:** saves a snapshot of the last 30 s to `snaps/` beside the binary: frame times, 1% lows, GPU time per pass, CPU time per thread, compiles, settings and the log tail. Take one *during* a frame drop.
-- **`bbtest`** (`packaging/vk/bbtest`): runs a logged test session, with the bbhost log, MangoHud CSV, screenshots, an optional replay buffer, markers and snapshots, and bundles it into `~/.local/share/bbtest/sessions/`. `bbtest profile` adds RGP captures. See [docs/vk/TESTING.md](docs/vk/TESTING.md).
+Details: [docs/vk/PLAN.md](docs/vk/PLAN.md). Known issues:
+[docs/vk/KNOWN_ISSUES.md](docs/vk/KNOWN_ISSUES.md). Changes per version:
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Building
-`packaging/vk/build.sh` makes the portable release build (stripped, with its SHA-256; `PGO_PROFILE=` for the PGO build), and `tools/package_linux.sh` packs a tarball. The build needs the `third_party/FSR-Vulkan` submodule (`git submodule update --init --recursive`). CI builds every push and pull request.
-
-## Branches and versions
-- **`main`:** the current code, and what releases are tagged from.
-- **New work:** goes on a topic branch and is merged by pull request.
-- **`upstream-sync`:** takes new bbhost releases first; online-code changes from upstream are merged before anything else.
-- **The old `phase-*` branches:** history only. Everything in them is in `main`.
-- **Versions:** `<bbhost version>-vk.<n>`, for example `v0.2.18-vk.1`.
-
-## Documentation
-- [docs/vk/PLAN.md](docs/vk/PLAN.md): the plan and status
-- [CHANGELOG.md](CHANGELOG.md): changes per version
-- [docs/vk/KNOWN_ISSUES.md](docs/vk/KNOWN_ISSUES.md)
-- [docs/vk/TESTING.md](docs/vk/TESTING.md): test sessions and what each build was checked for
-- [docs/vk/DEVLOG.md](docs/vk/DEVLOG.md): the full working log, with measurements
-- [README.upstream.md](README.upstream.md): upstream bbhost's README (requirements, setup, online, mods)
+```sh
+git submodule update --init --recursive
+packaging/vk/build.sh          # PGO_PROFILE=<file> for the PGO build
+tools/package_linux.sh         # the release tarball
+```
+For developers: [docs/vk/TESTING.md](docs/vk/TESTING.md) (test sessions) and
+[docs/vk/DEVLOG.md](docs/vk/DEVLOG.md) (the working log, with measurements).
 
 ## Credits
-- [droogie/bbhost](https://github.com/droogie/bbhost): everything this fork builds on.
-- [bbport](https://github.com/deadinside28/bloodborne_pc) (GPL-2.0-or-later): the FSR 4.1.1 replay (`src/host/fsr411/`, adapted) and the asset build (`tools/fsr4cap/`), plus findings behind the motion vectors and jitter.
-- [FireBurn/FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) (MIT): AMD FidelityFX FSR 3.1 on native Vulkan, a submodule at `third_party/FSR-Vulkan`. It carries the AMD FidelityFX SDK (MIT).
-- [HansKristian-Work/dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT): translating the captured passes, built by `tools/fsr4cap` at asset-build time.
-- Kyo's Decoupled UI patches (via [shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)), [IFreemz](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR), [Supermedo](https://github.com/Supermedo/bloodborne_pc) and [Awakenchan](https://github.com/Awakenchan/BloodBorneButPc): the findings the scene/UI split builds on.
+- [droogie/bbhost](https://github.com/droogie/bbhost): the native Bloodborne host this
+  project is built on. Its original README: [README.upstream.md](README.upstream.md).
+- [bbport](https://github.com/deadinside28/bloodborne_pc) (GPL-2.0-or-later): the FSR 4.1.1
+  replay and asset build this project adapted, and findings behind the motion vectors.
+- [FireBurn/FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) (MIT): FSR 3.1 on Vulkan,
+  with the AMD FidelityFX SDK.
+- [HansKristian-Work/dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT):
+  used when building the FSR 4.1.1 assets.
+- Kyo's Decoupled UI patches (via
+  [shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)),
+  [IFreemz](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR),
+  [Supermedo](https://github.com/Supermedo/bloodborne_pc) and
+  [Awakenchan](https://github.com/Awakenchan/BloodBorneButPc): findings behind the
+  scene/UI split.
 
-Details, with what was copied, adapted or only learned from: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+What was copied, adapted or only learned from: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
-GPL-3.0, same as bbhost. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+GPL-3.0, same as bbhost. See [LICENSE](LICENSE).
