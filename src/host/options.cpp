@@ -1292,20 +1292,20 @@ void options_panel_frame(float display_w, float display_h) {
     // list scrolls: the rows that fit are drawn, the selection is kept in
     // view, and a hint says there is more above or below.
     float rows_h = 0.0f;
-    for (const Row& r : g_rows) rows_h += r.kind == Row::Header ? 32.0f : 40.0f;
-    const float room = display_h - 20.0f - 206.0f;
+    for (const Row& r : g_rows) rows_h += r.kind == Row::Header ? 34.0f : 40.0f;
+    const float room = display_h - 20.0f - 228.0f;
     const float fit = 1.0f;
     const bool scrolls = rows_h > room && room > 0.0f;
     // rc2: the foot holds the note wrapped to three lines and the key guide.
     constexpr float kFoot = 128.0f;
-    const float pw = 860.0f, ph = std::fmin(78.0f + rows_h + kFoot, display_h - 20.0f);
+    const float pw = 900.0f, ph = std::fmin(100.0f + rows_h + kFoot, display_h - 20.0f);
     const float px = (display_w - pw) * 0.5f, py = (display_h - ph) * 0.5f;
     static int g_scroll = 0;  // the first row drawn
     if (!scrolls) {
         g_scroll = 0;
     } else {
-        auto height = [](int r) { return g_rows[r].kind == Row::Header ? 32.0f : 40.0f; };
-        const float avail = ph - 78.0f - kFoot - 24.0f;  // less the two hints
+        auto height = [](int r) { return g_rows[r].kind == Row::Header ? 34.0f : 40.0f; };
+        const float avail = ph - 100.0f - kFoot - 24.0f;  // less the two hints
         // A header just above the selection comes along, so a section never
         // starts with its title out of view.
         int top = g_sel;
@@ -1373,35 +1373,42 @@ void options_panel_frame(float display_w, float display_h) {
         }
     }
 
-    // Panel. The game's gold on near-black, the same as the text box, so the
-    // port's own surfaces read as one thing rather than three.
-    host_overlay_rect(0.0f, 0.0f, display_w, display_h, 0x00000080u);
-    host_overlay_rect(px - 3.0f, py - 3.0f, pw + 6.0f, ph + 6.0f, 0xc8a05affu);
-    host_overlay_rect(px, py, pw, ph, 0x0a0a0af2u);
-    host_overlay_text(px + 28.0f, py + 22.0f, 1.0f, 0xc8a05affu, "BLOODBORNE PC OPTIONS");
+    // Panel: Helia's Dream's glass (the launcher's look). A dimmed frame, a
+    // translucent pane with a bright top edge, rows as soft wells, the chosen
+    // one in the moonlit accent, On/Off as switches.
+    constexpr std::uint32_t kText = 0xe9edf5ffu, kSoft = 0xc3cad6ffu, kMuted = 0xa7b0c0ffu, kAccent = 0xa9bfe3ffu;
+    host_overlay_rect(0.0f, 0.0f, display_w, display_h, 0x05060a99u);
+    host_overlay_round_rect(px - 1.0f, py + 6.0f, pw + 2.0f, ph + 10.0f, 26.0f, 0x00000000u, 0x00000066u);  // shadow
+    host_overlay_round_rect(px, py, pw, ph, 24.0f, 0x1a1f2bf2u, 0x0d1017f5u);
+    host_overlay_round_frame(px, py, pw, ph, 24.0f, 1.0f, 0xffffff4cu, 0xffffff14u);
+    // The moon's glint in the corner: a soft disc.
+    host_overlay_round_rect(px + pw - 118.0f, py + 22.0f, 40.0f, 40.0f, 20.0f, 0xe9eefaccu, 0xc8d6f0aau);
+    host_overlay_ui_text(kOverlayFontTitle, px + 30.0f, py + 16.0f, 44.0f, kText, "Helia's Dream");
+    host_overlay_ui_text(kOverlayFontBody, px + 32.0f, py + 60.0f, 17.0f, kMuted, "Settings  -  they apply live in the game");
     // The online state, always in view whatever the list is scrolled to:
     // who this is signed in as, and the room when there is one.
     {
         const std::string online = hle_np_online_status();
-        const float ow = host_overlay_text_width(0.6f, online.c_str());
-        host_overlay_text(px + pw - 28.0f - ow, py + 30.0f, 0.6f, 0x9a8a64ffu, online.c_str());
+        const float ow = host_overlay_ui_text_width(kOverlayFontBody, 16.0f, online.c_str());
+        host_overlay_ui_text(kOverlayFontBody, px + pw - 140.0f - ow, py + 34.0f, 16.0f, kSoft, online.c_str());
     }
-    host_overlay_rect(px + 28.0f, py + 56.0f, pw - 56.0f, 1.0f, 0x6a5a34ffu);
+    host_overlay_rect(px + 28.0f, py + 88.0f, pw - 56.0f, 1.0f, 0xffffff1au);
 
-    float y = py + 78.0f;
-    g_row_h = 34.0f * fit;
-    const float text_dy = (g_row_h - 22.0f) * 0.5f;  // 0.8 text is about 22 px: centred in the row
-    g_row_x = px + 16.0f;
-    g_row_w = pw - 32.0f;
+    float y = py + 100.0f;
+    g_row_h = 36.0f * fit;
+    g_row_x = px + 20.0f;
+    g_row_w = pw - 40.0f;
     const float y_end = py + ph - kFoot;
     if (scrolls && g_scroll > 0) {
-        host_overlay_text(px + 40.0f, y, 0.55f, 0x7a6a44ffu, "^ more above");
+        host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y, 15.0f, kMuted, "\x5e  more above");
         y += 24.0f;
     }
+    // A label and value line's text, centred in the row.
+    const float text_dy = (g_row_h - 20.0f) * 0.5f - 1.0f;
     bool more_below = false;
     for (int r = 0; r < kRowCount; ++r) {
         const Row& row = g_rows[r];
-        const float h = (row.kind == Row::Header ? 32.0f : 40.0f) * fit;
+        const float h = (row.kind == Row::Header ? 34.0f : 40.0f) * fit;
         if (r < g_scroll || y + h > y_end - (scrolls ? 24.0f : 0.0f)) {
             g_row_y[r] = -10000.0f;  // not drawn: the pointer cannot land on it
             if (r >= g_scroll) more_below = true;
@@ -1409,19 +1416,26 @@ void options_panel_frame(float display_w, float display_h) {
         }
         g_row_y[r] = y;
         if (row.kind == Row::Header) {
-            host_overlay_text(px + 28.0f, y + 10.0f * fit, 0.62f, 0x8a7a54ffu, row.text);
-            y += 32.0f * fit;
+            // An eyebrow: small, spaced capitals.
+            float hx = px + 34.0f;
+            for (const char* c = row.text; *c; ++c) {
+                const char one[2] = {*c, 0};
+                hx += host_overlay_ui_text(kOverlayFontBold, hx, y + 12.0f * fit, 13.0f, kMuted, one) + 1.6f;
+            }
+            y += 34.0f * fit;
             continue;
         }
         const bool sel = r == g_sel;
         if (sel) {
-            host_overlay_rect(g_row_x, y, g_row_w, g_row_h, 0x3a3020ffu);
-            host_overlay_rect(g_row_x, y, 3.0f, g_row_h, 0xc8a05affu);
+            host_overlay_round_rect(g_row_x, y, g_row_w, g_row_h, 12.0f, 0xa9bfe347u, 0xa9bfe324u);
+            host_overlay_round_frame(g_row_x, y, g_row_w, g_row_h, 12.0f, 1.0f, 0xc9d6ee80u, 0xa9bfe333u);
+        } else {
+            host_overlay_round_rect(g_row_x, y, g_row_w, g_row_h, 12.0f, 0xffffff0au, 0xffffff06u);
         }
+        const std::uint32_t label_c = sel ? kText : kSoft;
         if (row.kind == Row::Close || row.kind == Row::Action) {
             const bool busy = row.kind == Row::Action && !action_idle(row.field);
-            host_overlay_text(px + 40.0f, y + text_dy, 0.8f, busy ? 0x666666ffu : sel ? 0xffffffffu : 0xbbbbbbffu,
-                              row.text);
+            host_overlay_ui_text(kOverlayFontBold, px + 40.0f, y + text_dy, 19.0f, busy ? 0x6a7080ffu : label_c, row.text);
             y += 40.0f * fit;
             continue;
         }
@@ -1430,46 +1444,66 @@ void options_panel_frame(float display_w, float display_h) {
                                      : row.field == 10 ? updater::status()
                                      : row.field == 1  ? account_detail()
                                                        : account_status();
-            host_overlay_text(px + 40.0f, y + text_dy + 2.0f, 0.66f, 0x9a9a9affu, line.c_str());
+            host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y + text_dy + 1.0f, 16.0f, kMuted, line.c_str());
             y += 40.0f * fit;
             continue;
         }
         if (row.kind == Row::Text) {
-            host_overlay_text(px + 40.0f, y + text_dy, 0.8f, sel ? 0xffffffffu : 0xbbbbbbffu, row.text);
+            host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y + text_dy, 19.0f, label_c, row.text);
             std::string shown = g_field[row.field];
             if (g_edit_field == row.field) shown += "_";
             if (shown.empty()) shown = "(type here)";
-            const float vw = host_overlay_text_width(0.8f, shown.c_str());
-            host_overlay_text(px + pw - 60.0f - vw, y + text_dy, 0.8f,
-                              g_edit_field == row.field ? 0xffd88cffu : sel ? 0xffd88cffu : 0x9a9a9affu, shown.c_str());
+            const float vw = host_overlay_ui_text_width(kOverlayFontBold, 18.0f, shown.c_str());
+            const float vx = px + pw - 52.0f - vw;
+            host_overlay_round_rect(vx - 14.0f, y + 5.0f, vw + 28.0f, g_row_h - 10.0f, 13.0f, 0x0000004du, 0x00000040u);
+            host_overlay_ui_text(kOverlayFontBold, vx, y + text_dy, 18.0f, g_edit_field == row.field ? kAccent : sel ? kText : kSoft,
+                                 shown.c_str());
             y += 40.0f * fit;
             continue;
         }
         const Setting& s = g_set[row.setting];
-        host_overlay_text(px + 40.0f, y + text_dy, 0.8f, sel ? 0xffffffffu : 0xbbbbbbffu, s.label);
-        // The value as shown: the saved word, but Fullscreen says what it is (there is no
-        // exclusive mode; the window covers the display, and overlays show over it).
-        const char* v = s.values[static_cast<std::size_t>(s.index)];
-        if (std::strcmp(s.key, "window_mode") == 0 && std::strcmp(v, "Fullscreen") == 0) v = "Fullscreen (borderless)";
-        const float vw = host_overlay_text_width(0.8f, v);
-        const float vx = px + pw - 60.0f - vw;
-        g_row_vl[r] = vx - 30.0f;
-        g_row_vm[r] = vx + vw * 0.5f;
-        host_overlay_text(vx, y + text_dy, 0.8f, sel ? 0xffd88cffu : 0x9a9a9affu, v);
-        if (s.index > 0) {
-            host_overlay_text(vx - 22.0f, y + text_dy, 0.8f, sel ? 0xc8a05affu : 0x555555ffu, "<");
-        }
-        if (s.index + 1 < static_cast<int>(s.values.size())) {
-            host_overlay_text(px + pw - 50.0f, y + text_dy, 0.8f, sel ? 0xc8a05affu : 0x555555ffu, ">");
+        const float lw = host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y + text_dy, 19.0f, label_c, s.label);
+        const bool toggle = s.values.size() == 2 &&
+                            ((std::strcmp(s.values[0], "On") == 0 && std::strcmp(s.values[1], "Off") == 0) ||
+                             (std::strcmp(s.values[0], "Off") == 0 && std::strcmp(s.values[1], "On") == 0));
+        if (toggle) {
+            // A switch: the accent track with a dark knob on the right when on.
+            const bool on = reads_on(s, s.index);
+            const float tw = 46.0f, th = 24.0f, tx = px + pw - 48.0f - tw, ty = y + (g_row_h - th) * 0.5f;
+            host_overlay_round_rect(tx, ty, tw, th, th * 0.5f, on ? 0xbccdeaffu : 0xffffff26u, on ? 0xa9bfe3ffu : 0xffffff1au);
+            if (!on) host_overlay_round_frame(tx, ty, tw, th, th * 0.5f, 1.0f, 0xffffff40u, 0xffffff26u);
+            const float kx = on ? tx + tw - th + 3.0f : tx + 3.0f;
+            host_overlay_round_rect(kx, ty + 3.0f, th - 6.0f, th - 6.0f, (th - 6.0f) * 0.5f, on ? 0x0b0d12ffu : 0xe9edf5ffu,
+                                    on ? 0x0b0d12ffu : 0xc3cad6ffu);
+            g_row_vl[r] = g_row_vm[r] = 0.0f;  // a click anywhere flips it
+        } else {
+            // The value in a pill, with chevrons either side; the pill's left
+            // half steps back, its right half forward (the click rule above).
+            const char* v = s.values[static_cast<std::size_t>(s.index)];
+            if (std::strcmp(s.key, "window_mode") == 0 && std::strcmp(v, "Fullscreen") == 0) v = "Fullscreen (borderless)";
+            const float vw = host_overlay_ui_text_width(kOverlayFontBold, 18.0f, v);
+            const float pr = px + pw - 46.0f;           // the pill's right edge
+            const float pl = pr - vw - 64.0f;            // its left edge
+            const float ty = y + 4.0f, th = g_row_h - 8.0f;
+            host_overlay_round_rect(pl, ty, pr - pl, th, th * 0.5f, sel ? 0x0000005cu : 0x00000040u, sel ? 0x0000004cu : 0x00000033u);
+            host_overlay_round_frame(pl, ty, pr - pl, th, th * 0.5f, 1.0f, sel ? 0xc9d6ee55u : 0xffffff1cu, 0xffffff0fu);
+            host_overlay_ui_text(kOverlayFontBold, pl + 32.0f, y + text_dy, 18.0f, sel ? kText : kSoft, v);
+            const std::uint32_t chev_on = sel ? kAccent : 0x8b94a6ffu, chev_off = 0xffffff1fu;
+            const float cy = y + g_row_h * 0.5f;
+            const std::uint32_t back = s.index > 0 ? chev_on : chev_off;
+            const std::uint32_t fwd = s.index + 1 < static_cast<int>(s.values.size()) ? chev_on : chev_off;
+            host_overlay_tri(pl + 20.0f, cy - 6.0f, pl + 20.0f, cy + 6.0f, pl + 13.0f, cy, back);
+            host_overlay_tri(pr - 20.0f, cy - 6.0f, pr - 20.0f, cy + 6.0f, pr - 13.0f, cy, fwd);
+            g_row_vl[r] = pl - 10.0f;
+            g_row_vm[r] = (pl + pr) * 0.5f;
         }
         if (s.restart && !(row.setting == kResolution && res_live(s.index))) {
-            host_overlay_text(px + 40.0f + host_overlay_text_width(0.8f, s.label) + 14.0f, y + text_dy + 4.0f,
-                              0.52f, 0x7a6a44ffu, "(restart required)");
+            host_overlay_ui_text(kOverlayFontBody, px + 40.0f + lw + 12.0f, y + text_dy + 3.0f, 14.0f, 0x8b94a6ffu, "restart");
         }
         y += 40.0f * fit;
     }
     if (more_below) {
-        host_overlay_text(px + 40.0f, y, 0.55f, 0x7a6a44ffu, "v more below");
+        host_overlay_ui_text(kOverlayFontBody, px + 40.0f, y, 15.0f, kMuted, "v  more below");
     }
     g_laid_out = true;
 
@@ -1493,14 +1527,16 @@ void options_panel_frame(float display_w, float display_h) {
         const int f = g_rows[g_sel].field;
         note = f >= 10 ? kUpdateNotes[f - 10] : kNotes[f];
     }
-    host_overlay_rect(px + 28.0f, py + ph - 108.0f, pw - 56.0f, 1.0f, 0x6a5a34ffu);
+    // The note in a well of its own, like a launcher tooltip.
+    const float ny = py + ph - 112.0f;
+    host_overlay_round_rect(px + 20.0f, ny, pw - 40.0f, 72.0f, 14.0f, 0x0000004du, 0x0000003au);
+    host_overlay_round_frame(px + 20.0f, ny, pw - 40.0f, 72.0f, 14.0f, 1.0f, 0xffffff1au, 0xffffff0au);
     if (note) {
-        // rc2: wrapped to the panel, at most three lines (the last cut with
-        // "..."). One line ran off the panel, and its glyphs - drawn whether
-        // on screen or not - took the overlay past its vertex buffer.
-        const auto lines = wrap_note(note, pw - 56.0f, 0.62f, 3);
+        // Wrapped by the monospace measure (about as wide as the proportional
+        // face at this size), at most three lines, the last cut with "...".
+        const auto lines = wrap_note(note, pw - 80.0f, 0.62f, 3);
         for (std::size_t i = 0; i < lines.size(); ++i)
-            host_overlay_text(px + 28.0f, py + ph - 98.0f + 20.0f * static_cast<float>(i), 0.62f, 0x9a9a9affu, lines[i].c_str());
+            host_overlay_ui_text(kOverlayFontBody, px + 36.0f, ny + 9.0f + 20.0f * static_cast<float>(i), 16.0f, kSoft, lines[i].c_str());
     }
     // rc2: each selection change in the log with the overlay's size (the
     // F10 bug was a selection that took the vertices past the buffer).
@@ -1514,8 +1550,19 @@ void options_panel_frame(float display_w, float display_h) {
                      host_overlay_shown_vertices());
         }
     }
-    host_overlay_text(px + 28.0f, py + ph - 34.0f, 0.62f, 0x7a7a7affu,
-                      "Arrows move and change   Enter toggles   Click sets   Esc or F10 closes");
+    // The key guide as small pills.
+    {
+        static const char* const kKeys[][2] = {{"Arrows", "move and change"}, {"Enter", "toggles"}, {"Click", "sets"}, {"Esc / F10", "closes"}};
+        float kx = px + 24.0f;
+        const float ky = py + ph - 32.0f;
+        for (const auto& k : kKeys) {
+            const float kw = host_overlay_ui_text_width(kOverlayFontBold, 14.0f, k[0]);
+            host_overlay_round_rect(kx, ky - 3.0f, kw + 18.0f, 22.0f, 11.0f, 0xffffff1fu, 0xffffff14u);
+            host_overlay_ui_text(kOverlayFontBold, kx + 9.0f, ky, 14.0f, kText, k[0]);
+            kx += kw + 26.0f;
+            kx += host_overlay_ui_text(kOverlayFontBody, kx, ky, 14.0f, kMuted, k[1]) + 22.0f;
+        }
+    }
 }
 }  // namespace
 

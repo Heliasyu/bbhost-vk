@@ -7,10 +7,14 @@
 #include "host/gpu.h"
 
 #include "host/overlay_font.h"
+#include "host/overlay_ui_font.h"
 #include "host/overlay_spv.h"
 #include "log.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <utility>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -60,8 +64,13 @@ constexpr VkDeviceSize kVboBytes = 1024u * 1024u;
 
 // The atlas texel that is fully lit: a plain rectangle points every corner at
 // it, so one pipeline draws rectangles and glyphs alike.
-constexpr float kSolidU = (overlay_font::kSolidX + 0.5f) / overlay_font::kAtlasW;
-constexpr float kSolidV = (overlay_font::kSolidY + 0.5f) / overlay_font::kAtlasH;
+// The texture is overlay_ui_font's atlas: the monospace one (overlay_font) in its
+// top-left corner, the menus' proportional fonts below it.
+constexpr float kAtlasWf = static_cast<float>(overlay_ui_font::kAtlasW);
+constexpr float kAtlasHf = static_cast<float>(overlay_ui_font::kAtlasH);
+constexpr float kSolidU = (overlay_ui_font::kSolidX + 0.5f) / kAtlasWf;
+constexpr float kSolidV = (overlay_ui_font::kSolidY + 0.5f) / kAtlasHf;
+static_assert(overlay_ui_font::kSolidX == overlay_font::kSolidX && overlay_ui_font::kSolidY == overlay_font::kSolidY);
 
 void push(float x, float y, std::uint32_t rgba, float u = kSolidU, float vv = kSolidV) {
     Vertex v;
@@ -148,7 +157,7 @@ bool upload_atlas(VkDevice device, VkPhysicalDevice phys, VkQueue queue, std::ui
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = VK_FORMAT_R8_UNORM;
-    ici.extent = {overlay_font::kAtlasW, overlay_font::kAtlasH, 1};
+    ici.extent = {overlay_ui_font::kAtlasW, overlay_ui_font::kAtlasH, 1};
     ici.mipLevels = 1;
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -167,7 +176,7 @@ bool upload_atlas(VkDevice device, VkPhysicalDevice phys, VkQueue queue, std::ui
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory staging_mem = VK_NULL_HANDLE;
     VkBufferCreateInfo sbci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    sbci.size = sizeof(overlay_font::kAtlas);
+    sbci.size = sizeof(overlay_ui_font::kAtlas);
     sbci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     if (vkCreateBuffer(device, &sbci, nullptr, &staging) != VK_SUCCESS) return false;
     VkMemoryRequirements sreq{};
@@ -180,7 +189,7 @@ bool upload_atlas(VkDevice device, VkPhysicalDevice phys, VkQueue queue, std::ui
     vkBindBufferMemory(device, staging, staging_mem, 0);
     void* map = nullptr;
     if (vkMapMemory(device, staging_mem, 0, sreq.size, 0, &map) != VK_SUCCESS) return false;
-    std::memcpy(map, overlay_font::kAtlas, sizeof(overlay_font::kAtlas));
+    std::memcpy(map, overlay_ui_font::kAtlas, sizeof(overlay_ui_font::kAtlas));
     vkUnmapMemory(device, staging_mem);
 
     VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -206,7 +215,7 @@ bool upload_atlas(VkDevice device, VkPhysicalDevice phys, VkQueue queue, std::ui
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {overlay_font::kAtlasW, overlay_font::kAtlasH, 1};
+    region.imageExtent = {overlay_ui_font::kAtlasW, overlay_ui_font::kAtlasH, 1};
     vkCmdCopyBufferToImage(cmd, staging, g_atlas, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -279,10 +288,10 @@ float host_overlay_text(float x, float y, float scale, std::uint32_t rgba, const
         const unsigned ch_code = static_cast<unsigned char>(*c);
         if (ch_code < overlay_font::kFirst || ch_code > overlay_font::kLast) continue;  // space included, just blank
         const int idx = static_cast<int>(ch_code) - overlay_font::kFirst;
-        const float u0 = static_cast<float>((idx % overlay_font::kCols) * overlay_font::kCellW) / overlay_font::kAtlasW;
-        const float v0 = static_cast<float>((idx / overlay_font::kCols) * overlay_font::kCellH) / overlay_font::kAtlasH;
-        const float u1 = u0 + static_cast<float>(overlay_font::kCellW) / overlay_font::kAtlasW;
-        const float v1 = v0 + static_cast<float>(overlay_font::kCellH) / overlay_font::kAtlasH;
+        const float u0 = static_cast<float>((idx % overlay_font::kCols) * overlay_font::kCellW) / kAtlasWf;
+        const float v0 = static_cast<float>((idx / overlay_font::kCols) * overlay_font::kCellH) / kAtlasHf;
+        const float u1 = u0 + static_cast<float>(overlay_font::kCellW) / kAtlasWf;
+        const float v1 = v0 + static_cast<float>(overlay_font::kCellH) / kAtlasHf;
         const float gx = pen - ox, gy = y - oy;
         push(gx, gy, rgba, u0, v0);
         push(gx + cw, gy, rgba, u1, v0);
@@ -290,6 +299,122 @@ float host_overlay_text(float x, float y, float scale, std::uint32_t rgba, const
         push(gx + cw, gy, rgba, u1, v0);
         push(gx + cw, gy + ch, rgba, u1, v1);
         push(gx, gy + ch, rgba, u0, v1);
+    }
+    return pen - x;
+}
+
+// ---- Helia's Dream's shapes and fonts (the menus' glass look) ----
+
+namespace {
+
+std::uint32_t lerp_rgba(std::uint32_t a, std::uint32_t b, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    std::uint32_t out = 0;
+    for (int sh = 0; sh < 32; sh += 8) {
+        const float ca = static_cast<float>((a >> sh) & 0xff), cb = static_cast<float>((b >> sh) & 0xff);
+        out |= static_cast<std::uint32_t>(std::lround(ca + (cb - ca) * t)) << sh;
+    }
+    return out;
+}
+
+// The outline of a rounded rectangle, clockwise from the top-left corner's
+// top end: 7 points a corner.
+void round_outline(float x, float y, float w, float h, float r, std::vector<std::pair<float, float>>& pts) {
+    r = std::max(0.0f, std::min(r, std::min(w, h) * 0.5f));
+    constexpr int kSeg = 6;
+    const float cx[4] = {x + r, x + w - r, x + w - r, x + r};
+    const float cy[4] = {y + r, y + r, y + h - r, y + h - r};
+    const float start[4] = {3.14159265f, 4.71238898f, 0.0f, 1.57079633f};
+    pts.clear();
+    for (int c = 0; c < 4; ++c)
+        for (int i = 0; i <= kSeg; ++i) {
+            const float a = start[c] + 1.57079633f * static_cast<float>(i) / kSeg;
+            pts.emplace_back(cx[c] + std::cos(a) * r, cy[c] + std::sin(a) * r);
+        }
+}
+
+const overlay_ui_font::Face& face_of(int face) {
+    switch (face) {
+        case kOverlayFontBold: return overlay_ui_font::kBold;
+        case kOverlayFontTitle: return overlay_ui_font::kTitle;
+        default: return overlay_ui_font::kBody;
+    }
+}
+
+}  // namespace
+
+void host_overlay_round_rect(float x, float y, float w, float h, float r, std::uint32_t top, std::uint32_t bottom) {
+    if (w <= 0.0f || h <= 0.0f) return;
+    std::vector<std::pair<float, float>> pts;
+    round_outline(x, y, w, h, r, pts);
+    const auto col = [&](float py) { return lerp_rgba(top, bottom, (py - y) / h); };
+    const float mx = x + w * 0.5f, my = y + h * 0.5f;
+    const std::uint32_t mc = col(my);
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        const auto& a = pts[i];
+        const auto& b = pts[(i + 1) % pts.size()];
+        push(mx, my, mc);
+        push(a.first, a.second, col(a.second));
+        push(b.first, b.second, col(b.second));
+    }
+}
+
+void host_overlay_round_frame(float x, float y, float w, float h, float r, float t, std::uint32_t top, std::uint32_t bottom) {
+    if (w <= 2 * t || h <= 2 * t) return;
+    std::vector<std::pair<float, float>> outer, inner;
+    round_outline(x, y, w, h, r, outer);
+    round_outline(x + t, y + t, w - 2 * t, h - 2 * t, std::max(0.0f, r - t), inner);
+    const auto col = [&](float py) { return lerp_rgba(top, bottom, (py - y) / h); };
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (std::size_t i = 0; i < outer.size(); ++i) {
+        const std::size_t j = (i + 1) % outer.size();
+        const auto &o0 = outer[i], &o1 = outer[j], &i0 = inner[i], &i1 = inner[j];
+        push(o0.first, o0.second, col(o0.second));
+        push(o1.first, o1.second, col(o1.second));
+        push(i0.first, i0.second, col(i0.second));
+        push(o1.first, o1.second, col(o1.second));
+        push(i1.first, i1.second, col(i1.second));
+        push(i0.first, i0.second, col(i0.second));
+    }
+}
+
+float host_overlay_ui_text_width(int face, float size, const char* text) {
+    if (!text) return 0.0f;
+    const auto& f = face_of(face);
+    const float scale = size / static_cast<float>(f.size);
+    float w = 0.0f;
+    for (const char* c = text; *c; ++c) {
+        const unsigned code = static_cast<unsigned char>(*c);
+        if (code < overlay_ui_font::kFirst || code > overlay_ui_font::kLast) continue;
+        w += f.glyphs[code - overlay_ui_font::kFirst].advance * scale;
+    }
+    return w;
+}
+
+float host_overlay_ui_text(int face, float x, float y, float size, std::uint32_t rgba, const char* text) {
+    if (!text) return 0.0f;
+    const auto& f = face_of(face);
+    const float scale = size / static_cast<float>(f.size);
+    float pen = x;
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (const char* c = text; *c; ++c) {
+        const unsigned code = static_cast<unsigned char>(*c);
+        if (code < overlay_ui_font::kFirst || code > overlay_ui_font::kLast) continue;
+        const auto& g = f.glyphs[code - overlay_ui_font::kFirst];
+        if (g.w && g.h) {
+            const float gx = pen + static_cast<float>(g.ox) * scale, gy = y + static_cast<float>(g.oy) * scale;
+            const float gw = static_cast<float>(g.w) * scale, gh = static_cast<float>(g.h) * scale;
+            const float u0 = static_cast<float>(g.x) / kAtlasWf, v0 = static_cast<float>(g.y) / kAtlasHf;
+            const float u1 = static_cast<float>(g.x + g.w) / kAtlasWf, v1 = static_cast<float>(g.y + g.h) / kAtlasHf;
+            push(gx, gy, rgba, u0, v0);
+            push(gx + gw, gy, rgba, u1, v0);
+            push(gx, gy + gh, rgba, u0, v1);
+            push(gx + gw, gy, rgba, u1, v0);
+            push(gx + gw, gy + gh, rgba, u1, v1);
+            push(gx, gy + gh, rgba, u0, v1);
+        }
+        pen += g.advance * scale;
     }
     return pen - x;
 }

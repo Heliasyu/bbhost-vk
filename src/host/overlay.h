@@ -40,6 +40,17 @@ std::size_t host_overlay_shown_vertices();
 float host_overlay_text(float x, float y, float scale, std::uint32_t rgba, const char* text);
 float host_overlay_text_width(float scale, const char* text);
 
+// Helia's Dream's look (the launcher's), for the menus: rounded panes with a
+// vertical gradient from `top` to `bottom` (pass the same colour for a flat
+// one), a rounded border `t` wide, and proportional text - Manrope (regular,
+// bold) and Cormorant Garamond for titles. `size` is the line's pixel height;
+// (x, y) the line's top-left. Returns the width drawn.
+enum { kOverlayFontBody = 0, kOverlayFontBold = 1, kOverlayFontTitle = 2 };
+void host_overlay_round_rect(float x, float y, float w, float h, float r, std::uint32_t top, std::uint32_t bottom);
+void host_overlay_round_frame(float x, float y, float w, float h, float r, float t, std::uint32_t top, std::uint32_t bottom);
+float host_overlay_ui_text(int face, float x, float y, float size, std::uint32_t rgba, const char* text);
+float host_overlay_ui_text_width(int face, float size, const char* text);
+
 // `queue` and `family` are needed once, to upload the font atlas.
 bool host_overlay_init(VkDevice device, VkPhysicalDevice phys, VkFormat colour_format, VkQueue queue,
                        std::uint32_t family);
