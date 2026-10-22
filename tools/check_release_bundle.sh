@@ -12,8 +12,8 @@ if ls "$d" | grep -i playtest; then fail "a playtest kit is among the assets"; f
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 n=0
 for z in "$d"/bbhost-win-*.zip; do [ -f "$z" ] || continue; mkdir -p "$work/w$n"; unzip -q "$z" -d "$work/w$n"; n=$((n + 1)); done
-# bbhost-vk: its Linux and Steam Deck bundles are bbhost-vk-linux-* and bbhost-vk-steamdeck-*.
-for t in "$d"/bbhost-linux-*.tar.gz "$d"/bbhost-steamdeck-*.tar.gz "$d"/bbhost-vk-linux-*.tar.gz "$d"/bbhost-vk-steamdeck-*.tar.gz; do [ -f "$t" ] || continue; mkdir -p "$work/l$n"; tar xzf "$t" -C "$work/l$n"; n=$((n + 1)); done
+# bbhost-vk: its Linux and Steam Deck bundles are helias-dream-linux-* and helias-dream-steamdeck-* (bbhost-vk-* before the rename).
+for t in "$d"/bbhost-linux-*.tar.gz "$d"/bbhost-steamdeck-*.tar.gz "$d"/bbhost-vk-linux-*.tar.gz "$d"/bbhost-vk-steamdeck-*.tar.gz "$d"/helias-dream-linux-*.tar.gz "$d"/helias-dream-steamdeck-*.tar.gz; do [ -f "$t" ] || continue; mkdir -p "$work/l$n"; tar xzf "$t" -C "$work/l$n"; n=$((n + 1)); done
 [ "$n" -gt 0 ] || fail "no bundles in $d"
 # Only the example config may name a server (it shows the defaults).
 if find "$work" -name '*.toml' ! -name bbhost.example.toml -exec grep -lE '^[[:space:]]*(host|np_server|auth_server)[[:space:]]*=' {} + | grep .; then

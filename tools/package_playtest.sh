@@ -37,7 +37,7 @@ fi
 
 # Linux.
 (cd "$work" && tar xzf "$lin_tgz")
-ldir=$(ls -d "$work"/bbhost-vk-linux-* "$work"/bbhost-linux-* 2>/dev/null | head -1)   # bbhost-vk: either name
+ldir=$(ls -d "$work"/helias-dream-linux-* "$work"/bbhost-vk-linux-* "$work"/bbhost-linux-* 2>/dev/null | head -1)   # bbhost-vk: either name
 [ -n "$ldir" ] || { echo "no Linux package in $lin_tgz"; exit 1; }
 lname=$(basename "$ldir" | sed -E 's/^bbhost(-vk)?-linux-/bbhost\1-playtest-/')-linux-x86_64
 cp "$pt/bbhost-playtest.toml" "$pt/TESTING.md" "$ldir/"

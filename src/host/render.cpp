@@ -4703,7 +4703,7 @@ void shader_stats_note_impl(VkPipeline p, const char* kind, const std::string& n
     static FILE* f = [] {
         FILE* out = std::fopen(std::getenv("BBHOST_SHADER_STATS"), "a");
         if (out) {
-            std::fprintf(out, "# bbhost-vk shader statistics (bbtest profile; docs/vk/TESTING.md). t_s, kind, pipeline (the pass label), "
+            std::fprintf(out, "# Helia's Dream shader statistics (bbtest profile; docs/vk/TESTING.md). t_s, kind, pipeline (the pass label), "
                               "executable index, stage, subgroup size, then each driver statistic as name=value\n");
             std::fflush(out);
         } else {

@@ -86,16 +86,16 @@ int main() {
     check(parse_release(kRelease, tag, page) && tag == "v0.2.16" && page == "https://github.com/droogie/bbhost/releases/tag/v0.2.16",
           "a release's tag and html_url");
     check(parse_release("{\"tag_name\":\"v0.3.0\"}", tag, page) && tag == "v0.3.0" &&
-              page == "https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.3.0",
+              page == "https://github.com/Heliasyu/helias-dream/releases/tag/v0.3.0",
           "no html_url: bbhost's page for the tag");
     check(parse_release("{\"tag_name\":\"v0.3.0\",\"html_url\":\"https://example.com/releases/tag/v0.3.0\"}", tag, page) &&
-              page == "https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.3.0",
+              page == "https://github.com/Heliasyu/helias-dream/releases/tag/v0.3.0",
           "an html_url off github.com is not used");
     check(parse_release("{\"tag_name\":\"v0.3.0\",\"html_url\":7}", tag, page) &&
-              page == "https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.3.0",
+              page == "https://github.com/Heliasyu/helias-dream/releases/tag/v0.3.0",
           "an html_url that is no string is not used");
     check(parse_release("{\"tag_name\":\"v0.3.0 \\\"x\\\"\"}", tag, page) && tag == "v0.3.0 \"x\"" &&
-              page == "https://github.com/Heliasyu/bbhost-vk/releases/latest",
+              page == "https://github.com/Heliasyu/helias-dream/releases/latest",
           "a tag no link can carry: the latest release's page");
     check(!parse_release("<html>rate limited</html>", tag, page), "not JSON is no release");
     check(!parse_release("[]", tag, page), "an array is no release");

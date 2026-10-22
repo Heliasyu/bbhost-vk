@@ -140,7 +140,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         return LauncherResult::Quit;
     }
     const float scale = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
-    SDL_Window* win = SDL_CreateWindow("bbhost setup", static_cast<int>(980 * scale), static_cast<int>(760 * scale),
+    SDL_Window* win = SDL_CreateWindow("Helia's Dream setup", static_cast<int>(980 * scale), static_cast<int>(760 * scale),
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     SDL_Renderer* ren = win ? SDL_CreateRenderer(win, nullptr) : nullptr;
     if (!win || !ren) {
@@ -649,23 +649,23 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
         ImGui::Combo("Upscaler", &upscaler, kUpscalers, 4);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk: Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (FSR 3.1 is temporal; FSR 4.1.1 needs assets built once from your own DLL, tools/fsr4cap, and is FSR 3.1 without them).");
+            ImGui::SetTooltip("Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (FSR 3.1 is temporal; FSR 4.1.1 needs assets built once from your own DLL, tools/fsr4cap, and is FSR 3.1 without them).");
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kQualities[] = {"Native AA (100%)", "Quality (67%)", "Balanced (58%)", "Performance (50%)",
                                                  "Ultra Performance (33%)"};
         ImGui::Combo("Upscaling quality", &upscale_quality, kQualities, 5);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk: the 3D scene's render scale, with the menus, text and post-processing kept at the render resolution. Native AA is stock. Not used while Upscaler is Off.");
+            ImGui::SetTooltip("The 3D scene's render scale, with the menus, text and post-processing kept at the render resolution. Native AA is stock. Not used while Upscaler is Off.");
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::SliderInt("Upscaler sharpness", &upscale_sharpness, 0, 10, "%d / 10");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: FSR 3.1's and FSR 4.1.1's sharpening (RCAS); 0 turns it off. 8 matches stock bbhost's FSR 1, which keeps its own.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("FSR 3.1's and FSR 4.1.1's sharpening (RCAS); 0 turns it off. 8 matches stock bbhost's FSR 1, which keeps its own.");
         ImGui::Checkbox("Upscaler reactive mask", &upscale_reactive);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk, FSR 3.1: keeps particles, fog, Blood Echoes and the lantern's glow from smearing. Off for comparison.");
+            ImGui::SetTooltip("FSR 3.1: keeps particles, fog, Blood Echoes and the lantern's glow from smearing. Off for comparison.");
         ImGui::SameLine(260 * scale);
         ImGui::Checkbox("Upscaler jitter", &upscale_jitter);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk, FSR 3.1 / 4.1.1: the scene's sub-pixel jitter that lets the upscaler rebuild detail. Off for comparison only.");
+            ImGui::SetTooltip("FSR 3.1 / 4.1.1: the scene's sub-pixel jitter that lets the upscaler rebuild detail. Off for comparison only.");
         ImGui::SeparatorText("Graphics & effects");
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kAntiAlias[] = {"On", "Off", "Auto (off with FSR 4.1.1)"};
@@ -679,7 +679,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         ImGui::SameLine(260 * scale);
         ImGui::Checkbox("Show upscaler GPU time", &debug_upscaler_time);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("bbhost-vk debug: the presenter's GPU time per pass under the FPS counter. Motion vectors: red/green = horizontal/vertical motion, blue = object motion, dark = no camera found (needs the scene/UI split).");
+            ImGui::SetTooltip("Debug: the presenter's GPU time per pass under the FPS counter. Motion vectors: red/green = horizontal/vertical motion, blue = object motion, dark = no camera found (needs the scene/UI split).");
         ImGui::Checkbox("Debug camera", &debug_camera);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Lance McDonald's free camera: hold Interact (E) and press L3 (Left Ctrl). The debug menu's LOAD TEST crashes while it is on.");

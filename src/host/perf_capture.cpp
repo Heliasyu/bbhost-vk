@@ -359,7 +359,7 @@ void capture(const std::string& trigger, const std::string& note) {
 
     std::ostringstream o;
     char buf[512];
-    o << "# bbhost-vk performance snapshot (F11 / bbtest snap; docs/vk/TESTING.md)\n";
+    o << "# Helia's Dream performance snapshot (F11 / bbtest snap; docs/vk/TESTING.md)\n";
     o << "version: " << updater::current_version() << "\n";
     o << "time: " << local_time("%Y-%m-%d %H:%M:%S %Z") << "\n";
     o << "trigger: " << trigger << "\n";

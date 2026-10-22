@@ -768,7 +768,7 @@ fi
 trap cleanup EXIT
 trap 'echo; echo "interrupted: cleaning up (resume later with: bash bbprofile.sh --resume)"; exit 130' INT TERM HUP
 
-bold "bbhost-vk profiling session $SESSION"
+bold "Helia's Dream profiling session $SESSION"
 say "work folder: $WORK"
 check_kit || die "kit check failed"
 check_game || die "game check failed"

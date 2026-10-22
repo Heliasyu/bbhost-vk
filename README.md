@@ -1,6 +1,6 @@
-# bbhost-vk
+# Helia's Dream
 
-**bbhost-vk** runs Bloodborne (CUSA03173, game version 1.09) natively on Linux, with
+**Helia's Dream** runs Bloodborne (CUSA03173, game version 1.09) natively on Linux, with
 modern upscaling, high frame rates, online play, and DualSense HD haptics and adaptive
 triggers.
 
@@ -23,7 +23,7 @@ triggers.
 ## Status
 | | |
 |---|---|
-| Current build | [`v0.2.18-vk.2`](https://github.com/Heliasyu/bbhost-vk/releases/tag/v0.2.18-vk.2) (2026-10-22) |
+| Current build | [`v0.2.18-vk.2`](https://github.com/Heliasyu/helias-dream/releases/tag/v0.2.18-vk.2) (2026-10-22) |
 | Tested on | RX 9070 XT, Ryzen 9 5950X, KDE Plasma (Wayland) |
 | Performance | 4K output, FSR 4.1.1 Performance, 120 cap: ~120-122 fps average, 1% lows ~110 in Old Yharnam |
 | Known issues | Heavy smoke can dip below 120; some textures at Vicar Amelia. See [KNOWN_ISSUES](docs/vk/KNOWN_ISSUES.md). |
@@ -37,7 +37,7 @@ You need your own Bloodborne game files (CUSA03173 with the 1.09 update) and a w
 [bbhost](https://github.com/droogie/bbhost) setup. None are included here.
 
 1. Download the latest release from
-   [Releases](https://github.com/Heliasyu/bbhost-vk/releases).
+   [Releases](https://github.com/Heliasyu/helias-dream/releases).
 2. Unpack it and copy `bbhost` over the `bbhost.bin` in your bbhost folder (keep a backup).
 3. Start the game as usual.
 

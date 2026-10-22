@@ -43,7 +43,7 @@ const std::uint8_t* release_key() { return kReleaseKey; }
 
 namespace {
 // bbhost-vk: the fork's own releases (a public repository: read anonymously, as upstream's).
-constexpr const char* kDefaultSource = "https://api.github.com/repos/Heliasyu/bbhost-vk/releases/latest";
+constexpr const char* kDefaultSource = "https://api.github.com/repos/Heliasyu/helias-dream/releases/latest";
 // The official plugins stay upstream's: signed with upstream's release key (kReleaseKey).
 constexpr const char* kPluginSource = "https://api.github.com/repos/droogie/bbhost/releases/latest";
 constexpr std::size_t kMaxDownload = 256u << 20;
@@ -154,13 +154,13 @@ void check_thread(const std::string& source, const std::string& token) {
             why = "no release found";
         }
         host_log("update: check failed: %s", why.c_str());
-        set_lines(std::string("bbhost ") + BBHOST_VERSION + " - could not check for updates", why);
+        set_lines(std::string("Helia's Dream ") + BBHOST_VERSION + " - could not check for updates", why);
         g_busy.store(false);
         return;
     }
     if (!is_newer(tag, BBHOST_VERSION)) {
         host_log("update: %s is current (latest release %s)", BBHOST_VERSION, tag.c_str());
-        set_lines(std::string("bbhost ") + BBHOST_VERSION + " - up to date", "Latest release: " + tag);
+        set_lines(std::string("Helia's Dream ") + BBHOST_VERSION + " - up to date", "Latest release: " + tag);
         g_available.store(false);
         g_busy.store(false);
         return;
@@ -170,7 +170,7 @@ void check_thread(const std::string& source, const std::string& token) {
         std::lock_guard<std::mutex> lk(g_mu);
         g_tag = tag;
         g_page = page;
-        g_status = "bbhost " + tag + " is available (this is " + BBHOST_VERSION + ")";
+        g_status = "Helia's Dream " + tag + " is available (this is " + BBHOST_VERSION + ")";
         g_detail = page;
     }
     g_available.store(true);
@@ -184,7 +184,7 @@ void check_thread(const std::string& source, const std::string& token) {
 void begin_check(bool delay) {
     if (g_busy.exchange(true)) return;
     g_checked.store(true);
-    set_lines(std::string("bbhost ") + BBHOST_VERSION + " - checking for updates...", "");
+    set_lines(std::string("Helia's Dream ") + BBHOST_VERSION + " - checking for updates...", "");
     std::string source = config().update_source.empty() ? kDefaultSource : config().update_source;
     std::thread([delay, source = std::move(source), token = read_token()] {
         if (delay) std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -335,9 +335,9 @@ void start() {
     if (config().headless && !test) return;  // nobody to offer it to
     if (g_checked.load()) return;            // the setup window has checked
     const int want = test ? 1 : config().update_check;
-    set_lines(std::string("bbhost ") + BBHOST_VERSION, "");
+    set_lines(std::string("Helia's Dream ") + BBHOST_VERSION, "");
     if (want == 0 || (want < 0 && !release)) {
-        if (want < 0) set_lines(std::string("bbhost ") + BBHOST_VERSION, "Built from source: checks only when asked (update.check)");
+        if (want < 0) set_lines(std::string("Helia's Dream ") + BBHOST_VERSION, "Built from source: checks only when asked (update.check)");
         return;
     }
     begin_check(true);

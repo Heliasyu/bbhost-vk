@@ -65,9 +65,9 @@ bool parse_release(const std::string& body, std::string& tag, std::string& page)
     tag = t->string;
     const json::Value* h = v.find("html_url");
     page = h && h->type == json::Value::Type::String ? h->string : "";
-    // bbhost-vk: the fork's releases (host/updater.cpp checks Heliasyu/bbhost-vk).
-    if (!release_page_ok(page)) page = "https://github.com/Heliasyu/bbhost-vk/releases/tag/" + tag;
-    if (!release_page_ok(page)) page = "https://github.com/Heliasyu/bbhost-vk/releases/latest";
+    // bbhost-vk: the fork's releases (host/updater.cpp checks Heliasyu/helias-dream).
+    if (!release_page_ok(page)) page = "https://github.com/Heliasyu/helias-dream/releases/tag/" + tag;
+    if (!release_page_ok(page)) page = "https://github.com/Heliasyu/helias-dream/releases/latest";
     return true;
 }
 

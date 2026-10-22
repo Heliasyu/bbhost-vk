@@ -1,4 +1,18 @@
-# Changelog (bbhost-vk)
+# Changelog (Helia's Dream, formerly bbhost-vk)
+
+## Unreleased
+
+### The name: Helia's Dream
+- The project is now **Helia's Dream** (GitHub: `Heliasyu/helias-dream`; the old
+  `Heliasyu/bbhost-vk` address redirects there).
+- The setup window, the game window's title, the update line and the F11 snapshot header
+  carry the new name. The launcher's tooltips lose their "bbhost-vk:" prefix.
+- Release packages are `helias-dream-linux-<version>` (and `helias-dream-steamdeck-`). The
+  packaging scripts still accept the older names.
+- The updater checks `Heliasyu/helias-dream`. Older builds still find the releases there,
+  because the GitHub API follows the rename.
+- Unchanged: the binary (`bbhost`, installed as `bbhost.bin`), the settings in
+  `~/.config/bbhost/`, the version scheme (`v0.2.18-vk.<n>`), and online play.
 
 ## vk.2 (2026-10-22, `v0.2.18-vk.2`)
 
