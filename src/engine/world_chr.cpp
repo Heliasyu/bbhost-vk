@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <array>
 #include <vector>
 
 namespace {
@@ -156,6 +157,7 @@ struct BulletSearch {
     std::vector<std::int32_t> before;      // the window as the first shot began
     std::vector<std::uint64_t> where;      // the candidates
     std::vector<std::int32_t> last;
+    std::vector<std::array<std::int32_t, 16>> full;  // each one's neighbours before the first shot, the slot still full
     int pending = 0;                       // the animation whose result is due
     std::chrono::steady_clock::time_point due{};
     std::int32_t prev_anim = -1;
@@ -193,6 +195,14 @@ void bullets_report(const char* after) {
         host_log("world: bullets search:     -0x20..+0x1c: %d %d %d %d %d %d %d %d | %d %d %d %d %d %d %d %d", around[0], around[1],
                  around[2], around[3], around[4], around[5], around[6], around[7], around[8], around[9], around[10], around[11],
                  around[12], around[13], around[14], around[15]);
+        if (i < b.full.size()) {
+            const auto& f = b.full[i];
+            host_log("world: bullets search:     before the first shot: %d %d %d %d %d %d %d %d | %d %d %d %d %d %d %d %d (hex %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x)",
+                     f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15],
+                     static_cast<unsigned>(f[0]), static_cast<unsigned>(f[1]), static_cast<unsigned>(f[2]), static_cast<unsigned>(f[3]),
+                     static_cast<unsigned>(f[4]), static_cast<unsigned>(f[5]), static_cast<unsigned>(f[6]), static_cast<unsigned>(f[7]),
+                     static_cast<unsigned>(f[8]), static_cast<unsigned>(f[9]), static_cast<unsigned>(f[10]), static_cast<unsigned>(f[11]));
+        }
         // A pointer in the game data (or one level below it) to just before
         // the count: the path to keep.
         for (std::uint64_t o = 0; record && o < 0x4000; o += 8) {
@@ -250,6 +260,12 @@ void bullets_tick() {
             if (b.before[i] >= 1 && b.before[i] <= 30 && after[i] == b.before[i] - 1) {
                 b.where.push_back(b.lo + i * 4);
                 b.last.push_back(after[i]);
+                std::array<std::int32_t, 16> f{};
+                for (int k = 0; k < 16; ++k) {
+                    const std::size_t j = i + static_cast<std::size_t>(k) - 8;
+                    if (i + k >= 8 && j < b.before.size()) f[k] = b.before[j];
+                }
+                b.full.push_back(f);
             }
         }
         b.before.clear();
@@ -265,11 +281,13 @@ void bullets_tick() {
         if (ok) {
             b.where[kept] = b.where[i];
             b.last[kept] = v;
+            if (i < b.full.size()) b.full[kept] = b.full[i];
             ++kept;
         }
     }
     b.where.resize(kept);
     b.last.resize(kept);
+    if (b.full.size() > kept) b.full.resize(kept);
     bullets_report(what == 117051000 ? "a shot" : what == 117054500 ? "an empty pull" : "Blood Bullets");
 }
 
