@@ -6,11 +6,21 @@
 #include "core/image_file.h"
 #include "core/portable.h"
 #include "engine/gx_resources.h"
+#include "engine/live_resolution.h"
+#include "engine/scene_split_sites.h"
 #include "engine/gx_state.h"
 #include "host/gpu_internal.h"
+#include "host/perf_capture.h"
+#include "host/options.h"
+#include "core/host_clock.h"
 #include "host/shader_patch.h"
 #include "host/tess_lds.h"
 #include "host/translation_cache.h"
+#include "host/upscaler.h"
+#include "host/fsr3_pass.h"
+#include "host/temporal_inputs.h"
+#include "host/temporal/mblur_skip.h"
+#include "host/temporal/motion_classify.h"
 
 #include "host/draw_capture.h"
 #include "gcn/container.h"
@@ -42,6 +52,9 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#endif
 
 namespace gpu {
 bool dump_rt_locked(RtImage& r, const char* path);
@@ -248,6 +261,12 @@ struct GfxPipeline {
     // 1 for d3ca03f3+111fce32, 2 for 7d668276+e0305cef (the YEBIS probes in
     // draw_impl, which log once), 0 for the rest; -1 until a draw asks.
     std::int8_t yebis_probe = -1;
+    // bbhost-vk: 1 when the pixel shader is the game's scene-to-output scale
+    // pass (ccbf44a6, host/upscaler.h ScenePass), 0 not, -1 until a draw asks.
+    std::int8_t scale_pass = -1;
+    // bbhost-vk Phase 2 (host/temporal_inputs.h): the stages' OrbShdr hashes
+    // as numbers, parsed from the name once.
+    std::uint32_t orb_vs = 0, orb_ps = 0;
     // The optimized relink, queued at the pipeline's first draw
     // (queue_library_relink): its libraries, and the vertex library's
     // specialization - the elements' formats, the state it was made with.
@@ -453,11 +472,45 @@ struct RenderCostTimer {
         g_render_cost_n[what].fetch_add(1, std::memory_order_relaxed);
     }
 };
+// rc5b: the same sections, always on but only for the draws the phase timers
+// sample (one in kPhaseSample, t_cost_sample), with the TSC instead of the
+// clock: ~23 rdtsc and plain stores per sampled draw (draw_impl holds g.mu, so
+// the counters need no locked add), ~200 ns per sampled draw, ~10-20 ns a draw
+// on average. The snapshot's
+// [cpu] `cp_split:` and the log's `cp split:` give ns per draw for each section,
+// so a PC run says where the command processor's time goes without
+// BBHOST_GX_COST. BBHOST_CP_SPLIT=0 turns it off.
+const bool g_cp_split_on = [] {
+    const char* e = std::getenv("BBHOST_CP_SPLIT");
+    return !(e && e[0] == '0');
+}();
+thread_local bool t_cost_sample = false;
+std::atomic<std::uint64_t> g_split_tsc[kRenderCosts] = {}, g_split_n[kRenderCosts] = {};
+std::atomic<std::uint64_t> g_split_draws{0};
+inline std::uint64_t split_ticks() {
+#if defined(__x86_64__)
+    return __rdtsc();
+#else
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+}
 // Consecutive sections of one function: to(k) books the time since the last
 // stamp (or construction) to cost k.
 struct RenderCostStamp {
     std::chrono::steady_clock::time_point t = g_render_cost_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    bool sample = t_cost_sample;
+    std::uint64_t tsc = sample ? split_ticks() : 0;
+    RenderCostStamp() {
+        if (sample) bump(g_split_draws);
+    }
     void to(RenderCost what) {
+        if (sample) {
+            const std::uint64_t now = split_ticks();
+            bump(g_split_tsc[what], now - tsc);
+            bump(g_split_n[what]);
+            tsc = now;
+        }
         if (!g_render_cost_enabled) return;
         const auto now = std::chrono::steady_clock::now();
         g_render_cost_ns[what].fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t).count()),
@@ -467,6 +520,7 @@ struct RenderCostStamp {
     }
     // Leaves the time since the last stamp out of every section.
     void skip() {
+        if (sample) tsc = split_ticks();
         if (g_render_cost_enabled) t = std::chrono::steady_clock::now();
     }
 };
@@ -760,6 +814,77 @@ void note_stage_params(int st, const gcn::StageParams& params, bool set_repeated
     if (in_cb && set_repeated) g_par_both.fetch_add(1, std::memory_order_relaxed);
     last[st] = h;
 }
+// rc5b: the sampled split (RenderCostStamp) as text: ns per draw for each
+// section (a section a draw skipped counts 0 for it, so they add up to the
+// draw), since `prev` (updated) or since start.
+namespace {
+const char* const kSplitNames[kRenderCosts] = {"compare", "user_data_build", "vertex_table", "registers", "targets", "programs",
+                                               "cb_check", "key", "lookup", "prefetch", "checks", "setup", "stage_user",
+                                               "buffers", "sets", "images", "update", "variant", "pass", "bind_cmds", "dynamic",
+                                               "geometry", "record"};
+struct SplitSnap {
+    std::uint64_t tsc[kRenderCosts] = {}, draws = 0, ticks = 0, ns = 0;
+};
+const std::uint64_t g_split_t0_ticks = split_ticks();
+const std::uint64_t g_split_t0_ns = static_cast<std::uint64_t>(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+SplitSnap split_now() {
+    SplitSnap n;
+    for (int k = 0; k < kRenderCosts; ++k) n.tsc[k] = g_split_tsc[k].load(std::memory_order_relaxed);
+    n.draws = g_split_draws.load(std::memory_order_relaxed);
+    n.ticks = split_ticks();
+    n.ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    return n;
+}
+std::string split_text(const SplitSnap& now, const SplitSnap* prev) {
+    // TSC ticks per ns over the whole run (the TSC is invariant on every CPU
+    // this runs on; not x86, the ticks are ns).
+    const double per_ns = now.ns > g_split_t0_ns ? static_cast<double>(now.ticks - g_split_t0_ticks) / static_cast<double>(now.ns - g_split_t0_ns) : 1.0;
+    const std::uint64_t draws = now.draws - (prev ? prev->draws : 0);
+    std::string out;
+    char b[64];
+    std::snprintf(b, sizeof(b), "sampled_draws=%llu", static_cast<unsigned long long>(draws));
+    out += b;
+    double total = 0;
+    for (int k = 0; k < kRenderCosts; ++k) {
+        // The nested sections (compare, vertex_table, user_data_build: BBHOST_GX_COST's
+        // RenderCostTimer) are inside registers, programs and stage_user here.
+        if (!g_split_n[k].load(std::memory_order_relaxed)) continue;
+        const double ns = draws && per_ns > 0 ? static_cast<double>(now.tsc[k] - (prev ? prev->tsc[k] : 0)) / per_ns / static_cast<double>(draws) : 0.0;
+        total += ns;
+        std::snprintf(b, sizeof(b), " %s=%.0f", kSplitNames[k], ns);
+        out += b;
+    }
+    std::snprintf(b, sizeof(b), " sum=%.0f", total);
+    out += b;
+    return out;
+}
+}  // namespace
+std::string cp_split_section_impl() {
+    if (!g_cp_split_on) return "cp_split: off (BBHOST_CP_SPLIT=0)";
+    static SplitSnap prev;
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    const SplitSnap now = split_now();
+    std::string out = "cp_split: " + split_text(now, &prev) + " (rc5b: ns per draw since the previous snapshot, 1 draw in 16 timed)";
+    out += "\ncp_split_total: " + split_text(now, nullptr) + " (since start)";
+    prev = now;
+    return out;
+}
+// The log's `cp split:` line, every 100,000 sampled draws (~1.6 million draws).
+void log_cp_split_maybe() {
+    static std::uint64_t next = 100000;
+    static SplitSnap prev;
+    const std::uint64_t d = g_split_draws.load(std::memory_order_relaxed);
+    if (d < next) return;
+    next = d + 100000;
+    const SplitSnap now = split_now();
+    host_log("cp split: %s (ns per draw over the last ~%llu sampled draws; BBHOST_CP_SPLIT=0 turns it off)", split_text(now, &prev).c_str(),
+             static_cast<unsigned long long>(now.draws - prev.draws));
+    prev = now;
+}
+
 // host_gpu_draw's sections in ns per draw (per stage for the stage sections):
 // every 200,000 recorded draws for the draws since the last report, so loading
 // screens' uploads stay out of in-game figures, and at exit for the whole run.
@@ -812,7 +937,10 @@ std::atomic<int> g_order_logs{0};
 DrawRec g_draw_recs[kDrawRecs];
 std::uint64_t g_draw_rec_next = 0;
 std::uint32_t g_draw_dummies = 0;
-thread_local const char* t_draw_pipeline = nullptr;  // the draw being resolved, for the glitch hunt's lines
+thread_local const char* t_draw_pipeline = nullptr;
+// bbhost-vk: the stage being prefetched is the scale pass drawn as a bilinear
+// copy (host/upscaler.h): its samplers' S# made bilinear and clamped.
+thread_local bool t_bilinear_samplers = false;  // the draw being resolved, for the glitch hunt's lines
 // The draw being resolved came from a Scaleform (or wrapper) token: its
 // constant buffers are bound from a copy taken now (resolve_stage_buffers).
 thread_local bool t_snapshot_cbs = false;
@@ -1171,8 +1299,48 @@ std::uint64_t steady_ms() {
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+// test8, BBHOST_MOTION_BLUR_SKIP=1 (host/temporal/mblur_skip.h): the policy,
+// whether it is on, and whether the work being recorded is one of the motion
+// blur's own draws (exempt from the "something else used B" watch). Under g.mu.
+// On unless BBHOST_MOTION_BLUR_SKIP=0; BBHOST_AB_SECONDS=<s> turns it off
+// and on every s seconds in one run (ab_frame_locked).
+const bool g_mb_skip_mode = [] {
+    const char* e = std::getenv("BBHOST_MOTION_BLUR_SKIP");
+    return !(e && e[0] == '0');
+}();
+bool g_mb_skip_on = g_mb_skip_mode;
+temporal::MotionBlurSkip g_mb_skip;
+thread_local bool t_mb_exempt = false;
+// A draw marks its target written when it binds it (find_rt's memo), before
+// its pipeline - and so whether it is the motion blur's - is known. B written
+// that way is held here and judged at the draw's prefetch: the motion blur's
+// draw 1 clears it (it is the pattern), anything else makes it a use of B.
+bool g_mb_b_bound = false;
+void mb_skip_touched(std::uint64_t base) {
+    if (!g_mb_skip_mode || t_mb_exempt || !base || base != g_mb_skip.watched()) return;
+    const bool was = g_mb_skip.armed();
+    g_mb_skip.b_touched(base);
+    if (was && !g_mb_skip.armed())
+        host_log("render: motion blur skip off again: something else used its scratch target 0x%llx (flip %llu); learning again",
+                 static_cast<unsigned long long>(base), static_cast<unsigned long long>(hle_video_flip_count()));
+}
+void mb_skip_materialize_locked();  // below copy_layers_locked
+// test10 (below): the render-size stand-in of a target while the post chain
+// runs at render size, else null; and closing that window (FSR first).
+RtImage* post_resolve_locked(std::uint64_t base);
+void post_end_window_locked(const char* why);
+// Other work is about to be recorded: a held-back draw 1 is done first.
+void mb_skip_other_work_locked() {
+    if (g_mb_skip_mode && !t_mb_exempt && g_mb_b_bound) {  // B written by something other than draw 1
+        g_mb_b_bound = false;
+        mb_skip_touched(g_mb_skip.watched());
+    }
+    if (g_mb_skip_mode && !t_mb_exempt && g_mb_skip.pending() && g_mb_skip.other_work()) mb_skip_materialize_locked();
+}
+
 // A draw, a fill or a copy wrote the target (the reuse retire's age and order).
 void rt_written(RtImage& r) {
+    if (g_mb_skip_mode && !t_mb_exempt && r.base && r.base == g_mb_skip.watched()) g_mb_b_bound = true;
     r.written_flip = hle_video_flip_count();
     r.written_ms = steady_ms();
 }
@@ -1227,6 +1395,326 @@ std::uint32_t unpadded_width(std::uint64_t base, std::uint32_t padded, std::uint
 }
 
 void copy_layers_locked(const RtImage& from, RtImage& to);
+
+// What the motion blur's draw 1 writes with blur off: its input A, unchanged, into B.
+void mb_skip_materialize_locked() {
+    RtImage* a = find_render_target(g_mb_skip.a());
+    RtImage* b = find_render_target(g_mb_skip.b());
+    static std::atomic<int> logs{0};
+    if (logs.fetch_add(1) < 16)
+        host_log("render: motion blur skip: its first draw done after all (A 0x%llx -> B 0x%llx, flip %llu); learning again",
+                 static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
+                 static_cast<unsigned long long>(hle_video_flip_count()));
+    if (RtImage* sa = post_resolve_locked(g_mb_skip.a())) a = sa;  // test10: at render size
+    if (RtImage* sb = post_resolve_locked(g_mb_skip.b())) b = sb;
+    if (!a || !b || a == b) return;
+    const bool ex = t_mb_exempt;
+    t_mb_exempt = true;  // our own copy into B is not "something else"
+    copy_layers_locked(*a, *b);
+    rt_written(*b);
+    t_mb_exempt = ex;
+}
+
+// ---------------------------------------------------------------------------
+// test10, BBHOST_POST_AT_RENDER (on unless 0): the game's post-processing
+// before its tonemap at the render size, FSR 4.1.1 / 3.1 after it.
+//
+// The chain (t10/t11 `post-chain:` lines, FSR 4.1.1 Performance 1080p -> 4K):
+//   #0 the scale pass: FSR wrote A (0x161e60000, 4K RGBA16F) from the scene
+//   #1 7d668276+fbe7c4b6 onto A; #2-#3 A -> the 2352x882 DoF buffers;
+//   #4 d3ca03f3+111fce32 A + DoF -> C; #5 4c37ae6d+bf368417 onto C;
+//   #6 the 1080p velocity (d3c8bb21); #7-#8 the motion blur C -> B -> A;
+//   then (chromatic aberration bb92a5b6 A -> C, or) the bloom's downsample,
+//   the bloom, the tonemap 1ea5a07e+ccb08339, the grain and the UI.
+// With it on, the scale pass writes nothing: A gets a render-size stand-in
+// holding the scene. Every draw of the moved programs below into an
+// output-size RGBA16F target draws into that target's stand-in instead (its
+// viewport and scissor scaled), and every draw that samples a target with a
+// stand-in samples the stand-in. The first draw of any other program - or a
+// dispatch, copy or clear that touches a stand-in's target - closes the
+// window: FSR upscales the last stand-in written into its real target, and
+// everything after (CA, bloom, tonemap, grain, UI) runs as before, at 4K.
+// The moved programs' only resolution-dependent inputs found in the logs
+// are normalised UVs (the motion blur's taps, its 1/1080 threshold); a
+// shader using pixel offsets would show as a shifted or wider effect
+// (DoF, fog) - the risky passes, named in DEVLOG.
+// Per frame it falls back to the test9 order when the scale pass is not
+// FSR's (menus, the Dream's other paths, loads), FSR has no inputs, or the
+// sizes are not output = target; and for good if FSR fails at the window's
+// end (the stand-in is copied in, the log says why).
+// rc2: permanent - no options switch any more (vk.1's "Post-processing at
+// render size" is gone from the menu and the launcher; a saved value is
+// ignored). BBHOST_POST_AT_RENDER=0 stays, for debugging.
+bool post_mode() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_POST_AT_RENDER");
+        const bool v = !(e && e[0] == '0');
+        host_log("post-at-render: %s%s", v ? "on" : "off", v ? "" : " (BBHOST_POST_AT_RENDER=0)");
+        return v;
+    }();
+    return on;
+}
+bool g_post_on = true;            // BBHOST_AB_SECONDS=post turns it off and on
+bool g_post_dead = false;         // FSR failed at a window's end: off for the session
+thread_local bool t_in_draw = false;  // draw_impl: a dispatch's prefetch is not a draw's
+std::map<std::uint64_t, RtImage> g_post_shadows;  // by the real target's base
+struct PostWindow {
+    bool open = false;
+    std::uint64_t flip = ~0ull;
+    temporal::OutputRect out;
+    std::uint32_t rw = 0, rh = 0;   // the render size
+    std::uint32_t ow = 0, oh = 0;   // the real targets' size
+    std::uint64_t last = 0;         // the stand-in written last: FSR's input
+    std::vector<std::uint64_t> bases;  // targets with a stand-in this frame
+};
+PostWindow g_pw;
+struct PostStats {
+    std::uint64_t frames = 0, redirected = 0, fallbacks = 0, fsr_failed = 0;
+    const char* last_fallback = "";
+    const char* last_end = "";
+} g_post_stats;
+
+bool post_moved_ps(std::uint32_t ps) {
+    switch (ps) {
+        case 0xfbe7c4b6u:  // #1 the colour/fog pass onto A
+        case 0x265a6d2du:  // #2 A -> the DoF's 2352x882 buffer
+        case 0xe80526ccu:  // #3 its blur (also the bloom's; harmless: those targets are small)
+        case 0x111fce32u:  // #4 the DoF composite
+        case 0xbf368417u:  // #5 onto the DoF result
+        case 0xd3c8bb21u:  // #6 the motion blur's 1080p velocity
+        case 0xe0305cefu:  // #7-#8 the motion blur
+        // rc2: the Hunter's Dream's versions (vk1-dream, the window ended at
+        // its #2: the DoF, the pass after it and the motion blur ran at 4K)
+        case 0x88414cd6u:  // #2 A -> the DoF buffer
+        case 0x597cbbccu:  // #3 its blur
+        case 0x9e1cb278u:  // #4 the DoF composite
+        case 0xc3eff688u:  // #7-#8 the motion blur
+            return true;
+        default:
+            return false;
+    }
+}
+
+// rc2: programs that stay at the output size whatever their shape: the
+// bloom's first downsample (4c37ae6d+4b766f62 reads the chain's colour for
+// the bloom and must see the 4K picture FSR made, or the bloom shimmers) and
+// the chromatic aberration (dropped from the move: its offsets are in pixels).
+bool post_keep_out(const std::string& name) {
+    return name == "4c37ae6d+4b766f62" || name == "bb92a5b6+483f5dc1" || name == "84b3a182+3c2b7974";
+}
+// Programs that joined by their shape, logged once each (coverage in a
+// new area shows in the log, and in a snapshot).
+std::set<std::string> g_post_shape_seen;
+std::uint64_t g_post_by_shape = 0;
+std::map<std::string, std::uint64_t> g_post_end_by;  // what closed the window, by program (snapshots)
+
+// rc2: post at render's coverage for the performance capture (under g.mu).
+std::string post_coverage_text_locked();
+
+RtImage* post_resolve_locked(std::uint64_t base) {
+    if (!g_pw.open || !base) return nullptr;
+    for (std::uint64_t b : g_pw.bases)
+        if (b == base) {
+            auto it = g_post_shadows.find(base);
+            return it == g_post_shadows.end() ? nullptr : &it->second;
+        }
+    return nullptr;
+}
+
+void ensure_initialised(RtImage& r);
+// The stand-in for `real` at the render size, made once (again on a size change).
+RtImage* post_shadow_locked(const RtImage& real) {
+    auto it = g_post_shadows.find(real.base);
+    if (it != g_post_shadows.end()) {
+        RtImage& sh = it->second;
+        if (sh.width == g_pw.rw && sh.height == g_pw.rh && sh.format == real.format) return &sh;
+        destroy_rt_image(sh);
+        g_post_shadows.erase(it);
+    }
+    RtImage r;
+    r.base = real.base;
+    r.format = real.format;
+    r.width = g_pw.rw;
+    r.height = g_pw.rh;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = r.format;
+    ici.extent = {r.width, r.height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(g.device, &ici, nullptr, &r.image) != VK_SUCCESS) return nullptr;
+    if (!rt_image_memory(r.image, r.memory)) {
+        vkDestroyImage(g.device, r.image, nullptr);
+        if (r.memory.memory) defer_destroy_image(VK_NULL_HANDLE, r.memory);
+        return nullptr;
+    }
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = r.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = r.format;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(g.device, &vci, nullptr, &r.view) != VK_SUCCESS) {
+        vkDestroyImage(g.device, r.image, nullptr);
+        defer_destroy_image(VK_NULL_HANDLE, r.memory);
+        return nullptr;
+    }
+    host_log("post-at-render: a %ux%u stand-in for target 0x%llx (%ux%u format %d)", r.width, r.height,
+             static_cast<unsigned long long>(real.base), real.width, real.height, static_cast<int>(real.format));
+    RtImage& made = (g_post_shadows[real.base] = r);
+    ensure_initialised(made);
+    return &made;
+}
+
+// rc3: pipelines (each bound variant, once) whose vertex shader keeps
+// page-table walks (render.cpp, the draw's profile name), and the post
+// chain's: perf section [walks].
+struct WalkPipelines {
+    std::atomic<std::uint64_t> pipelines{0}, vs_walking{0}, post{0}, post_vs_walking{0};
+    // rc4: vertex shaders whose fetch shader ran inline (gcn translate.cpp,
+    // "fetch inline"), and of those the ones that still walk; bound-variant
+    // pipelines with bound loads at an SGPR offset ("soffset bound").
+    std::atomic<std::uint64_t> fetch_inlined{0}, fetch_inlined_walking{0}, soffset_bound{0}, soffset_bound_sites{0};
+    std::mutex mu;
+    std::vector<std::string> post_names;
+} g_walk_pl;
+std::string walk_section() {
+    char b[512];
+    std::snprintf(b, sizeof(b), "pipelines=%llu vs_walking=%llu post_pipelines=%llu post_vs_walking=%llu (bound variants since start; post: "
+                  "drawn with YEBIS's CPU-written windows)",
+                  static_cast<unsigned long long>(g_walk_pl.pipelines.load()), static_cast<unsigned long long>(g_walk_pl.vs_walking.load()),
+                  static_cast<unsigned long long>(g_walk_pl.post.load()), static_cast<unsigned long long>(g_walk_pl.post_vs_walking.load()));
+    std::string out = b;
+    std::snprintf(b, sizeof(b), "\nfetch_inline: fetch_inlined=%llu fetch_inlined_walking=%llu soffset_bound=%llu soffset_bound_sites=%llu "
+                  "(pipelines since start; BBHOST_FETCH_INLINE=0 / BBHOST_SOFFSET_BOUND=0 turn them off)",
+                  static_cast<unsigned long long>(g_walk_pl.fetch_inlined.load()),
+                  static_cast<unsigned long long>(g_walk_pl.fetch_inlined_walking.load()),
+                  static_cast<unsigned long long>(g_walk_pl.soffset_bound.load()),
+                  static_cast<unsigned long long>(g_walk_pl.soffset_bound_sites.load()));
+    out += b;
+    out += "\n" + page_tables_line() + " (rc5: tables in ReBAR video memory; BBHOST_TABLES_VRAM=0 puts them in system memory)";
+    out += "\n" + compute_cb_line() + " (rc5b: compute constant buffers bound; BBHOST_CS_CB=0 walks them)";
+    std::lock_guard<std::mutex> lk(g_walk_pl.mu);
+    for (const std::string& n : g_walk_pl.post_names) out += "\npost_vs_walks: " + n;
+    return out;
+}
+const bool g_walk_section = (perf::add_section("walks", walk_section), true);
+std::map<std::string, std::uint64_t> g_post_fallback_by;  // rc2: why frames fell back (snapshots)
+void post_fallback(const char* why) {
+    ++g_post_stats.fallbacks;
+    if (g_post_fallback_by.size() < 64 || g_post_fallback_by.count(why)) ++g_post_fallback_by[why];
+    if (std::strcmp(g_post_stats.last_fallback, why) != 0) {
+        g_post_stats.last_fallback = why;
+        host_log("post-at-render: this frame as before (flip %llu): %s", static_cast<unsigned long long>(hle_video_flip_count()), why);
+    }
+}
+
+std::string post_coverage_text_locked() {
+    std::string o;
+    char b[256];
+    std::snprintf(b, sizeof(b),
+                  "on=%d frames=%llu redirected_draws=%llu joined_by_shape=%llu fallback_frames=%llu fsr_failed=%llu last_end=%s last_fallback=%s\n",
+                  post_mode() && g_post_on && !g_post_dead ? 1 : 0, static_cast<unsigned long long>(g_post_stats.frames),
+                  static_cast<unsigned long long>(g_post_stats.redirected), static_cast<unsigned long long>(g_post_by_shape),
+                  static_cast<unsigned long long>(g_post_stats.fallbacks), static_cast<unsigned long long>(g_post_stats.fsr_failed),
+                  *g_post_stats.last_end ? g_post_stats.last_end : "-", *g_post_stats.last_fallback ? g_post_stats.last_fallback : "-");
+    o += b;
+    o += "(totals since start)\nfallbacks by reason:";
+    for (const auto& [why, n] : g_post_fallback_by) o += " [" + why + "]=" + std::to_string(n);
+    o += "\nwindow closed by (program: frames):";
+    for (const auto& [name, n] : g_post_end_by) o += " " + name + "=" + std::to_string(n);
+    o += "\njoined by shape:";
+    for (const std::string& name : g_post_shape_seen) o += " " + name;
+    return o;
+}
+
+// At the scale pass: open the window, the scene copied into A's stand-in.
+// False: as before (FSR at the scale pass).
+bool post_begin_locked(RtImage* target, RtImage* scene, const temporal::OutputRect& out) {
+    if (!post_mode() || !g_post_on || g_post_dead) return false;
+    if (g_pw.open) post_end_window_locked("a second scale pass");
+    const UpscalerInputs& in = temporal_inputs_locked();
+    if (!target || !scene || target->depth || target->layers != 1 || target->format != VK_FORMAT_R16G16B16A16_SFLOAT) {
+        post_fallback("the scale pass's target is not one RGBA16F image");
+        return false;
+    }
+    if (!in.valid || !in.color.image || !in.depth_copy.image || !in.motion.image || in.frame != hle_video_flip_count()) {
+        post_fallback("no upscaler inputs");
+        return false;
+    }
+    if (out.x || out.y || out.w != target->width || out.h != target->height || !in.render_w || !in.render_h ||
+        in.render_w >= out.w || in.render_h >= out.h || scene->width < in.render_w || scene->height < in.render_h ||
+        scene->format != target->format) {
+        post_fallback("the output is not the whole target, or the render size is not smaller");
+        return false;
+    }
+    g_pw = PostWindow{};
+    g_pw.flip = hle_video_flip_count();
+    g_pw.out = out;
+    g_pw.rw = in.render_w;
+    g_pw.rh = in.render_h;
+    g_pw.ow = target->width;
+    g_pw.oh = target->height;
+    RtImage* sh = post_shadow_locked(*target);
+    if (!sh) {
+        post_fallback("no memory for the stand-in");
+        return false;
+    }
+    copy_layers_locked(*scene, *sh);  // the scene's used corner, render size
+    rt_written(*sh);
+    g_pw.open = true;
+    g_pw.bases.push_back(target->base);
+    g_pw.last = target->base;
+    g_post_stats.last_fallback = "";
+    return true;
+}
+
+void post_end_window_locked(const char* why) {
+    if (!g_pw.open) return;
+    g_pw.open = false;  // first: what FSR records resolves the real targets
+    RtImage* real = find_render_target(g_pw.last);
+    auto it = g_post_shadows.find(g_pw.last);
+    if (!real || it == g_post_shadows.end()) return;
+    RtImage& sh = it->second;
+    UpscalerImage ui;
+    ui.image = sh.image;
+    ui.format = sh.format;
+    ui.width = sh.width;
+    ui.height = sh.height;
+    ui.used_w = g_pw.rw;
+    ui.used_h = g_pw.rh;
+    ensure_initialised(*real);
+    const bool ok = fsr3_scale_pass_locked(real, g_pw.out, &ui);
+    if (!ok) {
+        ++g_post_stats.fsr_failed;
+        g_post_dead = true;
+        copy_layers_locked(sh, *real);  // a quarter of the picture, once: never a black frame
+        host_log("post-at-render: off for this session: the upscaler did not run at the chain's end (%s); the scale pass upscales again", why);
+    } else {
+        ++g_post_stats.frames;
+    }
+    rt_written(*real);
+    if (std::strcmp(g_post_stats.last_end, why) != 0) {
+        g_post_stats.last_end = why;
+        host_log("post-at-render: the chain at render size ends at %s (flip %llu); FSR upscales 0x%llx there",
+                 why, static_cast<unsigned long long>(hle_video_flip_count()), static_cast<unsigned long long>(g_pw.last));
+    }
+    if (g_post_stats.frames % 3600 == 1)
+        host_log("post-at-render: %llu frames, %llu draws at render size, %llu frames as before (last: %s), %llu upscaler failures",
+                 static_cast<unsigned long long>(g_post_stats.frames), static_cast<unsigned long long>(g_post_stats.redirected),
+                 static_cast<unsigned long long>(g_post_stats.fallbacks), *g_post_stats.last_fallback ? g_post_stats.last_fallback : "-",
+                 static_cast<unsigned long long>(g_post_stats.fsr_failed));
+}
+
+// Work outside the chain's draws that touches a target with a stand-in: the
+// window closes first, so it sees the real (upscaled) target.
+void post_touch_locked(std::uint64_t base, const char* what) {
+    if (g_pw.open && post_resolve_locked(base)) post_end_window_locked(what);
+}
 
 RtImage* rt_image(std::uint64_t base, VkFormat format, std::uint32_t width, std::uint32_t height, bool depth,
                   std::uint32_t layers = 1, std::uint64_t slice_bytes = 0) {
@@ -1386,6 +1874,11 @@ RtImage* rt_image(std::uint64_t base, VkFormat format, std::uint32_t width, std:
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                 (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    // bbhost-vk test4: the output-sized RGBA16F targets FSR 3.1 may write directly (host/fsr3_pass.h).
+    if (!depth && fsr3_target_storage_wanted(static_cast<int>(format), width, height, r.layers)) {
+        ici.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        r.upscaler_storage = true;
+    }
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(g.device, &ici, nullptr, &r.image) != VK_SUCCESS) {
         host_log("render: image creation failed (format %d %ux%u)", format, width, height);
@@ -2441,6 +2934,11 @@ TableMaskWorkers& table_mask_workers() {
         auto* w = new TableMaskWorkers;  // never destroyed: its threads run until exit
         for (int i = 0; i < 4; ++i) {
             std::thread([w] {
+                // rc5: named (they inherited "bb-cp0", whose [seconds] CPU
+                // they were counted in: rc4's 2885 ms "bb-cp0" second), and
+                // off the hot chain's CPUs (core/host_clock.h).
+                host_thread_set_name("bb-tablemask");
+                host_thread_place(HostPlace::Cold, "bb-tablemask");
                 for (;;) {
                     TableMaskJob job;
                     {
@@ -3459,6 +3957,10 @@ struct StageManifest {
     std::unordered_map<std::uint64_t, std::shared_ptr<const ManifestStage>> by_key;  // under mu
     std::unordered_set<std::uint64_t> ready;                                         // under mu: compiled at this start
     bool dirty = false;                                                               // under mu
+    // rc3: the stage names of pipelines a frame waited on (built on the
+    // command processor), this run's and earlier runs' (<manifest>.urgent):
+    // their stages are written first, so the next start compiles them first.
+    std::unordered_set<std::string> urgent;                                           // under mu
     std::atomic<std::uint64_t> loaded{0}, compiled{0}, failed{0}, recorded{0}, hits{0}, compile_us{0};
 };
 StageManifest g_manifest;
@@ -3475,6 +3977,21 @@ void manifest_add(std::uint64_t key, std::shared_ptr<const ManifestStage> m) {
     if (g_manifest.by_key.size() >= kManifestMax || !g_manifest.by_key.emplace(key, std::move(m)).second) return;
     g_manifest.dirty = true;
     g_manifest.recorded.fetch_add(1, std::memory_order_relaxed);
+}
+// rc3: a pipeline the command processor waited for: its stages ("vs+ps",
+// each name up to its first '~' or '+') first in the manifest.
+void stage_manifest_urgent(const std::string& pipeline) {
+    if (!stage_manifest_on()) return;
+    std::lock_guard<std::mutex> lk(g_manifest.mu);
+    if (g_manifest.urgent.size() >= 256) return;
+    std::size_t from = 0;
+    while (from < pipeline.size()) {
+        std::size_t to = pipeline.find_first_of("+~", from);
+        if (to == std::string::npos) to = pipeline.size();
+        if (to > from && g_manifest.urgent.insert(pipeline.substr(from, to - from)).second) g_manifest.dirty = true;
+        if (to >= pipeline.size() || pipeline[to] == '~') break;
+        from = to + 1;
+    }
 }
 void manifest_note_ps(std::uint64_t key, const std::string& name, const PsStageInputs& in, bool lift) {
     if (!stage_manifest_on()) return;
@@ -4125,6 +4642,69 @@ void write_pipeline_stats(VkPipeline p, const std::string& name) {
     host_log("render: pipeline %s: statistics and disassembly in build/pipeline-stats", name.c_str());
 }
 
+// rc2, bbtest profile (BBHOST_SHADER_STATS=<file>): one line a pipeline
+// executable - the guest shader hashes (the pipeline's name, the pass label
+// the GPU sampler and BBHOST_GPU_PROFILE use: "<vs>+<ps>", a compute shader's
+// own), the stage, the wave size and every statistic the driver reports
+// (RADV: SGPRs, VGPRs, spilled SGPRs/VGPRs, code size, LDS size, scratch,
+// subgroups per SIMD (the occupancy), instructions, latency ...). Tab-separated.
+void shader_stats_note_impl(VkPipeline p, const char* kind, const std::string& name) {
+    if (!g.shader_stats || !p) return;
+    static const auto props = reinterpret_cast<PFN_vkGetPipelineExecutablePropertiesKHR>(
+        vkGetDeviceProcAddr(g.device, "vkGetPipelineExecutablePropertiesKHR"));
+    static const auto stats = reinterpret_cast<PFN_vkGetPipelineExecutableStatisticsKHR>(
+        vkGetDeviceProcAddr(g.device, "vkGetPipelineExecutableStatisticsKHR"));
+    if (!props || !stats) return;
+    static std::mutex mu;
+    static FILE* f = [] {
+        FILE* out = std::fopen(std::getenv("BBHOST_SHADER_STATS"), "a");
+        if (out) {
+            std::fprintf(out, "# bbhost-vk shader statistics (bbtest profile; docs/vk/TESTING.md). t_s, kind, pipeline (the pass label), "
+                              "executable index, stage, subgroup size, then each driver statistic as name=value\n");
+            std::fflush(out);
+        } else {
+            host_log("gpu: could not open the shader-stats file %s", std::getenv("BBHOST_SHADER_STATS"));
+        }
+        return out;
+    }();
+    if (!f) return;
+    static const auto t_start = std::chrono::steady_clock::now();
+    VkPipelineInfoKHR pi{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
+    pi.pipeline = p;
+    std::uint32_t n = 0;
+    if (props(g.device, &pi, &n, nullptr) != VK_SUCCESS || n == 0) return;
+    std::vector<VkPipelineExecutablePropertiesKHR> execs(n, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+    props(g.device, &pi, &n, execs.data());
+    std::string out;
+    char buf[256];
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+    for (std::uint32_t i = 0; i < n; ++i) {
+        std::snprintf(buf, sizeof(buf), "%.3f\t%s\t%s\t%u\t%s\twave%u", t, kind, name.c_str(), i, execs[i].name, execs[i].subgroupSize);
+        out += buf;
+        VkPipelineExecutableInfoKHR ei{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+        ei.pipeline = p;
+        ei.executableIndex = i;
+        std::uint32_t ns = 0;
+        stats(g.device, &ei, &ns, nullptr);
+        std::vector<VkPipelineExecutableStatisticKHR> st(ns, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+        if (ns) stats(g.device, &ei, &ns, st.data());
+        for (const auto& s : st) {
+            switch (s.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%u", s.name, s.value.b32); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%lld", s.name, static_cast<long long>(s.value.i64)); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%llu", s.name, static_cast<unsigned long long>(s.value.u64)); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: std::snprintf(buf, sizeof(buf), "\t%s=%g", s.name, s.value.f64); break;
+            default: buf[0] = 0; break;
+            }
+            out += buf;
+        }
+        out += "\n";
+    }
+    std::lock_guard<std::mutex> lk(mu);
+    std::fwrite(out.data(), 1, out.size(), f);
+    std::fflush(f);
+}
+
 VkPipeline create_library(VkGraphicsPipelineCreateInfo& gpci, VkGraphicsPipelineLibraryFlagsEXT flags, void* next) {
     VkGraphicsPipelineLibraryCreateInfoEXT li{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT};
     li.flags = flags;
@@ -4132,8 +4712,9 @@ VkPipeline create_library(VkGraphicsPipelineCreateInfo& gpci, VkGraphicsPipeline
     gpci.pNext = &li;
     gpci.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
     if (g_library_relink) gpci.flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;  // what the relink optimizes from
+    gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     VkPipeline p = VK_NULL_HANDLE;
-    return vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &p) == VK_SUCCESS ? p : VK_NULL_HANDLE;
+    return vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &p) == VK_SUCCESS ? p : VK_NULL_HANDLE;
 }
 
 // A vertex shader's pre-rasterization library, with a rect list's geometry
@@ -4524,7 +5105,13 @@ Precompiler& precompiler() {
         for (int i = 0; i < w->boot; ++i) {
             std::thread([w, i] {
                 t_pipeline_worker = true;
+                perf::set_worker_thread();
                 host_thread_set_name("bb-compile");
+                // rc5: in game the other L3 domain's CPUs, so a compile burst
+                // neither takes the hot chain's cores nor evicts its L3; while
+                // starting and loading (g_precompile_boost) every CPU, as
+                // before (core/host_clock.h).
+                int placed = -1;
                 for (;;) {
                     PrecompileJob job;
                     {
@@ -4548,6 +5135,13 @@ Precompiler& precompiler() {
                             w->busy_since = std::chrono::steady_clock::now();
                             w->burst_jobs = 0;
                             std::fill(std::begin(w->burst_type), std::end(w->burst_type), 0);
+                        }
+                    }
+                    {
+                        const int want = g_precompile_boost.load(std::memory_order_relaxed) ? 0 : 1;
+                        if (want != placed) {
+                            placed = want;
+                            host_thread_place(want ? HostPlace::Cold : HostPlace::Any, "bb-compile");
                         }
                     }
                     while (!g.ok) std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -4766,8 +5360,10 @@ void relink_pipeline(Precompiler& w, const PrecompileJob& job) {
     gpci.layout = job.layout;
     const bool want_stats = pipeline_stats_wanted(job.relink->name);
     if (want_stats) gpci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+    gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     VkPipeline p = VK_NULL_HANDLE;
-    const bool ok = vkCreateGraphicsPipelines(g.device, want_stats ? VK_NULL_HANDLE : PipelineCacheUse().cache, 1, &gpci, nullptr, &p) == VK_SUCCESS;
+    const bool ok = vkCreateGraphicsPipelines(g.device, want_stats ? VK_NULL_HANDLE : shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &p) == VK_SUCCESS;
+    if (ok && g.shader_stats) shader_stats_note(p, job.relink->lean ? "graphics-optimized" : "graphics-optimized~fallback", job.relink->name);
     if (ok && want_stats) {
         // A name has several pipelines (the no-fallback variant and the one with
         // the page-table paths, other fixed state): each gets its own file.
@@ -5500,8 +6096,10 @@ bool link_gfx_pipeline(GfxPipeline& pl, const GfxFixedState& f, const VertexInpu
     VkGraphicsPipelineCreateInfo gpci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gpci.pNext = &lci;
     gpci.layout = pl.layout;
+    gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     const auto t0 = std::chrono::steady_clock::now();
-    const bool ok = vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+    const bool ok = vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+    if (ok && g.shader_stats) shader_stats_note(pl.pipeline, "graphics-linked", pl.name);
     g_libs.link_us.fetch_add(pl_us_since(t0), std::memory_order_relaxed);
     g_libs.links.fetch_add(1, std::memory_order_relaxed);
     pl.library = ok;
@@ -5633,13 +6231,15 @@ bool create_gfx_pipeline(GfxPipeline& pl, const DrawState& s, const VertexInputP
     // whole, each took ~1.6 ms from a warm cache (50-165 ms cold), 14 of them in
     // the frame after a fight, and left the draw after it to set every dynamic
     // value again.
+    if (!linked) gpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     bool created = linked ? link_gfx_pipeline(pl, f, vertex_input)
-                          : vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+                          : vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
     if (!created && ps_sized) {
         fragment_stage_unsized(stages.back());
-        created = vkCreateGraphicsPipelines(g.device, PipelineCacheUse().cache, 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
+        created = vkCreateGraphicsPipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &gpci, nullptr, &pl.pipeline) == VK_SUCCESS;
         fragment_stage_wave_refused(created);
     }
+    if (created && !linked && g.shader_stats) shader_stats_note(pl.pipeline, "graphics", pl.name);
     t_library_owner = owner;
     if (!created) {
         host_log("render: pipeline %s: vkCreateGraphicsPipelines failed", pl.name.c_str());
@@ -5648,6 +6248,9 @@ bool create_gfx_pipeline(GfxPipeline& pl, const DrawState& s, const VertexInputP
     }
     const auto ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     if (!t_pipeline_worker) g_pl_create_us.fetch_add(pl_us_since(t0), std::memory_order_relaxed);
+    // rc2: into the performance capture; one the command processor builds holds its frame up.
+    perf::note_compile("graphics", pl.name, pl_us_since(t0), t_pipeline_worker, !t_pipeline_worker);
+    if (!t_pipeline_worker) stage_manifest_urgent(pl.name);
     // Slow driver compiles, with what might make them slow: the stages'
     // SPIR-V sizes and whether this is the page-table fallback or the
     // no-fallback variant.
@@ -5815,6 +6418,8 @@ LeanBuilders& lean_builders() {
         auto* w = new LeanBuilders;  // never destroyed: its threads run until exit
         for (int i = 0; i < 2; ++i) {
             std::thread([w] {
+                host_thread_set_name("bb-lean");  // rc5: as bb-tablemask
+                host_thread_place(HostPlace::Cold, "bb-lean");
                 for (;;) {
                     std::unique_ptr<LeanBuildJob> job;
                     {
@@ -5825,6 +6430,7 @@ LeanBuilders& lean_builders() {
                     }
                     const LeanBuildJob& j = *job;
                     t_pipeline_worker = true;
+                    perf::set_worker_thread();
                     build_gfx_pipeline(*j.variant, j.s, j.vs_words, j.fetch_words, j.ps_words, j.vs_name, j.ps_name, j.vs_dims, j.ps_dims,
                                        j.vs_modes, j.ps_modes, true, j.has_vertex_input ? &j.vertex_input : nullptr);
                     std::lock_guard<std::mutex> lk(w->mu);
@@ -5994,6 +6600,7 @@ void begin_pass(const DrawState& s, std::uint64_t key, bool hazard = false) {
         profile_begin_locked(g_pass_profile_name);
         g_pass.profiled = true;
     }
+    if (g.debug_labels) debug_label_locked(g_pass_profile_name);  // rc4: BBHOST_RGP_LABELS=1
     if (DrawCmds* c = DrawCmds::open(); !c || !c->begin_rendering(ri)) vkCmdBeginRendering(g_cmd(), &ri);
     g_pass.active = true;
     g_pass.key = key;
@@ -6258,6 +6865,15 @@ PlanSlot g_plan_slots[kPlanSlots];
 constexpr std::size_t kPlanFront = 4096;
 GxStagePlan* g_plan_front[kPlanFront] = {};
 std::uint64_t g_plans_built = 0, g_plans_used = 0, g_plans_disagreed = 0, g_plans_evicted = 0;
+// BBHOST_CP_STAGE_CACHE=0: resolve every stage's key words at every draw, as
+// before rc7 (BBHOST_STAGE_CACHE is the translation cache's switch). =2
+// (checks): on every memo hit resolve again as well and count (and log the
+// first 8) disagreements.
+const int g_cp_stage_cache = [] {
+    const char* e = std::getenv("BBHOST_CP_STAGE_CACHE");
+    return e && *e ? std::atoi(e) : 1;
+}();
+std::uint64_t g_key_memo_hits = 0, g_key_memo_misses = 0, g_key_memo_off = 0, g_key_memo_disagreed = 0;  // under g.mu (draw_impl)
 // GX stages whose user data was not built because nothing would
 // read it, and those built (draw_impl). BBHOST_SKIP_USER_DATA=0 builds all.
 std::uint64_t g_ud_skipped = 0, g_ud_built = 0, g_ud_partial = 0;
@@ -6596,6 +7212,8 @@ std::size_t rt_bytes_per_pixel(const RtImage& r) { return format_bytes_per_pixel
 // is the tiled allocation, often a few rows larger (or a 1024² slice) than
 // width*height*bpp of the unpadded image, so there is no size check here.
 void clear_image_locked(RtImage& r, const float rgba[4], std::uint32_t first_layer = 0, std::uint32_t layer_count = ~0u) {
+    mb_skip_other_work_locked();  // test8
+    post_touch_locked(r.base, "a clear");  // test10
     if (r.base == g_order_target && hle_video_flip_count() >= 2000 && g_order_logs.load() < 120) {
         g_order_logs.fetch_add(1);
         host_log("order: CLEAR 0x%llx rgba=%.3f %.3f %.3f %.3f", static_cast<unsigned long long>(r.base), rgba[0], rgba[1], rgba[2],
@@ -6981,6 +7599,11 @@ void render_report() {
         host_log("render: binding plans: %llu built (%llu pushed out of the table), %llu reused%s",
                  static_cast<unsigned long long>(g_plans_built), static_cast<unsigned long long>(g_plans_evicted),
                  static_cast<unsigned long long>(g_plans_used), checked.c_str());
+        host_log("render: stage memo (rc7; BBHOST_CP_STAGE_CACHE=0 turns it off): %llu stages kept their key words, %llu resolved, "
+                 "%llu without a plan or with it off%s",
+                 static_cast<unsigned long long>(g_key_memo_hits), static_cast<unsigned long long>(g_key_memo_misses),
+                 static_cast<unsigned long long>(g_key_memo_off),
+                 g_cp_stage_cache == 2 ? ("; checked, disagreeing " + std::to_string(g_key_memo_disagreed)).c_str() : "");
     }
     report_gx_state_compare();
     if (g_view_extents) {
@@ -7269,6 +7892,11 @@ RtImage* find_render_target(std::uint64_t base) {
 }
 
 bool render_copy_target_locked(std::uint64_t src_base, std::uint64_t dst_base, std::size_t bytes) {
+    mb_skip_other_work_locked();  // test8
+    mb_skip_touched(src_base);
+    mb_skip_touched(dst_base);
+    post_touch_locked(src_base, "a copy");  // test10
+    post_touch_locked(dst_base, "a copy");
     // BBHOST_WATCH_COPY_DST=0x<base>: every whole-target copy into that
     // address, with the flip. A frame can go wrong without any draw being
     // different - the engine also moves whole surfaces around, and a copy from
@@ -7524,25 +8152,137 @@ std::vector<std::pair<std::uint32_t, bool>> image_dims_for(const gcn::TranslateR
     return dims;
 }
 
-void resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out) {
+// vk.1-rc7: the stage memo. A binding whose plan names a GX record resolves
+// to that record's first dwords when the record's object is set, and to the
+// user-data path otherwise (resolve_planned, resolve_via_plan). planned_record
+// is the first half: the record, or null.
+const std::uint8_t* planned_record(const GxBindingPlan& p, const GxStageRecords& st) {
+    switch (p.source) {
+        case GxBindingPlan::kTex:
+            return (st.obj_tex_set >> p.slot) & 1 ? st.obj_tex + static_cast<std::size_t>(p.slot) * 32 : nullptr;
+        case GxBindingPlan::kSmp:
+            return (st.obj_smp_set >> p.slot) & 1 ? st.obj_smp + static_cast<std::size_t>(p.slot) * 32 : nullptr;
+        case GxBindingPlan::kSmpCache:
+            return ((st.obj_smp_set | st.obj_smp_default) >> p.slot) & 1 ? st.obj_smp + static_cast<std::size_t>(p.slot) * 32 : nullptr;
+        case GxBindingPlan::kCb:
+            return (st.obj_cb_set >> p.slot) & 1 ? st.obj_cb + static_cast<std::size_t>(p.slot) * 16 : nullptr;
+        case GxBindingPlan::kFallback:
+            break;
+    }
+    return nullptr;
+}
+
+
+bool resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out) {
+    if (!paths) {
+        const bool same = !out.memo_ok && out.memo_paths == nullptr && out.dims.empty() && out.modes.empty() && out.images.empty() &&
+                          out.samplers.empty();
+        out.dims.clear();
+        out.modes.clear();
+        out.images.clear();
+        out.samplers.clear();
+        out.memo_ok = false;
+        out.memo_paths = nullptr;
+        out.memo_plan = nullptr;
+        return same && g_cp_stage_cache;
+    }
+    const GxStagePlan* plan = gx && g_binding_plans ? &stage_plan(*paths, *gx) : nullptr;
+    // The memo: the last resolution of this stage took every binding from a GX
+    // record through this same plan (so its words are those records' bytes,
+    // and no user data or guest memory was read). The same plan with every
+    // record's object still set and its bytes unchanged resolves every binding
+    // to the same words again - and dims and modes are functions of the words
+    // and the bindings. Only with plans in their plain mode (=2 compares).
+    if (g_cp_stage_cache && plan && g_binding_plans == 1) {
+        if (out.memo_ok && out.memo_plan == plan && out.memo_paths == paths && out.images.size() == paths->images.size() &&
+            out.samplers.size() == paths->samplers.size()) {
+            bool same = true;
+            for (std::size_t k = 0; same && k < paths->images.size(); ++k) {
+                const std::uint8_t* rec = planned_record(plan->images[k], *gx);
+                same = rec && std::memcmp(rec, out.images[k].w, paths->images[k].r128 ? 16 : 32) == 0;
+            }
+            for (std::size_t k = 0; same && k < paths->samplers.size(); ++k) {
+                const std::uint8_t* rec = planned_record(plan->samplers[k], *gx);
+                same = rec && std::memcmp(rec, out.samplers[k].w, 16) == 0;
+            }
+            if (same && g_cp_stage_cache == 2) {
+                // The check: the full resolution into a scratch stage, compared.
+                static thread_local KeyStage check;
+                check.memo_ok = false;
+                check.dims.clear();
+                check.modes.clear();
+                check.images.clear();
+                check.samplers.clear();
+                for (std::size_t k = 0; k < paths->images.size(); ++k) {
+                    const gcn::ImageBinding& b = paths->images[k];
+                    KeyStage::Words& r = check.images.emplace_back();
+                    r.resolved = resolve_via_plan(&plan->images[k], b.path, stage_user, gx, b.r128 ? 4 : 8, r.w);
+                    check.dims.push_back(image_dim_of(b, r.resolved, r.w));
+                }
+                for (std::size_t k = 0; k < paths->samplers.size(); ++k) {
+                    const gcn::SamplerBinding& b = paths->samplers[k];
+                    KeyStage::Words& r = check.samplers.emplace_back();
+                    r.resolved = resolve_via_plan(&plan->samplers[k], b.path, stage_user, gx, 4, r.w);
+                    check.modes.push_back(r.resolved && (r.w[0] & (1u << 15)));
+                }
+                const auto words_equal = [](const std::vector<KeyStage::Words>& a, const std::vector<KeyStage::Words>& b) {
+                    if (a.size() != b.size()) return false;
+                    for (std::size_t k = 0; k < a.size(); ++k)
+                        if (a[k].resolved != b[k].resolved || std::memcmp(a[k].w, b[k].w, sizeof(a[k].w)) != 0) return false;
+                    return true;
+                };
+                if (check.dims != out.dims || check.modes != out.modes || !words_equal(check.images, out.images) ||
+                    !words_equal(check.samplers, out.samplers)) {
+                    if (g_key_memo_disagreed++ < 8)
+                        host_log("render: stage memo disagreed with resolving again (%zu images, %zu samplers); "
+                                 "taking the resolution (BBHOST_CP_STAGE_CACHE=2)", paths->images.size(), paths->samplers.size());
+                    std::swap(check.dims, out.dims);
+                    std::swap(check.modes, out.modes);
+                    std::swap(check.images, out.images);
+                    std::swap(check.samplers, out.samplers);
+                    out.memo_ok = false;
+                    ++g_key_memo_misses;
+                    return false;
+                }
+            }
+            if (same) {
+                // The counters the resolution would have moved: every binding from a record.
+                const std::uint64_t n = paths->images.size() + paths->samplers.size();
+                if (n) {
+                    bump(g_gx_resolves[kGxRecord], n);
+                    if (t_token_draw) bump(g_gx_token_resolves[kGxRecord], n);
+                }
+                ++g_key_memo_hits;
+                return true;
+            }
+        }
+        ++g_key_memo_misses;
+    } else {
+        ++g_key_memo_off;
+    }
     out.dims.clear();
     out.modes.clear();
     out.images.clear();
     out.samplers.clear();
-    if (!paths) return;
-    const GxStagePlan* plan = gx && g_binding_plans ? &stage_plan(*paths, *gx) : nullptr;
+    bool all_records = plan != nullptr;
     for (std::size_t k = 0; k < paths->images.size(); ++k) {
         const gcn::ImageBinding& b = paths->images[k];
         KeyStage::Words& r = out.images.emplace_back();
         r.resolved = resolve_via_plan(plan ? &plan->images[k] : nullptr, b.path, stage_user, gx, b.r128 ? 4 : 8, r.w);
         out.dims.push_back(image_dim_of(b, r.resolved, r.w));
+        all_records = all_records && planned_record(plan->images[k], *gx) != nullptr;
     }
     for (std::size_t k = 0; k < paths->samplers.size(); ++k) {
         const gcn::SamplerBinding& b = paths->samplers[k];
         KeyStage::Words& r = out.samplers.emplace_back();
         r.resolved = resolve_via_plan(plan ? &plan->samplers[k] : nullptr, b.path, stage_user, gx, 4, r.w);
         out.modes.push_back(r.resolved && (r.w[0] & (1u << 15)));
+        all_records = all_records && planned_record(plan->samplers[k], *gx) != nullptr;
     }
+    out.memo_ok = g_cp_stage_cache && g_binding_plans == 1 && all_records;
+    out.memo_paths = paths;
+    out.memo_plan = plan;
+    return false;
 }
 
 bool key_stage_matches(const gcn::TranslateResult& meta, const gcn::TranslateResult& paths) {
@@ -7556,8 +8296,48 @@ bool key_stage_matches(const gcn::TranslateResult& meta, const gcn::TranslateRes
     return true;
 }
 
+// The first scale-pass draw after each change of the scene's size, and one
+// line every 3000 flips while split, so a test session's log shows it ran.
+void note_scale_pass(const std::string& pipeline) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    static std::uint64_t last_size = 0, last_flip = 0, draws = 0;
+    unsigned sw = 0, sh = 0, ow = 0, oh = 0;
+    live_resolution_scene(&sw, &sh);
+    live_resolution_current(&ow, &oh);
+    const std::uint64_t size = static_cast<std::uint64_t>(sw) << 32 | sh, flip = hle_video_flip_count();
+    ++draws;
+    if (size != last_size || flip >= last_flip + 3000) {
+        host_log("scene-split: scale pass %s drawn %s, scene %ux%u -> output %ux%u (%llu draws since the last line)", pipeline.c_str(),
+                 upscaler_scene_pass_name(upscaler_scene_pass()), sw, sh, ow, oh, static_cast<unsigned long long>(draws));
+        last_size = size;
+        last_flip = flip;
+        draws = 0;
+    }
+}
+
 void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t* stage_user, StageImages& out,
                            const GxStageRecords* gx, const KeyStage* resolved) {
+    mb_skip_other_work_locked();  // test8: a draw or dispatch while the motion blur's draw 1 is held
+    struct PostReads {  // test10: a dispatch reading a target with a stand-in closes the window
+        StageImages& out;
+        ~PostReads() {
+            if (!g_pw.open || t_in_draw) return;
+            for (const StageImages::Image& im : out.images)
+                if (im.resolved && post_resolve_locked(tsharp_base(im.w))) {
+                    post_end_window_locked("a dispatch");
+                    return;
+                }
+        }
+    } post_reads{out};
+    struct MbReads {  // ... and whether it reads the scratch target the skip watches
+        StageImages& out;
+        ~MbReads() {
+            if (!g_mb_skip_mode || t_mb_exempt || !g_mb_skip.watched()) return;
+            for (const StageImages::Image& im : out.images)
+                if (im.resolved) mb_skip_touched(tsharp_base(im.w));
+        }
+    } mb_reads{out};
     out.images.resize(meta.images.size());
     const GxStagePlan* plan = gx && g_binding_plans && g_view_by_id ? &stage_plan(meta, *gx) : nullptr;
     for (std::size_t k = 0; k < meta.images.size(); ++k) {
@@ -7620,6 +8400,7 @@ void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t
         } else {
             ok = resolve_binding(b.path, stage_user, gx, 4, w);
         }
+        if (ok && t_bilinear_samplers) scene_split::bilinear_copy_sampler(w);
         out.samplers[k] = ok ? sampler_for(w, b.compare) : VK_NULL_HANDLE;
     }
 }
@@ -7629,10 +8410,16 @@ void prefetch_stage_images(const gcn::TranslateResult& meta, const std::uint32_t
 void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre, const char* pipeline_name,
                        std::vector<VkImageView>& out) {
     out.assign(meta.images.size(), VK_NULL_HANDLE);
-    static std::atomic<int> tlog{0};
-    const bool yebis = pipeline_name && tlog.load(std::memory_order_relaxed) < 24 &&
+    static std::atomic<int> tlog{0}, mblog{0};
+    // test7c: the motion blur's (e0305cef's) own few, which the 24 above never
+    // reached - what its two draws a frame read, for skipping them when off.
+    // rc5b (C3): the name search only while its 8 lines are still to come
+    // (it ran for every stage of every draw).
+    const bool mblur = pipeline_name && mblog.load(std::memory_order_relaxed) < 8 && std::strstr(pipeline_name, "+e0305cef") &&
+                       mblog.fetch_add(1, std::memory_order_relaxed) < 8;
+    const bool yebis = pipeline_name && (mblur || (tlog.load(std::memory_order_relaxed) < 24 &&
                        (std::strncmp(pipeline_name, "7d668276", 8) == 0 || std::strncmp(pipeline_name, "d3ca03f3", 8) == 0 ||
-                        std::strncmp(pipeline_name, "1ea5a07e", 8) == 0);
+                        std::strncmp(pipeline_name, "1ea5a07e", 8) == 0)));
     for (std::size_t k = 0; k < meta.images.size(); ++k) {
         const gcn::ImageBinding& b = meta.images[k];
         const StageImages::Image& im = pre.images[k];
@@ -7647,8 +8434,12 @@ void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre,
                 view = VK_NULL_HANDLE;
                 shape_ok = false;
             }
+            // test10: a target drawn at render size this frame is read there.
+            // Only RGBA16F reads (dfmt 16_16_16_16, nfmt float), the stand-in's own format.
+            if (view && g_pw.open && !b.storage && ((w[1] >> 20) & 0x3f) == 12 && ((w[1] >> 26) & 0xf) == 7)
+                if (const RtImage* sh = post_resolve_locked(tsharp_base(w))) view = sh->view;
             if (yebis && view && w[0] != 0xffffffffu) {
-                if (tlog.fetch_add(1) < 24) {
+                if (mblur || tlog.fetch_add(1) < 24) {  // test8: test7c's motion blur lines lost to the shared 24
                     const std::uint64_t tbase = tsharp_base(w);
                     host_log("texture: %s b%u T# base 0x%llx dfmt %u nfmt %u %ux%u type %u tiling %u array %u..%u depth %u da %d r128 %d",
                              pipeline_name, b.binding, static_cast<unsigned long long>(tbase), (w[1] >> 20) & 0x3f,
@@ -7683,7 +8474,9 @@ void stage_final_views(const gcn::TranslateResult& meta, const StageImages& pre,
                 const std::uint64_t tbase = (static_cast<std::uint64_t>(w[0]) | (static_cast<std::uint64_t>(w[1] & 0xff) << 32)) << 8;
                 host_log("render: %s binding %u (%s) has no texture: %s, want dim %u%s, got dim %u%s",
                          pipeline_name ? pipeline_name : "?", b.binding, b.path.str().c_str(),
-                         !resolved ? "T# unreadable" : !shape_ok ? "wrong shape" : "unsupported format", b.dim,
+                         // rc4: an unbound slot (no base: dfmt 6's case in rc2/rc3,
+                         // a mapped format) was "unsupported format".
+                         !resolved ? "T# unreadable" : !shape_ok ? "wrong shape" : tbase == 0 ? "no address (an unbound slot)" : "unsupported format", b.dim,
                          b.arrayed ? " array" : "", got_dim, got_arrayed ? " array" : "");
                 host_log("  T# %08x %08x %08x %08x %08x %08x %08x %08x", w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
                 host_log("  reads as T#: base 0x%llx dfmt %u nfmt %u %ux%u type %u tiling %u%s",
@@ -8023,6 +8816,11 @@ bool draw_window_locked(std::uint64_t base, std::uint64_t bytes, Located& out) {
 // indexes it from cb_bias_dw. A V# outside imported memory, not on a dword
 // boundary, or too long for one binding stays on the page-table path
 // (cb_valid bit clear) and gets the dummy buffer.
+// bbhost-vk Phase 2: the stage (0 VS, 1 PS) and shaders whose buffers
+// resolve_stage_buffers is resolving for a draw, while the temporal inputs
+// watch the draws (host/temporal_inputs.h); -1 otherwise.
+thread_local int t_temporal_stage = -1;
+thread_local std::uint32_t t_temporal_vs = 0, t_temporal_ps = 0;
 void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t* user, gcn::StageParams& params,
                            std::vector<VkDescriptorBufferInfo>& infos, const GxStageRecords* gx = nullptr) {
     // Why V#s end up on the page-table path, logged every 200,000 resolves.
@@ -8064,6 +8862,19 @@ void resolve_stage_buffers(const gcn::TranslateResult& meta, const std::uint32_t
         // A V# keeps memory-type bits above its 40-bit address; a pointer pair is the address.
         const std::uint64_t hi = b.pointer ? words[1] : (words[1] & 0xff);
         const std::uint64_t base = resolved ? static_cast<std::uint64_t>(words[0]) | (hi << 32) : 0;
+        // bbhost-vk Phase 2: the scene constants, bone palettes and velocity
+        // scales by the V#'s own size (records x stride; records are bytes
+        // when the stride is 0).
+        if (t_temporal_stage >= 0 && base) {
+            // A pointer has no V#: the shader's own extent (test2: the scene
+            // constants may come this way).
+            const std::uint32_t vstride = (words[1] >> 16) & 0x3fff;
+            // test3: a V# with no records (most GX token draws'): the shader's extent.
+            const bool known = b.pointer || words[2] != 0;
+            const std::uint64_t vbytes = !known || b.pointer ? static_cast<std::uint64_t>(bytes)
+                                                             : static_cast<std::uint64_t>(words[2]) * (vstride ? vstride : 1);
+            temporal_observe_buffer_locked(t_temporal_stage, t_temporal_vs, t_temporal_ps, static_cast<int>(i), base, vbytes, b.pointer, known);
+        }
         int outcome = !base ? kNoBase : (base & 3) || !shape ? kUnaligned : kUnmapped;
         // Past the longest binding the range takes the page table: no one buffer need hold it.
         Located loc;
@@ -10582,6 +11393,8 @@ bool tess_ls_pass_locked(const GpuDraw& d, TessDraw& t) {
     const std::uint32_t params_offset = static_cast<std::uint32_t>(ubi.offset);
     vkCmdBindDescriptorSets(g_cmd(), VK_PIPELINE_BIND_POINT_COMPUTE, g.pipe_layout, 0, 1, &set, set_cache_on() ? 1 : 0, &params_offset);
     vkCmdDispatch(g_cmd(), (t.count * (t.hull ? t.instances : 1) + 63) / 64, 1, 1);
+    gpu_write_note_locked(t.lds_address, bytes);  // rc5b: the ring it writes (compute constant buffers stay off it)
+    if (!pl.meta.store_buffers.empty() || pl.meta.untraced_stores) gpu_write_taint_locked();
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -11026,6 +11839,9 @@ static bool draw_impl(const GpuDraw& d) {
             }
         }
     }
+    // test7, BBHOST_SUBMIT_SPLIT=<n> (off by default): hand the GPU what is
+    // recorded so far when it has run dry (gpu.cpp).
+    submit_split_point();
     // Everything below runs under the one GPU mutex, so book the time spent
     // waiting for it separately: it is the other command-processor threads
     // and the fence waits, not this draw.
@@ -11035,7 +11851,9 @@ static bool draw_impl(const GpuDraw& d) {
     GpuPhaseTimer timer(kPhaseLock, phase_weight);
     std::lock_guard<GpuMutex> lock(g.mu);
     timer.next(kPhaseDraw);
+    t_cost_sample = g_cp_split_on && phase_weight != 0;  // rc5b: the sampled section split (RenderCostStamp)
     RenderCostStamp draw_stamp;
+    t_cost_sample = false;
     t_token_draw = d.gx_token;
     apply_table_masks_locked();
     apply_lean_builds_locked();
@@ -11577,8 +12395,10 @@ static bool draw_impl(const GpuDraw& d) {
     const gcn::TranslateResult* const ps_paths =
         ps_words.empty() ? nullptr : &paths_for(ps_hash, ps_words, gcn::Stage::Pixel, s.ps_rsrc1, s.ps_rsrc2);
     t_resolve_site = kSiteKey;
-    resolve_key_stage(&vs_paths, s.vs_user, gx_stage[0], key_stages[0]);
-    resolve_key_stage(ps_paths, s.ps_user, gx_stage[1], key_stages[1]);
+    // rc7: both stages as the last draw left them (the stage memo): the
+    // shape below is unchanged too.
+    const bool vs_same = resolve_key_stage(&vs_paths, s.vs_user, gx_stage[0], key_stages[0]);
+    const bool ps_same = resolve_key_stage(ps_paths, s.ps_user, gx_stage[1], key_stages[1]);
     const std::vector<std::pair<std::uint32_t, bool>>& vs_dims = key_stages[0].dims;
     const std::vector<std::pair<std::uint32_t, bool>>& ps_dims = key_stages[1].dims;
     const std::vector<bool>& vs_sampler_modes = key_stages[0].modes;
@@ -11589,14 +12409,18 @@ static bool draw_impl(const GpuDraw& d) {
         // The sampler modes and image dimensions the translation depends on,
         // packed and hashed once; a separator ends each list.
         static thread_local std::vector<std::uint32_t> shape;
-        shape.clear();
-        for (const bool mode : vs_sampler_modes) shape.push_back(mode ? 1u : 0u);
-        shape.push_back(~0u);
-        for (const bool mode : ps_sampler_modes) shape.push_back(mode ? 1u : 0u);
-        shape.push_back(~0u);
-        for (const auto& d2 : vs_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
-        shape.push_back(~0u);
-        for (const auto& d2 : ps_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
+        static thread_local bool shape_built = false;  // shape holds key_stages' lists
+        if (!(vs_same && ps_same && shape_built)) {
+            shape.clear();
+            for (const bool mode : vs_sampler_modes) shape.push_back(mode ? 1u : 0u);
+            shape.push_back(~0u);
+            for (const bool mode : ps_sampler_modes) shape.push_back(mode ? 1u : 0u);
+            shape.push_back(~0u);
+            for (const auto& d2 : vs_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
+            shape.push_back(~0u);
+            for (const auto& d2 : ps_dims) shape.push_back(d2.first | (d2.second ? 0x80000000u : 0u));
+            shape_built = true;
+        }
         key = fnv1a(shape.data(), shape.size() * sizeof(std::uint32_t), key);
     }
     draw_stamp.to(kRenderCostKey);
@@ -11653,6 +12477,21 @@ static bool draw_impl(const GpuDraw& d) {
     // the bind below writes the same views (it used to resolve and look up
     // every texture again, and hash hot ones twice).
     static thread_local StageImages stage_images[2];
+    // test8: the motion blur's own draws are exempt from the skip's watch
+    // (they are the pattern it checks); others first finish a held draw 1.
+    const std::size_t mb_plus = g_mb_skip_mode ? pl.name.find('+') : std::string::npos;
+    const bool mb_draw = mb_plus != std::string::npos && pl.name.compare(mb_plus + 1, 8, "e0305cef") == 0;
+    struct MbExempt {
+        bool was;
+        explicit MbExempt(bool on) : was(t_mb_exempt) { t_mb_exempt = on; }
+        ~MbExempt() { t_mb_exempt = was; }
+    } mb_exempt(mb_draw);
+    struct InDraw {  // test10: prefetches from here on are a draw's, not a dispatch's
+        bool was;
+        InDraw() : was(t_in_draw) { t_in_draw = true; }
+        ~InDraw() { t_in_draw = was; }
+    } in_draw;
+    bool fsr3_replaced = false;  // bbhost-vk Phase 3: FSR 3.1 wrote this scale pass's target
     {
         GpuPhaseTimer t(kPhasePrefetch, phase_weight);
         if (!pl.paths_checked) {
@@ -11681,7 +12520,39 @@ static bool draw_impl(const GpuDraw& d) {
             }
         }
         prefetch_stage_images(pl.vs.meta(), s.vs_user, stage_images[0], gx_stage[0], pl.paths_match[0] ? &key_stages[0] : nullptr);
+        if (pl.scale_pass < 0) {
+            const std::size_t plus = pl.name.find('+');
+            pl.scale_pass = plus != std::string::npos && pl.name.compare(plus + 1, 8, "ccbf44a6") == 0 ? 1 : 0;
+            pl.orb_vs = pl.name.size() >= 8 ? temporal::parse_hash(pl.name.c_str()) : 0;
+            pl.orb_ps = plus != std::string::npos && pl.name.size() >= plus + 9 ? temporal::parse_hash(pl.name.c_str() + plus + 1) : 0;
+        }
+        temporal_frame_locked(hle_video_flip_count());
+        // FSR 3.1's fallback frames draw the bilinear copy too.
+        t_bilinear_samplers = pl.scale_pass == 1 && (upscaler_scene_pass() == ScenePass::Bilinear || upscaler_scene_pass() == ScenePass::Fsr31);
+        if (t_bilinear_samplers) note_scale_pass(pl.name);
         prefetch_stage_images(pl.ps.meta(), s.ps_user, stage_images[1], gx_stage[1], pl.paths_match[1] ? &key_stages[1] : nullptr);
+        t_bilinear_samplers = false;
+        // bbhost-vk Phase 2: the scene is complete - motion vectors, camera
+        // history, the next jitter phase (host/temporal_inputs.h).
+        if (pl.scale_pass == 1 && temporal_watching()) {
+            RtImage* scene = nullptr;
+            if (!stage_images[1].images.empty() && stage_images[1].images[0].resolved)
+                scene = find_render_target(tsharp_base(stage_images[1].images[0].w));
+            // test2: the active output in the target (its viewport), not the
+            // target's extent - live resolution keeps the display buffers at
+            // the largest Resolution entry (host/fsr3_pass.h).
+            const temporal::OutputRect out_rect = s.color[0] ? fsr3_output_rect_locked(s.color[0], s.vport) : temporal::OutputRect{};
+            temporal_scale_pass_locked(scene, out_rect.w, out_rect.h);
+            // bbhost-vk Phase 3: FSR 3.1 writes the pass's target instead of
+            // the game's draw (host/fsr3_pass.h); the draw is dropped below,
+            // where BBHOST_SKIP_PASS drops one.
+            if (upscaler_scene_pass() == ScenePass::Fsr31 && s.color[0]) {
+                ensure_initialised(*s.color[0]);
+                // test10: the scene goes to A's render-size stand-in; FSR
+                // runs where the moved post chain ends (post_end_window_locked).
+                fsr3_replaced = post_begin_locked(s.color[0], scene, out_rect) || fsr3_scale_pass_locked(s.color[0], out_rect);
+            }
+        }
         t_resolve_site = kSiteBuffers;
     }
     draw_stamp.to(kRenderCostPrefetch);
@@ -11944,10 +12815,288 @@ static bool draw_impl(const GpuDraw& d) {
         }();
         if (s.color[0] && (!otarget || s.color[0]->base == otarget) && pl.name.find(oname) != 0) return true;
     }
+    // test7c: where the motion blur's two draws a frame write (see the
+    // texture lines for what they read), to tell whether skipping them while
+    // it is off leaves the same picture.
+    // rc5 (CPU audit C3): the name search ran for every draw with a colour
+    // target although only the first 8 log; it stops once they have.
+    static std::atomic<int> mb_logged{0};
+    if (s.color[0] && mb_logged.load(std::memory_order_relaxed) < 8 && pl.name.find("+e0305cef") != std::string::npos) {
+        std::atomic<int>& logged = mb_logged;
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+            const RtImage& t = *s.color[0];
+            host_log("render: motion blur %s draws into 0x%llx %ux%u format %d", pl.name.c_str(), static_cast<unsigned long long>(t.base),
+                     t.width, t.height, static_cast<int>(t.format));
+        }
+    }
+    // test8/test10, BBHOST_AB_SECONDS=<s>: every s seconds post-at-render
+    // (BBHOST_POST_AT_RENDER) goes off or on again, and each half's frame times (scale pass to scale pass)
+    // are logged as `ab:` lines - both numbers from one run, same spot.
+    if (pl.scale_pass == 1) {
+        static const long ab_s = [] {
+            const char* e = std::getenv("BBHOST_AB_SECONDS");
+            return e ? std::strtol(e, nullptr, 10) : 0L;
+        }();
+        static std::uint64_t last_ns = 0, phase_start_ns = 0, frames = 0, over8 = 0, over833 = 0, over12 = 0;
+        static double sum_ms = 0, max_ms = 0;
+        static std::uint64_t last_flip = ~0ull;
+        const std::uint64_t flip = hle_video_flip_count();
+        static const bool ab_post = [] {  // test11: the A/B flips the present pacing unless BBHOST_AB_TOGGLE=post
+            const char* w = std::getenv("BBHOST_AB_TOGGLE");
+            return w && std::strcmp(w, "post") == 0;
+        }();
+        if (ab_s > 0 && ab_post && post_mode() && flip != last_flip) {
+            last_flip = flip;
+            const std::uint64_t now = host_clock_monotonic_ns();
+            if (!phase_start_ns) phase_start_ns = now;
+            if (last_ns && now - last_ns < 1000000000ull) {
+                const double ms = static_cast<double>(now - last_ns) / 1e6;
+                ++frames;
+                sum_ms += ms;
+                max_ms = std::max(max_ms, ms);
+                over8 += ms > 8.42;
+                over833 += ms > 8.333;
+                over12 += ms > 12.0;
+            }
+            last_ns = now;
+            if (now - phase_start_ns >= static_cast<std::uint64_t>(ab_s) * 1000000000ull) {
+                if (frames)
+                    host_log("ab: post at render %s for %.0f s: %llu frames, %.1f fps, %.2f ms average, max %.1f ms, %llu over 8.33 ms, %llu over 8.42 ms, %llu over 12 ms; %llu pairs skipped so far",
+                             g_post_on ? "on" : "off", static_cast<double>(now - phase_start_ns) / 1e9, static_cast<unsigned long long>(frames),
+                             1000.0 * static_cast<double>(frames) / sum_ms, sum_ms / static_cast<double>(frames), max_ms,
+                             static_cast<unsigned long long>(over833), static_cast<unsigned long long>(over8), static_cast<unsigned long long>(over12),
+                             static_cast<unsigned long long>(g_mb_skip.pairs_skipped()));
+                g_post_on = !g_post_on;  // test10: from the next scale pass
+                phase_start_ns = now;
+                frames = over8 = over833 = over12 = 0;
+                sum_ms = max_ms = 0;
+            }
+        }
+    }
+    // test8, BBHOST_POST_CHAIN_LOG=<flips> (default 3600; 0 off): every that many
+    // flips, one frame's draws from the scale pass to the first UI draw - the
+    // post chain the render-size work moves - with each draw's target, its
+    // viewport, blending, and every image it samples (size and format).
+    {
+        static const long chain_every = [] {
+            const char* e = std::getenv("BBHOST_POST_CHAIN_LOG");
+            return e ? std::strtol(e, nullptr, 10) : 3600L;  // one frame a minute at 60, half a minute at 120
+        }();
+        static std::uint64_t chain_flip = ~0ull, chain_next = 600;
+        static int chain_n = 0;
+        if (chain_every > 0) {
+            const std::uint64_t flip = hle_video_flip_count();
+            if (pl.scale_pass == 1 && flip >= chain_next) {
+                chain_flip = flip;
+                chain_next = flip + static_cast<std::uint64_t>(chain_every);
+                chain_n = 0;
+                host_log("post-chain: flip %llu, from the scale pass %s (FSR %s)", static_cast<unsigned long long>(flip), pl.name.c_str(),
+                         fsr3_replaced ? "wrote it" : "did not");
+            }
+            if (flip == chain_flip) {
+                if (temporal::is_ui_vs(pl.orb_vs) || chain_n >= 200) {
+                    host_log("post-chain: flip %llu ends at %s (%s), %d draws", static_cast<unsigned long long>(flip), pl.name.c_str(),
+                             chain_n >= 200 ? "200 draws" : "the first UI draw", chain_n);
+                    chain_flip = ~0ull;
+                } else {
+                    char line[1024];
+                    int n = 0;
+                    const RtImage* t = s.color[0];
+                    n += std::snprintf(line + n, sizeof(line) - n, "post-chain: #%d %s rt 0x%llx %ux%u fmt %d vp %.0fx%.0f+%.0f+%.0f%s tex",
+                                       chain_n, pl.name.c_str(), static_cast<unsigned long long>(t ? t->base : 0), t ? t->width : 0,
+                                       t ? t->height : 0, t ? static_cast<int>(t->format) : 0, s.vport[2], s.vport[3], s.vport[0], s.vport[1],
+                                       ((s.blend[0] >> 30) & 1u) ? " blend" : "");
+                    for (const StageImages::Image& im : stage_images[1].images) {
+                        if (!im.resolved || n >= static_cast<int>(sizeof(line)) - 80) continue;
+                        const std::uint64_t base = tsharp_base(im.w);
+                        const RtImage* r = find_render_target(base);
+                        if (r)
+                            n += std::snprintf(line + n, sizeof(line) - n, " 0x%llx(rt %ux%u fmt %d)", static_cast<unsigned long long>(base),
+                                               r->width, r->height, static_cast<int>(r->format));
+                        else
+                            n += std::snprintf(line + n, sizeof(line) - n, " 0x%llx(%ux%u dfmt %u)", static_cast<unsigned long long>(base),
+                                               (im.w[2] & 0x3fff) + 1, ((im.w[2] >> 14) & 0x3fff) + 1, (im.w[1] >> 20) & 0x3f);
+                    }
+                    host_log("%s", line);
+                    // test9: the constants of the passes before the bloom
+                    // (#1-#10), for finding the pixel-size ones (test10's
+                    // render-size chain): the user-data pointers' first 32 dwords.
+                    if (chain_n >= 1 && chain_n <= 10) {
+                        for (int k = 0; k + 1 < 8; k += 2) {
+                            const std::uint64_t ptr = static_cast<std::uint64_t>(s.ps_user[k]) |
+                                                      (static_cast<std::uint64_t>(s.ps_user[k + 1] & 0xff) << 32);
+                            if (!ptr || !hle_kernel_va_mapped(ptr, 128)) continue;
+                            const auto* f = reinterpret_cast<const float*>(static_cast<std::uintptr_t>(ptr));
+                            int m = std::snprintf(line, sizeof(line), "post-chain:   #%d ps s[%d:%d] 0x%llx:", chain_n, k, k + 1,
+                                                  static_cast<unsigned long long>(ptr));
+                            for (int q = 0; q < 32 && m < static_cast<int>(sizeof(line)) - 20; ++q) m += std::snprintf(line + m, sizeof(line) - m, " %g", f[q]);
+                            host_log("%s", line);
+                        }
+                    }
+                    ++chain_n;
+                }
+            }
+        }
+    }
+    // test10, BBHOST_POST_AT_RENDER: inside the window, the moved programs draw
+    // into their output-size targets' render-size stand-ins; any other
+    // program closes it (FSR upscales the last stand-in first).
+    // rc2: a draw joins the window by what it does, not only by its program
+    // (the Dream's versions of the passes have other hashes, and an area
+    // never logged has its own). One RGBA16F colour target, no depth, no
+    // MRT, and either
+    //   - a smaller-than-output target that is not the render size, reading
+    //     the chain (a stand-in) or another such buffer: the DoF's
+    //     half-height buffers and their blurs. Render-size ones are left out:
+    //     the bloom's start writes 1080p from the chain's colour too; or
+    //   - an output-size target reading the chain *and* a smaller RGBA16F
+    //     buffer: the DoF composite (the chain + the DoF buffer) and the
+    //     motion blur (the chain + its 1080p velocity). A single-input pass
+    //     at 4K (the CA, a grade) closes the window as before.
+    auto post_joins_by_shape = [&]() -> bool {
+        if (!s.color[0] || s.depth || post_keep_out(pl.name)) return false;
+        for (int c = 1; c < 8; ++c)
+            if (s.color[c]) return false;
+        const RtImage& t = *s.color[0];
+        if (t.format != VK_FORMAT_R16G16B16A16_SFLOAT || t.layers != 1) return false;
+        int chain = 0, small = 0;
+        for (const StageImages::Image& im : stage_images[1].images) {
+            if (!im.resolved) continue;
+            const std::uint64_t base = tsharp_base(im.w);
+            if (!base || base == t.base) continue;
+            if (post_resolve_locked(base)) {
+                ++chain;
+                continue;
+            }
+            const RtImage* r = find_render_target(base);
+            if (r && !r->depth && r->format == VK_FORMAT_R16G16B16A16_SFLOAT && r->width < g_pw.ow && r->height < g_pw.oh) ++small;
+        }
+        bool ok = false;
+        if (t.width == g_pw.ow && t.height == g_pw.oh) ok = chain >= 1 && small >= 1;
+        else if (t.width < g_pw.ow && t.height < g_pw.oh && !(t.width == g_pw.rw && t.height == g_pw.rh)) ok = chain + small >= 1;
+        if (ok) {
+            ++g_post_by_shape;
+            if (g_post_shape_seen.size() < 64 && g_post_shape_seen.insert(pl.name).second)
+                host_log("post-at-render: %s joins by its shape (%ux%u target, %d chain input(s), %d smaller buffer(s); flip %llu)",
+                         pl.name.c_str(), t.width, t.height, chain, small, static_cast<unsigned long long>(hle_video_flip_count()));
+        }
+        return ok;
+    };
+    if (perf::post_wanted()) perf::publish_post(post_coverage_text_locked());  // rc2: a capture asked
+    if (g_pw.open && pl.scale_pass != 1) {
+        if (g_pw.flip != hle_video_flip_count()) {
+            post_end_window_locked("the next frame");
+        } else if (!post_moved_ps(pl.orb_ps) && !post_joins_by_shape()) {
+            if (g_post_end_by.size() < 64 || g_post_end_by.count(pl.name)) ++g_post_end_by[pl.name];
+            post_end_window_locked(pl.name.c_str());
+        } else if (s.color[0]) {
+            RtImage& t = *s.color[0];
+            bool mrt = false;
+            for (int c = 1; c < 8; ++c) mrt |= s.color[c] != nullptr;
+            if (t.width == g_pw.ow && t.height == g_pw.oh && t.format == VK_FORMAT_R16G16B16A16_SFLOAT && t.layers == 1 && !mrt && !s.depth) {
+                if (RtImage* sh = post_shadow_locked(t)) {
+                    if (std::find(g_pw.bases.begin(), g_pw.bases.end(), t.base) == g_pw.bases.end()) g_pw.bases.push_back(t.base);
+                    g_pw.last = t.base;
+                    s.color[0] = sh;
+                    rt_written(*sh);
+                    const float rx = static_cast<float>(g_pw.rw) / static_cast<float>(g_pw.ow);
+                    const float ry = static_cast<float>(g_pw.rh) / static_cast<float>(g_pw.oh);
+                    s.vport[0] *= rx;
+                    s.vport[1] *= rx;
+                    s.vport[2] *= ry;
+                    s.vport[3] *= ry;
+                    const auto sx0 = static_cast<std::int32_t>(std::floor(static_cast<float>(s.scissor.offset.x) * rx));
+                    const auto sy0 = static_cast<std::int32_t>(std::floor(static_cast<float>(s.scissor.offset.y) * ry));
+                    const auto sx1 = static_cast<std::int32_t>(std::ceil(static_cast<float>(s.scissor.offset.x + static_cast<std::int32_t>(s.scissor.extent.width)) * rx));
+                    const auto sy1 = static_cast<std::int32_t>(std::ceil(static_cast<float>(s.scissor.offset.y + static_cast<std::int32_t>(s.scissor.extent.height)) * ry));
+                    s.scissor.offset = {sx0, sy0};
+                    s.scissor.extent = {static_cast<std::uint32_t>(std::max(sx1 - sx0, 0)), static_cast<std::uint32_t>(std::max(sy1 - sy0, 0))};
+                    ++g_post_stats.redirected;
+                } else {
+                    post_end_window_locked("no memory for a stand-in");
+                }
+            }
+        }
+    }
+    // test8, BBHOST_MOTION_BLUR_SKIP=1: with motion blur off, its two draws
+    // copy A to B and back (host/temporal/mblur_skip.h); once that is proven
+    // for 120 frames in a row, both are left out.
+    if (mb_draw && s.color[0]) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            host_log("render: motion blur skip on (BBHOST_MOTION_BLUR_SKIP=0 turns it off): with motion blur off, its two draws become one copy once proven to pass the picture through");
+        }
+        RtImage& t = *s.color[0];
+        if (t.base == g_mb_skip.watched()) g_mb_b_bound = false;  // draw 1 bound B: the pattern itself
+        // test11: inputs judged against the real target's size. Under post at
+        // render t is a 1080p stand-in, and the 1080p velocity buffer then
+        // matched it too: two inputs, "not eligible", no pairs skipped (t12).
+        const RtImage* treal = post_resolve_locked(t.base) == &t ? find_render_target(t.base) : &t;
+        if (!treal) treal = &t;
+        std::uint64_t src = 0;
+        int inputs = 0;
+        for (const StageImages::Image& im : stage_images[1].images) {
+            if (!im.resolved) continue;
+            const std::uint64_t base = tsharp_base(im.w);
+            const RtImage* r = base && base != t.base ? find_render_target(base) : nullptr;
+            if (r && !r->depth && r->width == treal->width && r->height == treal->height && r->format == treal->format && r->layers == 1 && base != src) {
+                src = base;
+                ++inputs;
+            }
+        }
+        bool mrt = false;
+        for (int c = 1; c < 8; ++c) mrt |= s.color[c] != nullptr;
+        const bool eligible = g_mb_skip_on && shader_patch_motion_blur_off() && inputs == 1 && !mrt && t.layers == 1 &&
+                              !g_pending_clears.count(t.base) && !g_pending_clears.count(src);
+        const bool blends = (s.blend[0] >> 30) & 1u;  // CB_BLEND0_CONTROL.ENABLE
+        const bool was_armed = g_mb_skip.armed();
+        const auto act = g_mb_skip.draw(hle_video_flip_count(), src, t.base, blends, eligible);
+        if (!was_armed && g_mb_skip.armed())
+            host_log("render: motion blur skip on: its two draws copy 0x%llx -> 0x%llx -> 0x%llx with blur off, %d frames in a row (flip %llu); now one copy",
+                     static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
+                     static_cast<unsigned long long>(g_mb_skip.d()),
+                     temporal::MotionBlurSkip::kLearnFrames, static_cast<unsigned long long>(hle_video_flip_count()));
+        {  // why it is not skipping, now and then (test8 never said)
+            static std::uint64_t next_why = 1200;
+            const std::uint64_t fl = hle_video_flip_count();
+            if (!g_mb_skip.armed() && fl >= next_why && (t.base == g_mb_skip.b() || !g_mb_skip.b())) {
+                next_why = fl + 3600;
+                host_log("render: motion blur skip learning (flip %llu): %d good frames; last frame not counted: %s; S 0x%llx B 0x%llx D 0x%llx",
+                         static_cast<unsigned long long>(fl), g_mb_skip.good_frames(), *g_mb_skip.last_reject() ? g_mb_skip.last_reject() : "-",
+                         static_cast<unsigned long long>(g_mb_skip.a()), static_cast<unsigned long long>(g_mb_skip.b()),
+                         static_cast<unsigned long long>(g_mb_skip.d()));
+            }
+        }
+        if (act == temporal::MotionBlurSkip::Action::MaterializeThenDraw) mb_skip_materialize_locked();
+        if (act == temporal::MotionBlurSkip::Action::SkipCopy) {
+            // Draw 2 into D: the blur-off result is draw 1's input S, as is.
+            RtImage* from = find_render_target(g_mb_skip.a());
+            if (RtImage* sh = post_resolve_locked(g_mb_skip.a())) from = sh;  // test10
+            if (from && from != &t) copy_layers_locked(*from, t);
+        }
+        if (act == temporal::MotionBlurSkip::Action::Skip || act == temporal::MotionBlurSkip::Action::SkipCopy) {
+            rt_written(t);
+            t.fill_last = false;
+            const std::uint64_t pairs = g_mb_skip.pairs_skipped();
+            if (pairs && pairs % 36000 == 0 && t.base == g_mb_skip.a())
+                host_log("render: motion blur skip: %llu frames without its two draws, %llu stops, %llu first draws done after all",
+                         static_cast<unsigned long long>(pairs), static_cast<unsigned long long>(g_mb_skip.trips()),
+                         static_cast<unsigned long long>(g_mb_skip.materialized()));
+            return true;
+        }
+    }
     // BBHOST_SKIP_PASS=<prefix>[,<prefix>...]: drop those draws. Readbacks
     // cost a broken render pass and this driver will not take many of those,
     // so the safe way to ask "is it this pass?" is to remove it and look at
     // the screen. No copies, no pass breaks, no risk to the run.
+    if (fsr3_replaced) {
+        RtImage& t = *s.color[0];
+        rt_written(t);
+        t.fill_last = false;
+        if (g_pending_clears.erase(t.base)) ++g_pending_gen;
+        return true;
+    }
     static const char* skip_pass = std::getenv("BBHOST_SKIP_PASS");
     if (skip_pass) {
         static const std::vector<std::string> names = [] {
@@ -12360,6 +13509,11 @@ static bool draw_impl(const GpuDraw& d) {
 
     int reused_way[2] = {-1, -1};
     std::uint32_t stage_named[2] = {0, 0};  // user-data dwords each stage built from GX
+    if (temporal_watching()) {
+        int colors = 0;
+        for (const RtImage* c : s.color) colors += c != nullptr;
+        temporal_draw_targets_locked(colors, s.depth != nullptr);
+    }
     for (int st = 0; st < 2; ++st) {
         const gcn::TranslateResult& meta = st == 0 ? pl.vs.meta() : pl.ps.meta();
         const std::size_t stage_writes = writes.size();
@@ -12492,7 +13646,28 @@ static bool draw_impl(const GpuDraw& d) {
             std::memcpy(params.vertex_formats, t_tess->hs_user, sizeof(params.vertex_formats));
             if (gx_stage[0]) put_tess_constants(*gx_stage[0], t_tess->tess_vsharp, params.user_sgpr);
         }
+        if (temporal_watching()) {
+            t_temporal_stage = st;
+            t_temporal_vs = pl.orb_vs;
+            t_temporal_ps = pl.orb_ps;
+        }
         resolve_stage_buffers(meta, params.user_sgpr, params, buffer_infos, gx_stage[st]);
+        t_temporal_stage = -1;
+        // rc5b: what a stage stores to (a few vertex shaders do), for the
+        // compute constant buffers that must not bind over it this recording.
+        if (meta.untraced_stores) gpu_write_taint_locked();
+        for (const gcn::ResourcePath& path : meta.store_buffers) {
+            if (!compute_cb_on()) break;
+            std::uint32_t v[4]{};
+            if (!resolve_resource(path, params.user_sgpr, 4, v)) {
+                gpu_write_taint_locked();
+                continue;
+            }
+            const std::uint32_t stride = (v[1] >> 16) & 0x3fff;
+            const std::uint64_t bytes = stride ? std::uint64_t{v[2]} * stride : v[2];
+            if (!bytes) gpu_write_taint_locked();
+            gpu_write_note_locked(v[0] | (static_cast<std::uint64_t>(v[1] & 0xff) << 32), bytes);
+        }
         if (!meta.buffers.empty()) {
             any_buffers = true;
             all_bound = all_bound && params.cb_valid == (1u << meta.buffers.size()) - 1;
@@ -13005,6 +14180,11 @@ static bool draw_impl(const GpuDraw& d) {
             }
         }
     }
+    // bbhost-vk Phase 2: the scene colour as it is before its first blended
+    // draw - the opaque snapshot the upscalers' reactive masks start from.
+    if (temporal_watching() && s.color[0] && s.depth &&
+        (s.gx_blend ? s.gx_blend->rt[0].enable != 0 : temporal::blend_enabled(s.blend[0])))
+        temporal_before_blend_locked(s.color[0], s.depth);
     g_pass_profile_name = &bind_pl->profile_name;
     begin_pass(s, pass_key(s), sample_hazard);
     draw_stamp.to(kRenderCostPass);
@@ -13152,6 +14332,17 @@ static bool draw_impl(const GpuDraw& d) {
         vp.minDepth = 0.0f;
         vp.maxDepth = 1.0f;
     }
+    // bbhost-vk Phase 2: the scene's geometry draws shifted by the frame's
+    // Halton jitter (temporal upscalers only; host/temporal_inputs.h).
+    if (temporal_watching()) {
+        float jx = 0.0f, jy = 0.0f;
+        const bool blended = s.gx_blend ? s.gx_blend->rt[0].enable != 0 : temporal::blend_enabled(s.blend[0]);
+        if (temporal_draw_locked(s.depth, s.color[0], pl.orb_vs, pl.orb_ps, d.index_count, d.instance_count, d.indirect_va != 0, blended, &jx,
+                                 &jy)) {
+            vp.x += jx;
+            vp.y += jy;
+        }
+    }
     // A reversed range (zscale < 0) stays reversed: Vulkan only requires
     // both ends inside [0, 1].
     vp.minDepth = std::clamp(vp.minDepth, 0.0f, 1.0f);
@@ -13244,7 +14435,45 @@ static bool draw_impl(const GpuDraw& d) {
     }
     if (bind_pl->profile_name.empty()) {
         const bool walks = !bind_pl->vs.meta().walks.empty() || !bind_pl->ps.meta().walks.empty();
-        bind_pl->profile_name = pl.name + (bind_pl->lean ? "" : "~fallback") + (walks ? "~walks" : "");
+        // rc3: "~fallback" only where a lean variant could exist - a pipeline
+        // with no constant buffers has nothing to fall back from (rc2
+        // labelled every one of those ~fallback).
+        const bool has_cbs = !bind_pl->vs.meta().buffers.empty() || !bind_pl->ps.meta().buffers.empty();
+        bind_pl->profile_name = pl.name + (bind_pl->lean || !has_cbs ? "" : "~fallback") + (walks ? "~walks" : "");
+        // rc3: how many pipelines' vertex shaders still walk the page table -
+        // all of them, and the post chain's (YEBIS: drawn with CPU-written
+        // windows) - for the snapshots ([walks]) and the exit report.
+        const bool vs_walks = !bind_pl->vs.meta().walks.empty();
+        const bool post = !t_draw_windows.empty();
+        g_walk_pl.pipelines.fetch_add(1, std::memory_order_relaxed);
+        if (vs_walks) g_walk_pl.vs_walking.fetch_add(1, std::memory_order_relaxed);
+        if (post) g_walk_pl.post.fetch_add(1, std::memory_order_relaxed);
+        if (bind_pl->vs.meta().fetch_inlined) {
+            g_walk_pl.fetch_inlined.fetch_add(1, std::memory_order_relaxed);
+            if (vs_walks) g_walk_pl.fetch_inlined_walking.fetch_add(1, std::memory_order_relaxed);
+            static int fi_logs = 0;  // under g.mu
+            if (fi_logs < 8) {
+                ++fi_logs;
+                host_log("fetch inline: %s - vertex shader and fetch shader as one straight line%s", pl.name.c_str(),
+                         vs_walks ? " (still walks)" : ", no walks");
+            }
+        }
+        const std::uint32_t so_sites = bind_pl->vs.meta().soffset_bound + bind_pl->ps.meta().soffset_bound;
+        if (so_sites) {
+            g_walk_pl.soffset_bound.fetch_add(1, std::memory_order_relaxed);
+            g_walk_pl.soffset_bound_sites.fetch_add(so_sites, std::memory_order_relaxed);
+            static int so_logs = 0;  // under g.mu
+            if (so_logs < 8) {
+                ++so_logs;
+                host_log("soffset bound: %s - %u bound load%s at an SGPR offset (the walk past the binding)", pl.name.c_str(), so_sites,
+                         so_sites == 1 ? "" : "s");
+            }
+        }
+        if (post && vs_walks) {
+            g_walk_pl.post_vs_walking.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lk(g_walk_pl.mu);
+            if (g_walk_pl.post_names.size() < 24) g_walk_pl.post_names.push_back(pl.name);
+        }
         static int logs = 0;  // under g.mu
         if (walks && logs < 400) {
             ++logs;
@@ -13303,6 +14532,7 @@ static bool draw_impl(const GpuDraw& d) {
     bump(g.draws);  // the one writer, under g.mu: no locked add
     bump(g.draws_ps[draw_ps_kind(*bind_pl)]);
     draw_stamp.to(kRenderCostRecord);
+    if (draw_stamp.sample) log_cp_split_maybe();  // under g.mu
     if (g_render_cost_enabled) report_render_split(false);
     if (capture_session) {
         CaptureDynamic dyn;
@@ -14781,8 +16011,23 @@ void precompile_set_loading(bool loading) {
     g_loading_now.store(loading);
     precompile_boost_update(loading ? "a loading screen" : "the loading screen gone");
 }
+// rc2 (gpu_internal.h): bbtest profile's shader statistics.
+void shader_stats_note(VkPipeline p, const char* kind, const std::string& name) { shader_stats_note_impl(p, kind, name); }
+
 void precompile_set_world_reached() {
     g_world_seen.store(true);
+    {  // rc2: how much the start built before the game could be played
+        const perf::CompileTotals c = perf::compile_totals();
+        host_log("precompile: before the first in-game frame: %llu graphics pipelines (%llu on the workers, %llu on the command "
+                 "processor), %llu compute (%llu, %llu), %llu shader translations (%llu, %llu); frames waited on %llu of them, %.1f ms; "
+                 "%zu still queued",
+                 static_cast<unsigned long long>(c.graphics_worker + c.graphics_cp), static_cast<unsigned long long>(c.graphics_worker),
+                 static_cast<unsigned long long>(c.graphics_cp), static_cast<unsigned long long>(c.compute_worker + c.compute_cp),
+                 static_cast<unsigned long long>(c.compute_worker), static_cast<unsigned long long>(c.compute_cp),
+                 static_cast<unsigned long long>(c.translate_worker + c.translate_cp), static_cast<unsigned long long>(c.translate_worker),
+                 static_cast<unsigned long long>(c.translate_cp), static_cast<unsigned long long>(c.waited), c.waited_us / 1000.0,
+                 precompile_backlog());
+    }
     precompile_boost_update("the first in-game frame");
 }
 
@@ -14810,6 +16055,20 @@ void stage_manifest_load(const std::string& path) {
         if (!manifest_file::read(r, *m)) break;
         stages.push_back(std::move(m));
     }
+    // rc3: the stages of pipelines a frame waited on, first (<manifest>.urgent).
+    std::size_t urgent_n = 0;
+    {
+        std::ifstream u(path + ".urgent");
+        std::string line;
+        std::lock_guard<std::mutex> lk(g_manifest.mu);
+        while (std::getline(u, line) && g_manifest.urgent.size() < 256) {
+            if (!line.empty()) g_manifest.urgent.insert(line);
+        }
+        const auto first = std::stable_partition(stages.begin(), stages.end(), [](const std::shared_ptr<const ManifestStage>& m) {
+            return m->stage < 2 && !m->name.empty() && g_manifest.urgent.count(m->name) != 0;
+        });
+        urgent_n = static_cast<std::size_t>(first - stages.begin());
+    }
     Precompiler& w = precompiler();
     {
         std::lock_guard<std::mutex> lk(g_manifest.mu);
@@ -14827,7 +16086,8 @@ void stage_manifest_load(const std::string& path) {
     }
     g_manifest.loaded.store(stages.size());
     w.cv.notify_all();
-    host_log("render: stage manifest: %zu stages from earlier runs queued for their compile", stages.size());
+    host_log("render: stage manifest: %zu stages from earlier runs queued for their compile (%zu first: a frame waited on their pipeline)",
+             stages.size(), urgent_n);
 }
 
 // The whole manifest, when stages were recorded since the last write.
@@ -14843,11 +16103,21 @@ void stage_manifest_save(const std::string& path) {
         out.u32(manifest_file::kMagic);
         out.u32(manifest_file::kVersion);
         out.u32(static_cast<std::uint32_t>(g_manifest.by_key.size()));
-        for (int pass = 0; pass < 2; ++pass) {  // stages, then paths: a reader that knows only stages stops at the first paths entry
+        // Stages, then paths: a reader that knows only stages stops at the
+        // first paths entry. rc3: the urgent stages before the rest.
+        const auto urgent = [](const ManifestStage& m) { return m.stage < 2 && !m.name.empty() && g_manifest.urgent.count(m.name) != 0; };
+        for (int pass = 0; pass < 3; ++pass) {
             for (const auto& [key, m] : g_manifest.by_key) {
-                if ((m->stage >= 2) == (pass == 1)) manifest_file::write(out, *m);
+                const int p = m->stage >= 2 ? 2 : urgent(*m) ? 0 : 1;
+                if (p == pass) manifest_file::write(out, *m);
             }
         }
+        std::ofstream u(path + ".urgent.tmp", std::ios::trunc);
+        for (const std::string& name : g_manifest.urgent) u << name << "\n";
+    }
+    {
+        std::error_code uec;
+        std::filesystem::rename(path + ".urgent.tmp", path + ".urgent", uec);
     }
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
@@ -14897,3 +16167,8 @@ bool host_gpu_draw_window(std::uint64_t dst, const void* data, std::uint32_t byt
     g_windows_given.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
+
+namespace gpu {
+// rc5b: the [cpu] lines (gpu_internal.h).
+std::string render_cp_split_section() { return cp_split_section_impl(); }
+}  // namespace gpu

@@ -160,6 +160,7 @@ struct ComputePipeline {
     bool buffer_to_image = false;  // MUBUF load + MIMG store
     int img_src_sgpr = -1;       // the source V#'s user SGPR, for buffer_to_image
     bool untraced_stores_logged = false;
+    bool cb_counted = false;  // rc5b: counted in the compute-constants line (compute_cb_line)
 };
 
 // Guest VA -> (VkBuffer, offset) for index buffers.
@@ -236,6 +237,12 @@ struct Gpu {
     std::atomic<bool> vram_short{false};
     // VK_KHR_pipeline_executable_properties enabled, for BBHOST_PIPELINE_STATS (render.cpp)
     bool pipeline_stats = false;
+    // rc2, bbtest profile: BBHOST_SHADER_STATS=<file> - every pipeline is
+    // built with VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR and no pipeline
+    // cache of ours (the flag is in the driver's cache key), and its
+    // statistics are appended to that file (render.cpp shader_stats_note).
+    // Never set on a normal launch.
+    bool shader_stats = false;
     // shaderFloat16 and shaderInt16 enabled: the host's own shaders may do f16
     // math (the half-precision FSR 1, fsr.cpp).
     bool has_f16_math = false;
@@ -306,8 +313,10 @@ struct Gpu {
         std::array<void*, 4> tail_gap{};
         bool qreset = false;
         bool span = false;  // the command-buffer span pair was written
+        bool sampled = false;  // rc2: recorded during the GPU sampler's frame (gpu.cpp sampler_*)
         VkQueryPool stat_pool = VK_NULL_HANDLE;  // Gpu::profile_stats: one query per pair
         bool stat_open = false;                  // the last pair's statistics query is still active
+        std::uint32_t stat_index = 0;            // rc4: the query that is (stat_open), ended by the pair that began it
         // The GPU busy meter (gpu_busy.cpp, on unless BBHOST_GPU_BUSY=0): a
         // timestamp at the command buffer's start and one at its end, read
         // once the slot retired. `busy_written`: this recording wrote both.
@@ -337,6 +346,11 @@ struct Gpu {
     std::map<VkBuffer, std::uint32_t> scratch_users;
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkPipelineLayout pipe_layout = VK_NULL_HANDLE;         // compute: one set
+    // rc5b: the game's compute shaders, with their constant buffers bound
+    // (compute_cb_on): set_layout plus the storage-buffer bindings when those
+    // went to the push set (cb_push_on); set_layout / pipe_layout otherwise.
+    VkDescriptorSetLayout cs_set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout cs_pipe_layout = VK_NULL_HANDLE;
     VkPipelineLayout gfx_pipe_layout = VK_NULL_HANDLE;     // graphics: set 0 VS, set 1 PS
     VkDescriptorPool desc_pool = VK_NULL_HANDLE;
     VkPipelineCache cache = VK_NULL_HANDLE;
@@ -446,6 +460,10 @@ struct Gpu {
     // =2 also charges the time between pairs to what was recorded in it
     // (profile_gap_ns, by recording sites).
     bool profile = false;
+    // rc2: BBHOST_GPU_PROFILE asked for (profile is also on for the sampler's
+    // one frame every ~10 s), and the sampler's query pools exist.
+    bool profile_env = false;
+    bool profile_pools = false;
     bool profile_gaps = false;
     bool profile_passes = false;  // BBHOST_GPU_PROFILE=3: a pair a render pass, not a draw (render.cpp)
     // BBHOST_GPU_PROFILE=3 (or =1 with BBHOST_GPU_PROFILE_STATS=1) where the
@@ -453,6 +471,8 @@ struct Gpu {
     // invocations, primitives into and out of clipping, fragment-shader
     // invocations), summed by name like profile_ns.
     bool profile_stats = false;
+    bool sample_stats = false;  // rc4: profile_stats for the GPU sampler's frames (BBHOST_GPU_SAMPLE_STATS=0: off)
+    bool debug_labels = false;  // rc4: VK_EXT_debug_utils labels at each render pass for RGP (BBHOST_RGP_LABELS=1)
     std::map<std::string, std::array<std::uint64_t, 6>> profile_stats_sum;
     std::map<std::array<void*, 4>, std::pair<std::uint64_t, std::uint64_t>> profile_gap_ns;
     float timestamp_period_ns = 1.0f;
@@ -503,6 +523,12 @@ inline void draw_failed(DrawFail why) {
 extern std::atomic<bool> g_cache_divert;
 extern std::atomic<int> g_cache_users;
 extern std::atomic<std::uint64_t> g_cache_diverted;  // creations that took the side cache
+// rc2 (bbtest profile, g.shader_stats): the creation flag and the cache a
+// pipeline is built with, and its statistics into the shader-stats file.
+inline VkPipelineCreateFlags shader_stats_flags() { return g.shader_stats ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0; }
+inline VkPipelineCache shader_stats_cache(VkPipelineCache c) { return g.shader_stats ? VK_NULL_HANDLE : c; }
+void shader_stats_note(VkPipeline p, const char* kind, const std::string& name);
+
 struct PipelineCacheUse {
     VkPipelineCache cache = VK_NULL_HANDLE;
     bool main = false;
@@ -572,6 +598,12 @@ std::string staging_pool_stats();  // "chunks created N, uploads placed M"
 // The same for an image and its views: avoids a vkDeviceWaitIdle per surface
 // whose memory the game re-used, which cost most of a world load's GPU time.
 void defer_destroy_image(VkImage image, VkDeviceMemory memory);
+// bbhost-vk Phase 5: a 2D single-mip view of `image` for one of the renderer's
+// own passes (the motion pass's depth and velocity, FSR 4.1.1's inputs), kept
+// from frame to frame instead of made and destroyed each frame. Forgotten
+// (and destroyed deferred) when the image goes through defer_destroy_image,
+// so a view never outlives its image. VK_NULL_HANDLE when it cannot be made.
+VkImageView pass_view_locked(VkImage image, VkFormat format, VkImageAspectFlags aspect);
 // Device-local memory for sampled textures (gpu.cpp image heap): carved out
 // of 256 MiB blocks instead of one vkAllocateMemory - a kernel call - per
 // texture, which was ~10% of the command processor in frames where new
@@ -609,6 +641,20 @@ std::uint32_t alloc_params_slot_locked(const gcn::StageParams& params, VkDescrip
 VkDescriptorSet alloc_set_locked(VkDescriptorSetLayout layout = VK_NULL_HANDLE);  // the shared layout when null
 bool rebuild_page_tables();
 bool create_dev_buffer(DevBuffer& b, std::uint64_t size, bool host_visible, bool cached = false);  // cached: host-cached memory, for readbacks
+// rc5: the snapshot [walks] line `page_tables: vram= system=` (where the page tables were put; gpu.cpp create_table_buffer).
+std::string page_tables_line();
+// rc5b: constant buffers of the game's compute shaders through storage-buffer
+// bindings (TranslateOptions::cb_ssbo), on unless BBHOST_CS_CB=0 or
+// BBHOST_CB_SSBO=0. compute_cb_line: the [walks] line.
+bool compute_cb_on();
+std::string compute_cb_line();
+// rc5b: guest memory the GPU writes in the current recording, which a
+// compute shader's constant buffer then never binds over (it takes the
+// page-table walk, as before). taint: a write whose range is not known.
+void gpu_write_note_locked(std::uint64_t va, std::uint64_t bytes);
+void gpu_write_taint_locked();
+// rc5b: the snapshot [cpu] lines `cp_split:` / `cp_split_total:` (render.cpp, the sampled section split).
+std::string render_cp_split_section();
 std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags want);
 bool extract_program(std::uint64_t code_va, std::vector<std::uint32_t>& words, std::string& name);
 // A GX shader creator ran (render.cpp; host_gpu_note_shader_created).
@@ -755,6 +801,7 @@ struct RtImage {
     std::uint64_t base = 0;
     bool depth = false;
     bool storage = false;      // created with STORAGE usage (a depth snapshot: depth_copy_record_locked writes it)
+    bool upscaler_storage = false;  // test4: STORAGE for FSR 3.1 to write it directly (fsr3_target_storage_wanted)
     bool initialised = false;  // layout moved to GENERAL
     // Depth targets: the HTILE metadata buffer (DB_HTILE_DATA_BASE). The
     // engine clears depth by filling HTILE; the next draw that binds the
@@ -868,7 +915,8 @@ extern std::uint64_t g_draw_rec_next;
 // thread under `opt_key`; adopt_optimized_compute swaps it in. `watch`: the
 // name the watchdog lists it under while it compiles.
 VkPipeline first_compute_pipeline(VkShaderModule module, std::uint64_t opt_key, const std::string& name,
-                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch);
+                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch,
+                                  VkPipelineLayout layout = VK_NULL_HANDLE);  // null: g.pipe_layout
 // A stand-in's optimized pipeline, when it is built: true when `pipeline` now
 // is it (and `standin` false). Cheap when nothing new was built since `seen`.
 bool adopt_optimized_compute(std::uint64_t opt_key, VkPipeline& pipeline, bool& standin, std::uint64_t& seen);
@@ -894,6 +942,25 @@ void busy_end_locked(Gpu::Slot& sl);               // its last, before vkEndComm
 void busy_submitted_locked(Gpu::Slot& sl);         // it is on its way to the queue
 void busy_retired_locked(Gpu::Slot& sl, bool ok);  // its fence signalled (ok), or it never will
 std::string busy_exit_report();                    // the whole run's line, for host_gpu_report
+// test7: the idle-gap instrumentation (gpu.cpp): whether game submission
+// `serial` found the GPU idle at vkQueueSubmit, and what ended its recording.
+bool submit_record(std::uint64_t serial, void** site);
+bool submit_had_occlusion(std::uint64_t serial);  // rc3: the submission ended with an occlusion resolve
+struct SubmitLatencyTotals {
+    std::uint64_t n = 0, starved = 0;
+    std::uint64_t record_ns = 0, queue_ns = 0, submit_ns = 0;  // hand-over -> recorded -> vkQueueSubmit -> returned
+    std::uint64_t record_max = 0, queue_max = 0, submit_max = 0;  // since the last call
+    std::uint64_t flushes = 0, flush_ns = 0;  // flush_locked: the command processor waiting for the GPU
+    std::uint64_t splits = 0;                 // BBHOST_SUBMIT_SPLIT submissions
+    std::uint64_t batch_submits = 0, batch_jobs = 0;   // BBHOST_SUBMIT_BATCH: merged vkQueueSubmits and the jobs in them
+    std::uint64_t batch_holds = 0, batch_hold_ns = 0;  // jobs held while the GPU had two ahead, and for how long
+};
+// test7c: the fence covering a slot's submission (its own, or its batch's;
+// null once that has retired), and whether it has signalled. Under g.mu.
+VkFence slot_fence(const Gpu::Slot& sl);
+bool slot_fence_signaled(const Gpu::Slot& sl);
+SubmitLatencyTotals submit_latency_totals();
+void submit_split_point();  // a draw's start, outside g.mu (BBHOST_SUBMIT_SPLIT)
 struct DrawCall;
 bool glitch_on();
 VkQueryControlFlags glitch_query_flags();                     // precise when the device has it
@@ -915,7 +982,7 @@ void occlusion_device_ready_locked();     // after the slots are made
 void occlusion_begin_recording_locked();  // a recording's first commands
 bool occlusion_draw_entry();              // host_gpu_draw's start: false when SET_PREDICATION culls the draw
 void occlusion_draw_locked(DrawCall& call);
-void occlusion_submit_locked();  // before the submission's label writes
+bool occlusion_submit_locked();  // before the submission's label writes; rc3: whether the recording resolved occlusion on the GPU
 void occlusion_record_cond(VkCommandBuffer cmd, const DrawCall& call, bool begin);
 std::string occlusion_report(bool totals);
 // BBHOST_GLITCH_WATCH=<pipeline prefix>[,...]: the guest ranges those
@@ -982,10 +1049,19 @@ struct KeyStage {
     std::vector<std::pair<std::uint32_t, bool>> dims;  // parallel to paths_for's images
     std::vector<bool> modes;                           // parallel to its samplers
     std::vector<Words> images, samplers;
+    // vk.1-rc7: the stage memo (resolve_key_stage). Set when every binding of
+    // the last resolution came from its GX record through `memo_plan`, so the
+    // words above are those records' bytes; a draw whose plan is the same and
+    // whose records hold the same bytes gets the same lists.
+    const void* memo_paths = nullptr;
+    const void* memo_plan = nullptr;
+    bool memo_ok = false;
 };
 // Fills `out` for a stage; `paths` is null for a stage without a program. The
-// vectors keep their storage from draw to draw.
-void resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out);
+// vectors keep their storage from draw to draw. True when `out` was left as
+// it was because the same inputs gave it (the stage memo,
+// BBHOST_CP_STAGE_CACHE=0 turns it off): dims and modes are unchanged then.
+bool resolve_key_stage(const gcn::TranslateResult* paths, const std::uint32_t* stage_user, const GxStageRecords* gx, KeyStage& out);
 // True when `meta`, a pipeline's translation, lists the image and sampler
 // bindings of `paths` in the same order.
 bool key_stage_matches(const gcn::TranslateResult& meta, const gcn::TranslateResult& paths);
@@ -1225,6 +1301,10 @@ bool render_copy_target_locked(std::uint64_t src_base, std::uint64_t dst_base, s
 // The command buffer being recorded, once the recorder has replayed every
 // block handed to it: whatever records next lands after them. Under g.mu.
 VkCommandBuffer g_cmd();
+// rc4, BBHOST_RGP_LABELS=1 (debugging only): a VK_EXT_debug_utils label
+// inserted at each render pass, named by its first draw's pipeline, for RGP
+// and other capture tools. In place (g_cmd()), as the profiler's pairs are.
+void debug_label_locked(const std::string* name);
 // BBHOST_GPU_PROFILE=2: a recording site (g_cmd()'s caller) noted for the gap
 // the next profiled draw or dispatch closes.
 void profile_note_site_locked(void* site);
@@ -1235,6 +1315,10 @@ std::string recorder_report();
 // them and hands their submissions to bb-submit, and rec() appends ops
 // (BBHOST_STREAM_SUBMIT, on unless 0, and the recorder on).
 bool stream_on();
+// rc3: grows with every op appended to the stream and every in-place
+// recording (under g.mu): the presenter's priority submit checks its blit
+// added nothing to the game's recording.
+std::uint64_t stream_activity();
 // Until submission `serial` has gone to the queue (or failed): a fence the
 // command processor waits for must have been submitted. Under g.mu.
 void stream_wait_submitted(std::uint64_t serial);

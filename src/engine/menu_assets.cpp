@@ -33,7 +33,7 @@ using Bytes = std::vector<std::uint8_t>;
 
 // Bumped whenever a generator or the recipe changes, so installs remake their
 // assets instead of keeping the last generation.
-constexpr int kGeneratorVersion = 8;  // 8: PC Enhancements' three rows; 7: the PC Enhancements section; 6: event text (group 30) for the altar's rebirth
+constexpr int kGeneratorVersion = 9;  // 9: bbhost-vk's PC Upscaling and Upscaling Quality sections; 8: PC Enhancements' three rows; 7: the PC Enhancements section; 6: event text (group 30) for the altar's rebirth
 
 const char kMessagesTsv[] =
 #include "pc_option_messages.inc"
@@ -42,6 +42,9 @@ const char kMessagesTsv[] =
 struct Fail {
     std::string why;
 };
+
+// Whether the last movie made has bbhost-vk's two sections (build_option_movie).
+bool g_vk_sections = false;
 
 std::uint16_t u16(const Bytes& b, std::size_t i) {
     if (i + 2 > b.size()) throw Fail{"truncated"};
@@ -790,6 +793,33 @@ Bytes build_option_movie(const Bytes& src) {
     section("PCCamera", 121020, 388, 4, 0, {"Item_4_0", "Item_5_0"});
     section("PCDeck", 123020, 389, 2, 0, {"Item_2_0", "Item_3_0", "Item_4_0", "Item_5_0"});
     section("PCEnhance", 124020, 390, 3, 0, {"Item_3_0", "Item_4_0", "Item_5_0"});
+    // bbhost-vk (docs/vk/PLAN.md, Phase 0): PC Upscaling - two toggles and
+    // the upscaler's pick list, PC Enhancements' shape plus a list - and
+    // Upscaling Quality - the sharpness slider and the quality's pick list,
+    // Steam Deck's shape. Two sections because a section takes one pick list,
+    // on its last row (engine/option_menu.cpp). Made after the stock eight and
+    // on their own: a dump these do not fit still gets the stock movie, and
+    // the System menu then leaves their rows out (menu_assets_vk_sections).
+    g_vk_sections = false;
+    {
+        const Bytes stock = m;
+        try {
+            auto depth_free = [&](int depth) {
+                for (const Tag& t : tags(m, body_start(m), m.size())) {
+                    if (t.code != kPlace2 && t.code != kPlace3) continue;
+                    if (placement(m, t.code, t.s).depth == depth) throw Fail{"main-timeline depth " + std::to_string(depth) + " is taken"};
+                }
+            };
+            depth_free(391);
+            section("PCUpscale", 125020, 391, 3, 0, {"Item_3_0", "Item_4_0", "Item_5_0"});
+            depth_free(392);
+            section("PCUpQuality", 126020, 392, 2, 0, {"Item_2_0", "Item_3_0", "Item_4_0", "Item_5_0"});
+            g_vk_sections = true;
+        } catch (const Fail& f) {
+            m = stock;
+            host_log("menu assets: the PC Upscaling sections were not made (%s); the System menu leaves them out", f.why.c_str());
+        }
+    }
     return add_scrollbar(m, "Top", 1290, 354.5);
 }
 
@@ -1136,6 +1166,7 @@ const char kMovie[] = "dvdroot_ps4/menu/optionsetting.gfx";
 // (engine/option_menu.cpp); the DLC edition uses the second.
 const char* const kTitleMovies[] = {"dvdroot_ps4/menu/title.gfx", "dvdroot_ps4/menu/title_dlc.gfx"};
 const char kMessageDir[] = "dvdroot_ps4/msg";
+std::string g_generated_movie;  // the movie menu_assets_ensure made or kept
 const char kMessageFile[] = "menu.msgbnd.dcx";
 
 }  // namespace
@@ -1190,6 +1221,10 @@ bool menu_assets_ensure() {
     bool fresh = have && std::string(have->begin(), have->end()) == stamp && fs::exists(out / kMovie);
     for (const auto& [rel, src] : langs) fresh = fresh && fs::exists(out / rel);
     for (const auto& [rel, src] : titles) fresh = fresh && fs::exists(out / rel);
+    // bbhost-vk: whether that movie has the PC Upscaling sections, beside the stamp.
+    const auto vk = read_file(out / "vk-sections");
+    fresh = fresh && vk && !vk->empty();
+    if (fresh) g_vk_sections = (*vk)[0] == '1';
     if (!fresh) {
         try {
             const Bytes movie = build_option_movie(*movie_src);
@@ -1217,7 +1252,9 @@ bool menu_assets_ensure() {
                     host_log("menu assets: %s not made: %s", rel.c_str(), f.why.c_str());
                 }
             }
-            if (!write_file(out / "stamp", Bytes(stamp, stamp + std::strlen(stamp)))) {
+            const char vk_flag = g_vk_sections ? '1' : '0';
+            if (!write_file(out / "vk-sections", Bytes(1, static_cast<std::uint8_t>(vk_flag))) ||
+                !write_file(out / "stamp", Bytes(stamp, stamp + std::strlen(stamp)))) {
                 host_log("menu assets: cannot write %s", out.string().c_str());
                 return false;
             }
@@ -1232,5 +1269,15 @@ bool menu_assets_ensure() {
         }
     }
     hle_fs_set_generated_root(out.string().c_str());
+    g_generated_movie = (out / kMovie).string();
     return true;
+}
+
+bool menu_assets_vk_sections() {
+    if (!g_vk_sections || g_generated_movie.empty()) return false;
+    // A player's own optionsetting.gfx (paths.mods) wins over the generated
+    // one, and has no PC Upscaling sprites to open.
+    const std::string served = hle_fs_overlay_file("/dvdroot_ps4/menu/optionsetting.gfx");
+    std::error_code ec;
+    return !served.empty() && fs::equivalent(served, g_generated_movie, ec) && !ec;
 }

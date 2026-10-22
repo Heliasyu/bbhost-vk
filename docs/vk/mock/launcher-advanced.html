@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset="utf-8"><title>bbhost-vk launcher mockup: Advanced</title><style>
+:root{--bg:#0a0c11;--panel:#10131a;--card:#161a23;--line:#252b37;--text:#dde2ea;--muted:#858fa0;--gold:#a9bfe3;--blood:#8e1b2a}
+*{box-sizing:border-box}body{margin:0;width:1280px;height:800px;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:14px "Segoe UI","Noto Sans",sans-serif;overflow:hidden}
+.brand{font:22px Georgia,serif;color:var(--gold);letter-spacing:2px}.sub{color:var(--muted);font-size:12px;padding:0 0 4px}
+.top{display:flex;align-items:flex-end;justify-content:space-between;padding:18px 28px 0}
+.tabs{display:flex;padding:14px 20px 0;border-bottom:1px solid var(--line);gap:2px}.tabs div{padding:10px 11px;font-size:13px;white-space:nowrap;color:var(--text);border:1px solid transparent;border-bottom:none;border-radius:4px 4px 0 0}
+.tabs .on{background:var(--panel);color:var(--gold);border-color:var(--line);border-top:2px solid var(--gold);margin-bottom:-1px}
+.main{flex:1;background:var(--panel);display:flex;flex-direction:column;min-height:0}.content{flex:1;padding:22px 34px;overflow:hidden}
+h1{font:28px Georgia,serif;margin:0}.lead{color:var(--muted);margin:4px 0 12px}
+h2{font:17px Georgia,serif;color:var(--gold);margin:16px 0 6px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;gap:16px}.row .l small{display:block;color:var(--muted);font-size:12px;max-width:330px}
+.dd{min-width:240px;background:var(--card);border:1px solid var(--line);padding:6px 12px;border-radius:3px;display:flex;justify-content:space-between;white-space:nowrap}.dd:after{content:"▾";color:var(--gold);margin-left:10px}
+.sl{width:240px;display:flex;align-items:center;gap:10px;flex:none}.tr{flex:1;height:4px;background:var(--line);position:relative}.tr i{position:absolute;left:0;top:0;height:4px;background:var(--gold)}.tr b{position:absolute;top:-6px;width:14px;height:14px;border-radius:50%;background:var(--gold);margin-left:-7px}.sl span{width:44px;text-align:right;color:var(--text)}
+.tg{width:42px;height:22px;border-radius:11px;background:var(--gold);position:relative;flex:none}.tg:after{content:"";position:absolute;right:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#10131a}.tg.off{background:var(--line)}.tg.off:after{left:3px;right:auto;background:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);padding:10px 14px;border-radius:3px;display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:12px}.card small{color:var(--muted);font-size:12px}
+.ok{color:#8fbf6a}.warn{color:#d6a84a}.btn{border:1px solid var(--gold);color:var(--gold);padding:6px 14px;border-radius:3px;white-space:nowrap}.btn.dim{border-color:var(--line);color:var(--muted)}
+.cols{display:flex;gap:40px}.cols>div{flex:1;min-width:0}
+.bar{height:72px;background:var(--bg);display:flex;align-items:center;padding:0 24px;gap:12px;flex:none}.st{flex:1;color:var(--muted)}
+.play{background:var(--blood);color:#f1e9ec;font:bold 20px Georgia,serif;padding:12px 46px;letter-spacing:2px}.stop{border:1px solid var(--line);padding:10px 18px;color:var(--muted)}
+.field{flex:1;background:var(--card);border:1px solid var(--line);padding:6px 10px;border-radius:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.field.ph{color:#5d6676}
+.prow{display:flex;gap:8px;align-items:center;margin:4px 0}.plabel{margin-top:8px}.plabel small{color:var(--muted);font-size:12px}
+.stl{font-size:13px;margin:3px 0 2px}.note{color:var(--muted);font-size:12px;margin-top:8px}
+.dim{opacity:.45}.btns{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.item{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:6px 0;border-bottom:1px solid #1b202a}.item .l small{display:block;color:var(--muted);font-size:12px}.item:last-child{border-bottom:none}
+.tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:1px 6px;margin-left:6px}
+.plug{background:var(--card);border:1px solid var(--line);border-radius:3px;padding:8px 12px;margin-top:6px}.plug .h{display:flex;justify-content:space-between;align-items:center}.plug small{color:var(--muted);font-size:12px}
+.sub2{font-size:12px;color:var(--gold);margin:6px 0 2px;letter-spacing:.5px}
+</style></head><body>
+<!-- bbhost-vk Phase L mockup (docs/vk/PLAN.md). Only settings bbhost has; values are examples. -->
+<div class="top"><div><div class="brand">BLOODBORNE</div></div><div class="sub">bbhost-vk v0.2.18-vk · based on bbhost · F10 in the game opens the same settings</div></div>
+<div class="tabs"><div>Play</div><div>Display &amp; frame rate</div><div>Upscaling</div><div>Graphics &amp; effects</div><div>Camera &amp; input</div><div>PC enhancements</div><div>Patches &amp; plugins</div><div>Online &amp; account</div><div>Game files</div><div class="on">Advanced</div></div><div class="main"><div class="content">
+<h1>Advanced</h1><div class="lead">Start-up, updates and the rest. Each saves to bbhost.toml or the F10 settings, as today.</div>
+<div class="cols"><div><h2>Start-up</h2><div class="row "><div class="l">Show this window every time bbhost starts<small>Or start bbhost with --setup to open it once.</small></div><div class="tg"></div></div><div class="row "><div class="l">Skip company logos<small>The three logos before the title screen, and the Exit Game warning.</small></div><div class="tg"></div></div><div class="row "><div class="l">Debug camera<small>Lance McDonald's free camera: hold Interact (E), press L3 (Left Ctrl). Requires a restart; the debug menu's LOAD TEST crashes while it is on.</small></div><div class="tg off"></div></div><h2>Text input</h2><div class="row "><div class="l">Typing in the game's text boxes<small>type: a box over the game (Enter accepts, Escape cancels) · auto: the name is answered with the name below. [player] ime</small></div><div class="dd">type</div></div><div class="row"><div class="l">Character name the name box starts from<small>[player] name</small></div><div class="field" style="max-width:240px">Hunter</div></div></div><div><h2>Updates</h2><div class="row "><div class="l">Check for a newer bbhost at start</div><div class="tg off"></div></div><div class="note" style="margin:0 0 6px">When there is one, this window and F10 › UPDATES say so, with a button that opens its release page.</div><div class="plabel">GitHub token file <small>only while the releases are private</small></div><div class="prow"><div class="field ph"></div><div class="btn">Browse…</div></div><div class="sub2" style="margin-top:14px">DIAGNOSTICS</div><div class="card"><div>Test switches are environment variables<br><small>BBHOST_* (docs/vk/TESTING.md, "bbhost's own debug switches") · the upscaler's debug toggles are on Upscaling</small></div></div></div></div>
+</div><div class="bar"><div class="st">Game 1.09 · FSR 3.1 Quality · 2560×1440 → 3840×2160 · 120 fps · online: thehuntersdream.com</div><div class="stop">Save</div><div class="stop">Quit</div><div class="play">PLAY</div></div></div>
+</body></html>

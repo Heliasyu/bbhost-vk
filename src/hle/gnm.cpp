@@ -9,6 +9,7 @@
 #include "hle/hle.h"
 #include "core/imports.h"
 #include "hle/modules.h"
+#include "host/flip_trace.h"
 #include "host/frame_stats.h"
 #include "host/gpu.h"
 #include "hle/platform.h"
@@ -366,12 +367,16 @@ GUEST_ABI int hle_gnm_submit(unsigned count, void** dcb, unsigned* dcb_bytes, vo
 }
 GUEST_ABI int hle_gnm_submit_flip(unsigned count, void** dcb, unsigned* dcb_bytes, void** ccb, unsigned* ccb_bytes,
                                  int handle, int buffer, unsigned, std::int64_t arg) {
+    const std::uint64_t trace = fliptrace::submit_begin();  // BBHOST_FLIP_TRACE (0: off)
     hle_gnm_submit_async(0, collect_submit(count, dcb, dcb_bytes),
-                         [handle, buffer, arg] {
+                         [handle, buffer, arg, trace] {
+                             fliptrace::cp_flip(trace, false);
                              hle_video_finish_flip(handle, buffer, arg, true);  // the job's commands are recorded
+                             fliptrace::cp_flip(trace, true);
                              post_gnm_eop();
                          },
                          collect_ce(count, ccb, ccb_bytes));
+    fliptrace::submit_end(trace);
     // Diagnostic: watch the SprjScaleform singleton's resident-resource
     // loader (*(singleton+8)) and the "resident load complete" flag
     // (byte at 0x5962878+0x32) across the first flips, to see whether the
@@ -526,6 +531,7 @@ GUEST_ABI int hle_gnm_submit_flip(unsigned count, void** dcb, unsigned* dcb_byte
         const std::string prof = host_gpu_profile_report();
         if (!prof.empty()) host_log("  gpu profile:%s", prof.c_str());
         if (const std::string busy = host_gpu_busy_report(); !busy.empty()) host_log("  %s", busy.c_str());
+        if (const std::string idle = host_gpu_idle_report(); !idle.empty()) host_log("  %s", idle.c_str());
         host_log("  fill: %s", host_gpu_fill_stats().c_str());
         // The guest's clock reads and sync slow paths a second (hle/kernel.cpp),
         // and the pacing: the frame limiter's margin and spin

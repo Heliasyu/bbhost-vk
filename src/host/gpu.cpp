@@ -3,6 +3,9 @@
 #include "core/portable.h"
 #include "host/foreign_hooks.h"
 #include "host/gpu_internal.h"
+#include "host/fsr4_pass.h"
+#include "host/perf_capture.h"
+#include "host/settings.h"
 #include "host/shader_patch.h"
 #include "host/translation_cache.h"
 
@@ -39,6 +42,7 @@
 #include <linux/udmabuf.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #endif
 
@@ -67,6 +71,7 @@ const bool g_render_min = [] {
 }();
 
 std::vector<std::string> g_instance_exts;
+PFN_vkCmdInsertDebugUtilsLabelEXT g_insert_label = nullptr;  // rc4: BBHOST_RGP_LABELS
 bool g_want_present = false;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -94,6 +99,55 @@ const bool g_import_whole = [] {
 }();
 std::atomic<std::uint64_t> g_imports_made{0}, g_imports_merged{0}, g_import_bytes{0}, g_import_us{0};
 
+// rc5b: compute constant buffers (compute_cb_on), set at device creation.
+bool g_cs_cb = false;
+// Guest memory the GPU writes in the recording g_gpu_writes_serial names
+// (gpu_write_note_locked), under g.mu. Past kMaxGpuWrites ranges, or after
+// a write whose range is not known, the whole recording counts as written.
+constexpr std::size_t kMaxGpuWrites = 512;
+std::vector<std::pair<std::uint64_t, std::uint64_t>> g_gpu_writes;  // [lo, hi)
+std::uint64_t g_gpu_writes_serial = ~0ull;
+bool g_gpu_writes_all = false;
+// The [walks] compute_cb line: per buffer resolve, why it took the walk.
+enum CsCbOutcome { kCsBound, kCsNoBase, kCsIndexed, kCsUnaligned, kCsWritten, kCsCopyVersion, kCsUnmapped, kCsTooLong, kCsOutcomes };
+std::atomic<std::uint64_t> g_cs_cb_outcomes[kCsOutcomes]{};
+std::atomic<std::uint64_t> g_cs_cb_pipelines{0}, g_cs_cb_pipeline_buffers{0}, g_cs_cb_pipelines_seen{0};
+std::atomic<std::uint64_t> g_cs_cb_dispatches{0}, g_cs_cb_dispatches_all{0};
+void gpu_writes_sync_locked() {
+    if (g_gpu_writes_serial == g.record_serial) return;
+    g_gpu_writes_serial = g.record_serial;
+    g_gpu_writes.clear();
+    g_gpu_writes_all = false;
+}
+// A guest range as the memory it is: direct memory by its physical address
+// (a CPU address and its GPU alias are the same bytes), anything else by its
+// address. False when the range leaves its mapping (taken as written).
+bool memory_range_key(std::uint64_t va, std::uint64_t bytes, std::uint64_t& lo, std::uint64_t& hi) {
+    for (const GuestMapInfo& mi : g.maps) {
+        if (va < mi.va || va - mi.va >= mi.len) continue;
+        if (bytes > mi.len - (va - mi.va)) return false;
+        const bool phys = mi.dmem && mi.phys >= 0;
+        lo = phys ? (1ull << 62) | (static_cast<std::uint64_t>(mi.phys) + (va - mi.va)) : va;
+        hi = lo + bytes;
+        return true;
+    }
+    lo = va;  // outside what the GPU maps: its own address
+    hi = va + bytes;
+    return hi >= lo;
+}
+// Whether [va, va + bytes) may have been written by the GPU earlier in the
+// current recording.
+bool gpu_written_locked(std::uint64_t va, std::uint64_t bytes) {
+    gpu_writes_sync_locked();
+    if (g_gpu_writes_all) return true;
+    std::uint64_t lo = 0, hi = 0;
+    if (!memory_range_key(va, bytes, lo, hi)) return true;
+    for (const auto& w : g_gpu_writes) {
+        if (lo < w.second && w.first < hi) return true;
+    }
+    return false;
+}
+
 // ---- The submission thread (BBHOST_SUBMIT_THREAD, on unless 0) ----
 // vkQueueSubmit off the command processor. The kernel's half of a submission
 // grows with the buffers it has to make resident - all of them, since shaders
@@ -105,7 +159,7 @@ std::atomic<std::uint64_t> g_imports_made{0}, g_imports_merged{0}, g_import_byte
 // QueueGuard. A failed submission is passed back (g_sub_failed) and handled on
 // the command processor as before: no more GPU execution.
 struct SubmitJob {
-    VkCommandBuffer cmds[2] = {};
+    VkCommandBuffer cmds[3] = {};  // rc4: a third for the presenter's blit riding the flip's last submission
     std::uint32_t ncmds = 0;
     VkSemaphore wait = VK_NULL_HANDLE;
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -136,9 +190,79 @@ std::atomic<std::uint64_t> g_stream_submitted{0};
 std::atomic<std::uint64_t> g_foreign_submitted{0};
 constexpr std::uint64_t kForeignTicket = 1ull << 63;  // host_gpu_submit_presenter's tickets for a kForeignSubmit
 
+// rc4: the presenter's blit riding the flip's last game submission (under
+// g_sub_mu; host_gpu_submit_presenter_priority). The presenter offers it while
+// that submission has not reached vkQueueSubmit; submit_job_now, submitting
+// the game job whose serial + 1 is `need`, appends the blit's command buffer
+// and its semaphore to signal and takes it. The blit then runs in the same
+// kernel job as the frame it shows, straight after it, instead of as a job of
+// its own ~40 us long - after which the GPU sat idle with the next frame's
+// work queued (rc3: 28% of the idle-with-queued time came after the blit).
+// Nothing is held back: the blit could not start before that job anyway.
+struct BlitRider {
+    bool armed = false, taken = false, done = false;
+    std::uint64_t need = 0;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkSemaphore signal = VK_NULL_HANDLE;
+    VkResult result = VK_SUCCESS;
+};
+BlitRider g_rider;
+
+std::atomic<std::uint64_t> g_cp_flushes{0}, g_cp_flush_ns{0}, g_submit_splits{0};
+std::atomic<std::uint64_t> g_reset_first_cmdbufs{0};  // rc4: command buffers begun with their resets first (BBHOST_RESET_ORDER)
+// ---- test7: where the GPU's idle time between command buffers comes from ----
+// Per game submission (by serial, kSubRing deep - slots are reused after 16):
+// when the command processor handed it over (submit_locked), when the
+// recorder had replayed it (stream_submit_job), whether the previous game
+// submission had already finished when this one reached vkQueueSubmit (the
+// GPU ran dry: the gap before it was ours to fill - "CPU late"), and what
+// ended its recording (submit_locked's caller, or flush_locked's: a CPU wait
+// for the GPU). gpu_busy.cpp's "gpu idle:" line sorts the gaps by these.
+constexpr std::uint64_t kSubRing = 64;
+std::atomic<std::uint64_t> g_sub_handover_ns[kSubRing];
+std::atomic<std::uint64_t> g_sub_recorded_ns[kSubRing];
+std::atomic<std::uint8_t> g_sub_starved[kSubRing];
+std::atomic<void*> g_sub_site[kSubRing];
+std::atomic<std::uint8_t> g_sub_occl[kSubRing];  // rc3: it ended with an occlusion resolve
+VkFence g_last_game_fence = VK_NULL_HANDLE;  // the previous game submission's (submit_job_now's callers run one at a time)
+// test7c, BBHOST_SUBMIT_BATCH: the serial whose fence covers this one's - its
+// own, or the last of the vkQueueSubmit it was merged into (slot_fence).
+// Reset to its own at hand-over (submit_locked), set by bb-submit before the
+// submission is published (g_stream_submitted), so a reader that waited for
+// that sees it.
+std::atomic<std::uint64_t> g_fence_owner[kSubRing];
+// g.completed_submits for bb-submit, which holds no g.mu: set as a slot's
+// fence is seen signalled, before the command processor resets it.
+std::atomic<std::uint64_t> g_completed_atomic{0};
+std::atomic<std::uint64_t> g_batch_submits{0}, g_batch_jobs{0}, g_batch_holds{0}, g_batch_hold_ns{0};
+struct SubLatency {
+    std::atomic<std::uint64_t> n{0}, starved{0}, record_ns{0}, record_max{0}, queue_ns{0}, queue_max{0}, submit_ns{0}, submit_max{0};
+} g_sub_lat;
+void bump_max(std::atomic<std::uint64_t>& m, std::uint64_t v) {
+    std::uint64_t cur = m.load(std::memory_order_relaxed);
+    while (v > cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+    }
+}
+thread_local void* t_flush_site = nullptr;  // flush_locked's caller, for submit_locked to record
+
 // One job to the queue, under its lock; a failure is kept for the command
 // processor (take_submit_failure_locked).
-void submit_job_now(const SubmitJob& job) {
+void submit_job_now(const SubmitJob& job_in) {
+    SubmitJob rode_job;
+    const SubmitJob* jp = &job_in;
+    bool rode = false;
+    if (job_in.serial != ~0ull && !job_in.signal && !job_in.foreign && job_in.ncmds < 3) {
+        std::lock_guard<std::mutex> lk(g_sub_mu);
+        if (g_rider.armed && !g_rider.taken && job_in.serial + 1 == g_rider.need) {
+            rode_job = job_in;
+            rode_job.cmds[rode_job.ncmds++] = g_rider.cmd;
+            rode_job.signal = g_rider.signal;
+            g_rider.taken = true;
+            rode = true;
+            jp = &rode_job;
+        }
+    }
+    const SubmitJob& job = *jp;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = job.ncmds;
     si.pCommandBuffers = job.cmds;
@@ -152,35 +276,178 @@ void submit_job_now(const SubmitJob& job) {
         si.pSignalSemaphores = &job.signal;
     }
     VkResult r;
+    const bool game = job.serial != ~0ull && g.busy;
+    std::uint64_t t_queue = 0;
+    if (game) {
+        t_queue = host_clock_monotonic_ns();
+        const std::uint64_t k = job.serial % kSubRing;
+        const bool starved = g_last_game_fence && vkGetFenceStatus(g.device, g_last_game_fence) == VK_SUCCESS;
+        g_sub_starved[k].store(starved ? 1 : 0, std::memory_order_relaxed);
+        const std::uint64_t h = g_sub_handover_ns[k].load(std::memory_order_relaxed);
+        const std::uint64_t rec_t = g_sub_recorded_ns[k].load(std::memory_order_relaxed);
+        if (h && rec_t >= h && t_queue >= rec_t) {
+            g_sub_lat.record_ns.fetch_add(rec_t - h, std::memory_order_relaxed);
+            bump_max(g_sub_lat.record_max, rec_t - h);
+            g_sub_lat.queue_ns.fetch_add(t_queue - rec_t, std::memory_order_relaxed);
+            bump_max(g_sub_lat.queue_max, t_queue - rec_t);
+        }
+        g_sub_lat.n.fetch_add(1, std::memory_order_relaxed);
+        if (starved) g_sub_lat.starved.fetch_add(1, std::memory_order_relaxed);
+    }
     {
         std::lock_guard<std::mutex> q(g.queue_mu);
         r = vkQueueSubmit(g.queue, 1, &si, job.fence);
+    }
+    if (game) {
+        const std::uint64_t d = host_clock_monotonic_ns() - t_queue;
+        g_sub_lat.submit_ns.fetch_add(d, std::memory_order_relaxed);
+        bump_max(g_sub_lat.submit_max, d);
+        g_last_game_fence = job.fence;
     }
     if (r != VK_SUCCESS) {
         int none = 0;
         g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
         g_sub_failed_items.fetch_add(job.items);
     }
+    if (rode) {
+        std::lock_guard<std::mutex> lk(g_sub_mu);
+        g_rider.result = r;
+        g_rider.done = true;
+    }
     if (job.serial != ~0ull) g_stream_submitted.store(job.serial + 1, std::memory_order_release);
     if (job.foreign) g_foreign_submitted.store(job.foreign, std::memory_order_release);
 }
 
+// test7c: game jobs merged into one vkQueueSubmit - one VkSubmitInfo with all
+// their command buffers, the first's wait, the last's fence (the others'
+// slots wait on it: g_fence_owner) - so the kernel and the GPU see one
+// submission instead of n. Only jobs with no semaphore to signal, and none
+// but the first with one to wait on.
+void submit_batch_now(const std::vector<SubmitJob>& jobs) {
+    if (jobs.size() == 1) {
+        submit_job_now(jobs[0]);
+        return;
+    }
+    const SubmitJob& last = jobs.back();
+    VkCommandBuffer cmds[32];
+    std::uint32_t n = 0, items = 0;
+    for (const SubmitJob& j : jobs) {
+        for (std::uint32_t k = 0; k < j.ncmds && n < 32; ++k) cmds[n++] = j.cmds[k];
+        items += j.items;
+    }
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = n;
+    si.pCommandBuffers = cmds;
+    if (jobs[0].wait) {
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &jobs[0].wait;
+        si.pWaitDstStageMask = &jobs[0].wait_stage;
+    }
+    const std::uint64_t t_queue = host_clock_monotonic_ns();
+    const bool starved = g_last_game_fence && vkGetFenceStatus(g.device, g_last_game_fence) == VK_SUCCESS;
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        const std::uint64_t k = jobs[i].serial % kSubRing;
+        g_sub_starved[k].store(i == 0 && starved ? 1 : 0, std::memory_order_relaxed);
+        const std::uint64_t h = g_sub_handover_ns[k].load(std::memory_order_relaxed);
+        const std::uint64_t rec_t = g_sub_recorded_ns[k].load(std::memory_order_relaxed);
+        if (h && rec_t >= h && t_queue >= rec_t) {
+            g_sub_lat.record_ns.fetch_add(rec_t - h, std::memory_order_relaxed);
+            bump_max(g_sub_lat.record_max, rec_t - h);
+            g_sub_lat.queue_ns.fetch_add(t_queue - rec_t, std::memory_order_relaxed);
+            bump_max(g_sub_lat.queue_max, t_queue - rec_t);
+        }
+        g_sub_lat.n.fetch_add(1, std::memory_order_relaxed);
+        // Covered by the last one's fence: published before g_stream_submitted below.
+        g_fence_owner[k].store(last.serial, std::memory_order_release);
+    }
+    if (starved) g_sub_lat.starved.fetch_add(1, std::memory_order_relaxed);
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> q(g.queue_mu);
+        r = vkQueueSubmit(g.queue, 1, &si, last.fence);
+    }
+    const std::uint64_t d = host_clock_monotonic_ns() - t_queue;
+    g_sub_lat.submit_ns.fetch_add(d, std::memory_order_relaxed);
+    bump_max(g_sub_lat.submit_max, d);
+    g_last_game_fence = last.fence;
+    g_batch_submits.fetch_add(1, std::memory_order_relaxed);
+    g_batch_jobs.fetch_add(jobs.size(), std::memory_order_relaxed);
+    if (r != VK_SUCCESS) {
+        int none = 0;
+        g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
+        g_sub_failed_items.fetch_add(items);
+    }
+    g_stream_submitted.store(last.serial + 1, std::memory_order_release);
+}
+
+// BBHOST_SUBMIT_BATCH (test7c): off, and stays off - rejected on hardware (t9,
+// 2026-10-18: 1% low 99.6 -> 77.1, 521 frames over 12 ms; docs/vk/DEVLOG.md).
+// Kept for measurement only; nothing turns it on but the variable.
+// 1 merges the game's jobs that are waiting together, and holds a new one
+// back while the GPU already has two of our submissions it has not finished
+// - one running and one queued behind it, so it never runs dry - letting the
+// jobs that arrive meanwhile join it. The queued gaps between command buffers
+// were ~0.5 ms a frame at ~11 submissions (t8, test7). Labels are not held
+// back the way BBHOST_SUBMIT_EVERY_JOB=0 held them: every job is still ended
+// and handed over at once, and a held job could not have started before the
+// two ahead of it finished anyway. A hold ends after 2 ms regardless.
+int submit_batch_mode() {
+    static const int mode = [] {
+        const char* e = std::getenv("BBHOST_SUBMIT_BATCH");
+        const int m = e && *e ? std::atoi(e) : 0;
+        host_log("gpu: submit batching %s", m ? "on (BBHOST_SUBMIT_BATCH=1): waiting game jobs go in one vkQueueSubmit while the GPU has two ahead"
+                                              : "off (BBHOST_SUBMIT_BATCH=1 merges waiting game jobs)");
+        return m;
+    }();
+    return mode;
+}
+bool batchable(const SubmitJob& j) { return j.serial != ~0ull && !j.foreign && !j.signal; }
+
 void submit_thread() {
     host_thread_set_name("bb-submit");
     host_thread_set_class(HostThreadClass::GpuFeed, "bb-submit");  // core/host_clock.h
+    const bool batching = submit_batch_mode() != 0;
+    // Our game submissions the GPU may not have finished: their last serial and fence.
+    std::deque<std::pair<std::uint64_t, VkFence>> ahead;
+    const auto finished = [](const std::pair<std::uint64_t, VkFence>& a) {
+        return g_completed_atomic.load(std::memory_order_acquire) > a.first || vkGetFenceStatus(g.device, a.second) == VK_SUCCESS;
+    };
+    std::vector<SubmitJob> batch;
     for (;;) {
-        SubmitJob job;
+        batch.clear();
         {
             std::unique_lock<std::mutex> lk(g_sub_mu);
             g_sub_cv.wait(lk, [] { return !g_sub_jobs.empty(); });
-            job = g_sub_jobs.front();
+            batch.push_back(g_sub_jobs.front());
             g_sub_jobs.pop_front();
             g_sub_busy = true;
         }
-        submit_job_now(job);
+        if (batching && batchable(batch[0])) {
+            while (!ahead.empty() && finished(ahead.front())) ahead.pop_front();
+            if (ahead.size() >= 2) {
+                const std::uint64_t t0 = host_clock_monotonic_ns();
+                g_batch_holds.fetch_add(1, std::memory_order_relaxed);
+                while (ahead.size() >= 2 && host_clock_monotonic_ns() - t0 < 2000000) {
+                    vkWaitForFences(g.device, 1, &ahead.front().second, VK_TRUE, 100000);  // 0.1 ms at a time
+                    while (!ahead.empty() && finished(ahead.front())) ahead.pop_front();
+                }
+                g_batch_hold_ns.fetch_add(host_clock_monotonic_ns() - t0, std::memory_order_relaxed);
+            }
+            std::lock_guard<std::mutex> lk(g_sub_mu);
+            std::uint32_t cmds = batch[0].ncmds;
+            while (!g_sub_jobs.empty() && batch.size() < 12 && batchable(g_sub_jobs.front()) && !g_sub_jobs.front().wait &&
+                   cmds + g_sub_jobs.front().ncmds <= 32) {
+                cmds += g_sub_jobs.front().ncmds;
+                batch.push_back(g_sub_jobs.front());
+                g_sub_jobs.pop_front();
+            }
+        }
+        submit_batch_now(batch);
+        if (batchable(batch.back())) ahead.emplace_back(batch.back().serial, batch.back().fence);
+        while (ahead.size() > 8) ahead.pop_front();
         std::lock_guard<std::mutex> lk(g_sub_mu);
         g_sub_busy = false;
-        g_sub_submitted.store(job.ticket, std::memory_order_release);
+        g_sub_submitted.store(batch.back().ticket, std::memory_order_release);
         g_sub_idle.notify_all();  // a drain, or a wait for this ticket
     }
 }
@@ -290,13 +557,36 @@ VkResult host_span(Chunk& c, void* ptr, std::uint64_t size) {
 // memfd's pages instead, 64 MiB at most (the module's size_limit_mb), and a
 // longer span is a sparse buffer with its pieces bound in order, so it keeps
 // one range of device addresses.
-constexpr std::uint64_t kDmabufPiece = 64ull << 20;
+// rc6: the pieces as large as the module allows, up to 1 GiB (a direct-memory
+// chunk): every piece is one more buffer object in each submission's list,
+// which the kernel validates and RADV sorts (BO sort 9.7% of bb-submit in the
+// rc5 profile, with 8 GiB of direct memory in 64 MiB pieces). The module's
+// default stays 64 MiB; `echo 1024 | sudo tee
+// /sys/module/udmabuf/parameters/size_limit_mb` before the game (or
+// `options udmabuf size_limit_mb=1024` in /etc/modprobe.d) gives 1 GiB pieces.
+// BBHOST_DMABUF_PIECE_MB caps it (64: as before).
+std::uint64_t g_dmabuf_piece = 64ull << 20;
+void choose_dmabuf_piece() {
+    long mb = 64;
+    if (FILE* f = std::fopen("/sys/module/udmabuf/parameters/size_limit_mb", "r")) {
+        if (std::fscanf(f, "%ld", &mb) != 1) mb = 64;
+        std::fclose(f);
+    }
+    long cap = 1024;
+    if (const char* e = std::getenv("BBHOST_DMABUF_PIECE_MB"); e && *e) cap = std::strtol(e, nullptr, 10);
+    long piece = 64;
+    while (piece * 2 <= std::min(mb, cap) && piece * 2 <= 1024) piece *= 2;
+    g_dmabuf_piece = static_cast<std::uint64_t>(piece) << 20;
+    host_log("gpu: dma-buf pieces of %ld MiB (udmabuf size_limit_mb %ld%s)", piece, mb,
+             piece < 1024 && mb < 1024 ? "; 1024 lets 1 GiB pieces make fewer buffer objects per submission (docs/vk/TESTING.md, rc6)"
+                                       : "");
+}
 
 // [offset, offset + size) of direct memory as one dma-buf import, of a memory
 // type in `bits`. VK_NULL_HANDLE when it cannot be made.
-VkDeviceMemory dmabuf_memory(std::uint64_t offset, std::uint64_t size, std::uint32_t bits) {
+VkDeviceMemory dmabuf_memory(int memfd, std::uint64_t offset, std::uint64_t size, std::uint32_t bits) {
     udmabuf_create uc{};
-    uc.memfd = static_cast<__u32>(hle_kernel_dmem_fd());
+    uc.memfd = static_cast<__u32>(memfd);
     uc.flags = UDMABUF_FLAGS_CLOEXEC;
     uc.offset = offset;
     uc.size = size;
@@ -340,8 +630,9 @@ VkDeviceMemory dmabuf_memory(std::uint64_t offset, std::uint64_t size, std::uint
 // [offset, offset + size) of direct memory into c as dma-buf imports: a
 // buffer bound to one, or a sparse buffer over several. Under the GPU lock,
 // as every use of the renderer's queue is: the sparse binds go on it.
-VkResult dmabuf_span(Chunk& c, std::uint64_t offset, std::uint64_t size) {
-    const bool sparse = size > kDmabufPiece;
+VkResult dmabuf_span(Chunk& c, std::uint64_t offset, std::uint64_t size, int memfd = -1) {
+    if (memfd < 0) memfd = hle_kernel_dmem_fd();
+    const bool sparse = size > g_dmabuf_piece;
     if (sparse && !g.dmabuf_sparse) {
         static std::atomic<int> said{0};
         if (said.fetch_add(1) < 4)
@@ -361,15 +652,15 @@ VkResult dmabuf_span(Chunk& c, std::uint64_t offset, std::uint64_t size) {
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(g.device, c.buffer, &req);
     // Spans are whole 64 KiB pages, so the pieces meet the binding alignment.
-    if (req.size != size || (sparse && kDmabufPiece % req.alignment)) {
+    if (req.size != size || (sparse && g_dmabuf_piece % req.alignment)) {
         host_log("gpu: a buffer over %llu bytes of direct memory wants %llu (alignment %llu)", static_cast<unsigned long long>(size),
                  static_cast<unsigned long long>(req.size), static_cast<unsigned long long>(req.alignment));
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     std::vector<VkSparseMemoryBind> binds;
-    for (std::uint64_t at = 0; at < size; at += kDmabufPiece) {
-        const std::uint64_t n = std::min(kDmabufPiece, size - at);
-        const VkDeviceMemory m = dmabuf_memory(offset + at, n, req.memoryTypeBits);
+    for (std::uint64_t at = 0; at < size; at += g_dmabuf_piece) {
+        const std::uint64_t n = std::min(g_dmabuf_piece, size - at);
+        const VkDeviceMemory m = dmabuf_memory(memfd, offset + at, n, req.memoryTypeBits);
         if (!m) return VK_ERROR_INVALID_EXTERNAL_HANDLE;
         c.pieces.push_back(m);
         binds.push_back({at, n, m, 0, 0});
@@ -462,9 +753,39 @@ void choose_dmem_import() {
             return;
         }
         g.dmem_dmabuf = true;
+        choose_dmabuf_piece();
         const VkResult d = dmabuf_span(c, 0, 1ull << gcn::kPageShift);
         free_import(c);
         if (d == VK_SUCCESS) {
+            // rc6: the host's own GPU mappings (the GX table ring) as memfds
+            // too, imported the same way (import_anon). BBHOST_HOST_MAP_DMABUF=0:
+            // anonymous memory and a host-pointer import, as before.
+            // Only once a memfd of its own has gone in that way (the probe),
+            // and where the ring's 128 MiB fits a piece or sparse binding
+            // joins several: a failed import would leave the ring unmapped.
+            const char* e = std::getenv("BBHOST_HOST_MAP_DMABUF");
+            bool shared = !(e && e[0] == '0');
+            const char* why = "BBHOST_HOST_MAP_DMABUF=0";
+            if (shared && !g.dmabuf_sparse && g_dmabuf_piece < (128ull << 20)) {
+                shared = false;
+                why = "no sparse binding to join dma-bufs";
+            }
+            if (shared) {
+                shared = false;
+                why = "the probe of a memfd of its own failed";
+                const long fd = syscall(SYS_memfd_create, "bb-probe", 1 | 2 /* MFD_CLOEXEC | MFD_ALLOW_SEALING */);
+                if (fd >= 0) {
+                    if (ftruncate(static_cast<int>(fd), 1 << 20) == 0 && fcntl(static_cast<int>(fd), F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) == 0) {
+                        Chunk probe;
+                        shared = dmabuf_span(probe, 0, 1 << 20, static_cast<int>(fd)) == VK_SUCCESS;
+                        free_import(probe);
+                    }
+                    close(static_cast<int>(fd));
+                }
+            }
+            hle_kernel_host_maps_shared(shared);
+            host_log("gpu: the host's own GPU mappings (the GX table ring) %s", shared ? "as memfds, imported as dma-bufs (rc6)"
+                                                                                     : (std::string("stay anonymous, host-pointer imports: ") + why).c_str());
             host_log("gpu: the driver refuses direct memory as a host pointer (%d); importing it as dma-bufs (/dev/udmabuf)%s", r,
                      g.dmabuf_sparse ? "" : ", 64 MiB at most: no sparse binding");
             return;
@@ -476,6 +797,86 @@ void choose_dmem_import() {
 #endif
     host_log("gpu: the driver refuses direct memory as a host pointer (%d) - nothing will draw", r);
 }
+
+// rc5 (GPU audit #3): the page tables (the L1, the sink's L2 and every L2)
+// in video memory the CPU can map (ReBAR) instead of system memory. Each
+// translated walk is two dependent loads of these tables; from system memory
+// both cross PCIe after every submission's cache invalidation (RADV's
+// preamble invalidates L2 and the vector/scalar caches at the start of every
+// submission, so CPU writes made before a submission are seen by it whatever
+// the memory type - the same rule as today). The CPU only writes them
+// (write-combined, as before); the one read, page_in_gpu_table_locked, is the
+// draw capture's. The same bytes, so the picture is bit-identical.
+// Only with a host-visible video-memory heap over 1 GiB (ReBAR): a 256 MiB
+// BAR is left to the driver. BBHOST_TABLES_VRAM=0 puts them back in system
+// memory. Log label `page tables:`, snapshot [gpu_memory] `page_tables:`.
+std::atomic<std::uint32_t> g_tables_vram{0}, g_tables_sys{0};
+std::uint32_t tables_vram_type(std::uint32_t type_bits) {
+    static const bool off = [] {
+        const char* e = std::getenv("BBHOST_TABLES_VRAM");
+        return e && e[0] == '0';
+    }();
+    if (off) return UINT32_MAX;
+    const VkMemoryPropertyFlags want =
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (std::uint32_t i = 0; i < g.mem_props.memoryTypeCount; ++i) {
+        const VkMemoryType& t = g.mem_props.memoryTypes[i];
+        if (!(type_bits & (1u << i)) || (t.propertyFlags & want) != want) continue;
+        // Not the host-cached kind (none on RADV for video memory, but read
+        // the flags rather than assume) and not protected memory.
+        if (t.propertyFlags & (VK_MEMORY_PROPERTY_PROTECTED_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) continue;
+        if (g.mem_props.memoryHeaps[t.heapIndex].size <= (1ull << 30)) continue;
+        return i;
+    }
+    return UINT32_MAX;
+}
+bool create_table_buffer(DevBuffer& b, std::uint64_t size) {
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = size;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VkBuffer buf = VK_NULL_HANDLE;
+    if (vkCreateBuffer(g.device, &bci, nullptr, &buf) == VK_SUCCESS) {
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(g.device, buf, &req);
+        const std::uint32_t type = tables_vram_type(req.memoryTypeBits);
+        if (type != UINT32_MAX) {
+            VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+            flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+            VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            mai.pNext = &flags;
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = type;
+            VkDeviceMemory mem = VK_NULL_HANDLE;
+            void* map = nullptr;
+            if (vkAllocateMemory(g.device, &mai, nullptr, &mem) == VK_SUCCESS) {
+                if (vkBindBufferMemory(g.device, buf, mem, 0) == VK_SUCCESS && vkMapMemory(g.device, mem, 0, VK_WHOLE_SIZE, 0, &map) == VK_SUCCESS &&
+                    map) {
+                    VkBufferDeviceAddressInfo bai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+                    bai.buffer = buf;
+                    b.buffer = buf;
+                    b.memory = mem;
+                    b.map = map;
+                    b.size = size;
+                    b.address = vkGetBufferDeviceAddress(g.device, &bai);
+                    if (g_tables_vram.fetch_add(1, std::memory_order_relaxed) == 0) {
+                        host_log("page tables: in video memory the CPU maps (memory type %u, heap %u of %llu MiB; rc5, "
+                                 "BBHOST_TABLES_VRAM=0 puts them in system memory)",
+                                 type, g.mem_props.memoryTypes[type].heapIndex,
+                                 static_cast<unsigned long long>(g.mem_props.memoryHeaps[g.mem_props.memoryTypes[type].heapIndex].size >> 20));
+                    }
+                    return true;
+                }
+                vkFreeMemory(g.device, mem, nullptr);
+            }
+        }
+        vkDestroyBuffer(g.device, buf, nullptr);
+    }
+    if (!create_dev_buffer(b, size, true)) return false;
+    if (g_tables_sys.fetch_add(1, std::memory_order_relaxed) == 0) host_log("page tables: in system memory (no ReBAR heap, or BBHOST_TABLES_VRAM=0)");
+    return true;
+}
+
 
 void fill_sink(DevBuffer& t) {
     auto* e = static_cast<std::uint64_t*>(t.map);
@@ -489,7 +890,7 @@ bool set_page_locked(std::uint64_t va, std::uint64_t dev) {
     auto it = g.l2.find(i1);
     if (it == g.l2.end()) {
         DevBuffer t;
-        if (!create_dev_buffer(t, gcn::kL2Entries * 8, true)) return false;
+        if (!create_table_buffer(t, gcn::kL2Entries * 8)) return false;
         fill_sink(t);
         it = g.l2.emplace(i1, t).first;
         static_cast<std::uint64_t*>(g.l1.map)[i1] = t.address;
@@ -527,6 +928,7 @@ void queue_drain() {
 
 void stream_submit_job(const VkCommandBuffer* cmds, std::uint32_t ncmds, VkSemaphore wait, VkPipelineStageFlags wait_stage, VkSemaphore signal,
                        VkFence fence, std::uint32_t items, std::uint64_t serial, std::uint64_t foreign_id) {
+    if (serial != ~0ull) g_sub_recorded_ns[serial % kSubRing].store(host_clock_monotonic_ns(), std::memory_order_relaxed);
     SubmitJob job;
     job.ncmds = ncmds;
     for (std::uint32_t k = 0; k < ncmds && k < 2; ++k) job.cmds[k] = cmds[k];
@@ -624,6 +1026,31 @@ const Chunk* import_anon(std::uint64_t va, std::uint64_t len) {
         return &it->second;
     }
     Chunk c;
+#if !defined(_WIN32)
+    // rc6: a host mapping with a memfd behind it (the GX table ring where
+    // direct memory goes in as dma-bufs; hle_kernel_map_host) goes in the same
+    // way: no userptr for amdgpu to check at every submission.
+    if (g.dmem_dmabuf) {
+        if (const int fd = hle_kernel_host_map_fd(va); fd >= 0) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const VkResult r = dmabuf_span(c, 0, len, fd);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (r == VK_SUCCESS) {
+                VkBufferDeviceAddressInfo bai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+                bai.buffer = c.buffer;
+                c.address = vkGetBufferDeviceAddress(g.device, &bai);
+                c.size = len;
+                host_log("gpu: host mapping 0x%llx (%llu KiB) imported as %s in %.0f ms (rc6; BBHOST_HOST_MAP_DMABUF=0: as a host pointer)",
+                         static_cast<unsigned long long>(va), static_cast<unsigned long long>(len >> 10),
+                         c.pieces.empty() ? "a dma-buf" : "dma-bufs in a sparse buffer", ms);
+                return &(g.anon_imports[va] = c);
+            }
+            host_log("gpu: host mapping 0x%llx (%llu KiB) as a dma-buf failed (%d); trying it as a host pointer", static_cast<unsigned long long>(va),
+                     static_cast<unsigned long long>(len >> 10), r);
+            free_import(c);
+        }
+    }
+#endif
     void* ptr = reinterpret_cast<void*>(static_cast<std::uintptr_t>(va));
     VkMemoryHostPointerPropertiesEXT hp{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     if (g.get_host_pointer_props(g.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr, &hp) != VK_SUCCESS) {
@@ -1013,7 +1440,10 @@ static void shader_caches_check_build() {
         std::ifstream in(stamp);
         std::getline(in, theirs);
     }
-    if (theirs == ours) return;
+    if (theirs == ours) {
+        host_log("gpu: shader caches match translator %s: kept (not cleared)", ours.c_str());
+        return;
+    }
     std::error_code ec;
     if (const char* e = std::getenv("BBHOST_KEEP_SHADER_CACHE"); e && e[0] == '1') {
         host_log("gpu: shader caches made by translator %s kept for translator %s (BBHOST_KEEP_SHADER_CACHE=1)",
@@ -1358,6 +1788,7 @@ void start_hang_watchdog() {
     std::call_once(once, [] {
         std::thread([] {
             host_thread_set_name("bb-hangdog");
+            host_thread_place(HostPlace::Any, "bb-hangdog");
             std::uint64_t seen = 0;
             auto since = std::chrono::steady_clock::now();
             bool said = false;
@@ -1612,6 +2043,26 @@ bool init_locked() {
         layers.push_back("VK_LAYER_KHRONOS_validation");
         iext.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
+    // rc4, BBHOST_RGP_LABELS=1 (debugging only): the extension for the pass
+    // labels (debug_label_locked), where the loader offers it.
+    static const bool want_labels = [] {
+        const char* e = std::getenv("BBHOST_RGP_LABELS");
+        return e && e[0] == '1';
+    }();
+    bool labels_ext = g_validate;
+    if (want_labels && !g_validate) {
+        std::uint32_t n = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> have(n);
+        if (n) vkEnumerateInstanceExtensionProperties(nullptr, &n, have.data());
+        for (const VkExtensionProperties& x : have) {
+            if (std::strcmp(x.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) {
+                iext.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+                labels_ext = true;
+                break;
+            }
+        }
+    }
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = static_cast<std::uint32_t>(iext.size());
@@ -1633,6 +2084,13 @@ bool init_locked() {
             create(g.instance, &mci, nullptr, &g.messenger);
         }
         host_log("gpu: validation layer enabled");
+    }
+    if (want_labels) {
+        g_insert_label = labels_ext ? reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
+                                          vkGetInstanceProcAddr(g.instance, "vkCmdInsertDebugUtilsLabelEXT"))
+                                    : nullptr;
+        g.debug_labels = g_insert_label != nullptr;
+        host_log("gpu: render-pass labels for RGP %s (BBHOST_RGP_LABELS=1)", g.debug_labels ? "on" : "off: no VK_EXT_debug_utils");
     }
     bool has_swapchain = false;
     std::vector<Candidate> usable;
@@ -1734,6 +2192,10 @@ bool init_locked() {
     const char* cb_env = std::getenv("BBHOST_CB_SSBO");
     g.cb_ssbo = !(cb_env && cb_env[0] == '0');
     g.cb_lean = g.cb_ssbo && !(cb_env && cb_env[0] == '1');
+    {
+        const char* e = std::getenv("BBHOST_CS_CB");
+        g_cs_cb = g.cb_ssbo && !(e && e[0] == '0');
+    }
     const char* exec_env = std::getenv("BBHOST_EXEC_KNOWN");
     g.exec_known = !(exec_env && exec_env[0] == '0');
     g.profile = [] {
@@ -1745,6 +2207,13 @@ bool init_locked() {
     // pipeline. A barrier ends every pass (BBHOST_PASS_BARRIERS=full, the
     // default), so a pass's pair is its own GPU time; draws' pairs overlap.
     g.profile_passes = g.profile && std::getenv("BBHOST_GPU_PROFILE")[0] == '3';
+    // rc2: the GPU sampler (sampler_begin_recording_locked): the timestamp
+    // pools are made whatever BBHOST_GPU_PROFILE says. BBHOST_GPU_SAMPLE=0 off.
+    g.profile_env = g.profile;
+    g.profile_pools = !g.profile && props.limits.timestampComputeAndGraphics && perf::enabled() && [] {
+        const char* e = std::getenv("BBHOST_GPU_SAMPLE");
+        return !(e && e[0] == '0');
+    }();
     // =3, or =1 with BBHOST_GPU_PROFILE_STATS=1: pipeline statistics beside
     // the pairs (gpu_internal.h profile_stats).
     if (g.profile_passes || (g.profile && !g.profile_gaps && std::getenv("BBHOST_GPU_PROFILE_STATS") &&
@@ -1752,6 +2221,18 @@ bool init_locked() {
         VkPhysicalDeviceFeatures have{};
         vkGetPhysicalDeviceFeatures(g.phys, &have);
         g.profile_stats = have.pipelineStatisticsQuery == VK_TRUE;
+    }
+    // rc4: pipeline statistics in the GPU sampler's frames too (one frame in
+    // ten seconds or more, already timed pass by pass): vertex and fragment
+    // invocations of each pass, so a snapshot tells a vertex-bound pass from
+    // a pixel-bound one ([pass_stats]). BBHOST_GPU_SAMPLE_STATS=0: off.
+    if (g.profile_pools && !g.profile_stats && [] {
+            const char* e = std::getenv("BBHOST_GPU_SAMPLE_STATS");
+            return !(e && e[0] == '0');
+        }()) {
+        VkPhysicalDeviceFeatures have{};
+        vkGetPhysicalDeviceFeatures(g.phys, &have);
+        g.profile_stats = g.sample_stats = have.pipelineStatisticsQuery == VK_TRUE;
     }
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
     VkPhysicalDeviceSubgroupProperties subp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -1808,6 +2289,14 @@ bool init_locked() {
         g.has_memory_budget = has("VK_EXT_memory_budget");
         // BBHOST_PIPELINE_STATS: the driver's statistics and disassembly of named pipelines (render.cpp).
         g.pipeline_stats = std::getenv("BBHOST_PIPELINE_STATS") && has("VK_KHR_pipeline_executable_properties");
+        // rc2, bbtest profile only: every pipeline's statistics (render.cpp shader_stats_note).
+        if (const char* e = std::getenv("BBHOST_SHADER_STATS"); e && *e) {
+            g.shader_stats = has("VK_KHR_pipeline_executable_properties");
+            g.pipeline_stats = g.pipeline_stats || g.shader_stats;
+            host_log(g.shader_stats ? "gpu: shader statistics of every pipeline into %s (bbtest profile; pipelines built without bbhost's pipeline cache)"
+                                    : "gpu: BBHOST_SHADER_STATS=%s: the device lacks VK_KHR_pipeline_executable_properties; no shader statistics",
+                     e);
+        }
 #if defined(VK_KHR_present_mode_fifo_latest_ready)
         // The present mode FIFO_LATEST_READY (window.cpp, vk_create_swapchain):
         // V-Sync with no queue of frames behind the display - at each refresh
@@ -2026,6 +2515,10 @@ bool init_locked() {
     {
         VkPhysicalDeviceFeatures sp{};
         vkGetPhysicalDeviceFeatures(g.phys, &sp);
+        // bbhost-vk Phase 3: FSR 3.1's shaders and the reactive mask (R8)
+        // write storage images of the extended formats. Enabling a feature
+        // changes no other draw.
+        f2.features.shaderStorageImageExtendedFormats = sp.shaderStorageImageExtendedFormats;
         g.dmabuf_sparse = g.can_dmabuf && g.has_sparse && sp.sparseBinding;  // a queue with SPARSE_BINDING so far
         g.has_sparse = g.has_sparse && sp.sparseBinding && sp.sparseResidencyBuffer;
         // Only where they have been run: an AMD Radeon 8060S on AMD's Windows
@@ -2066,6 +2559,8 @@ bool init_locked() {
     f2.features.pipelineStatisticsQuery = g.profile_stats ? VK_TRUE : VK_FALSE;
     glitch_device_features(f2.features);  // BBHOST_GLITCH=1 only: precise occlusion queries
     occlusion_device_features(f2.features, dext, &f13.pNext);  // precise queries, conditional rendering
+    // bbhost-vk Phase 4: FSR 4.1.1's extensions, only with its assets built (host/fsr4_pass.h).
+    fsr4_device_features(f2.features, f12, f13, dext, &f13.pNext);
     // DB_DEPTH_CONTROL bit 3: the deferred lights cull by depth range.
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(g.phys, &supported);
@@ -2233,11 +2728,11 @@ bool init_locked() {
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         vkCreateFence(g.device, &fci, nullptr, &g.slots[k].fence);
         glitch_slot_init_locked(g.slots[k]);
-        if (g.profile) {
+        if (g.profile || g.profile_pools) {
             VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
             qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
             qci.queryCount = kMaxQueued * kStageSlots * 2;
-            if (vkCreateQueryPool(g.device, &qci, nullptr, &g.slots[k].qpool) != VK_SUCCESS) g.profile = false;
+            if (vkCreateQueryPool(g.device, &qci, nullptr, &g.slots[k].qpool) != VK_SUCCESS) g.profile = g.profile_env = g.profile_pools = false;
             if (g.profile_stats) {
                 VkQueryPoolCreateInfo sci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 sci.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
@@ -2336,6 +2831,41 @@ bool init_locked() {
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &g.set_layout;
     vkCreatePipelineLayout(g.device, &plci, nullptr, &g.pipe_layout);
+    // rc5b: the game's compute pipelines. Without the push set the shared
+    // layout has the storage-buffer bindings already; with it, a layout of
+    // their own adds them (the tessellation pass and the graphics stages
+    // keep theirs, and with them their pipelines' cache entries).
+    g.cs_set_layout = g.set_layout;
+    g.cs_pipe_layout = g.pipe_layout;
+    if (g_cs_cb && cb_push_on()) {
+        std::vector<VkDescriptorSetLayoutBinding> cs = binds;
+        for (std::uint32_t k = 0; k < gcn::kMaxBuffers; ++k) {
+            cs.push_back({gcn::kBindingStorageBuffer0 + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr});
+        }
+        VkDescriptorSetLayoutCreateInfo cci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        cci.bindingCount = static_cast<std::uint32_t>(cs.size());
+        cci.pBindings = cs.data();
+        VkPipelineLayout cs_pipe = VK_NULL_HANDLE;
+        VkDescriptorSetLayout cs_set = VK_NULL_HANDLE;
+        if (vkCreateDescriptorSetLayout(g.device, &cci, nullptr, &cs_set) == VK_SUCCESS) {
+            VkPipelineLayoutCreateInfo cpl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            cpl.setLayoutCount = 1;
+            cpl.pSetLayouts = &cs_set;
+            if (vkCreatePipelineLayout(g.device, &cpl, nullptr, &cs_pipe) == VK_SUCCESS) {
+                g.cs_set_layout = cs_set;
+                g.cs_pipe_layout = cs_pipe;
+            } else {
+                vkDestroyDescriptorSetLayout(g.device, cs_set, nullptr);
+            }
+        }
+        if (g.cs_pipe_layout == g.pipe_layout) {
+            g_cs_cb = false;
+            host_log("gpu: compute cb: no layout for compute constant buffers; they take the page table");
+        }
+    }
+    host_log("gpu: compute cb: compute shaders' constant buffers %s",
+             g_cs_cb ? "bound as storage buffers where the walk would read the same bytes (BBHOST_CS_CB=0 walks them all)"
+                     : "on the page-table walk (BBHOST_CS_CB=0 or BBHOST_CB_SSBO=0)");
     VkDescriptorSetLayout four[4] = {g.gfx_set_layout, g.gfx_set_layout, g.cb_push_layout, g.bindless_layout};
     plci.setLayoutCount = g.bindless ? 4 : cb_push_on() ? 3 : 2;
     plci.pSetLayouts = four;
@@ -2378,9 +2908,36 @@ bool init_locked() {
         const char* e = std::getenv("BBHOST_PARAMS_WC");
         return e && e[0] == '1';
     }();
-    mai.memoryTypeIndex = params_wc ? UINT32_MAX
-                                    : find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                                                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    // Profiling kit (an A/B, off unless set): BBHOST_PARAMS_VRAM=1 puts the
+    // ring in video memory the CPU maps (ReBAR, the page tables' rule: a
+    // host-visible device-local heap over 1 GiB), so every draw's params read
+    // stays off PCIe. The CPU only writes the ring (alloc/rewrite_params_slot
+    // memcpy into it, never a read), write-combined as with
+    // BBHOST_PARAMS_WC=1; the same bytes, so the same picture. Without such a
+    // heap it falls back to the default below.
+    static const bool params_vram = [] {
+        const char* e = std::getenv("BBHOST_PARAMS_VRAM");
+        return e && e[0] == '1';
+    }();
+    mai.memoryTypeIndex = UINT32_MAX;
+    if (params_vram) {
+        const VkMemoryPropertyFlags want =
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (std::uint32_t i = 0; i < g.mem_props.memoryTypeCount; ++i) {
+            const VkMemoryType& t = g.mem_props.memoryTypes[i];
+            if (!(req.memoryTypeBits & (1u << i)) || (t.propertyFlags & want) != want) continue;
+            if (t.propertyFlags & (VK_MEMORY_PROPERTY_PROTECTED_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) continue;
+            if (g.mem_props.memoryHeaps[t.heapIndex].size <= (1ull << 30)) continue;
+            mai.memoryTypeIndex = i;
+            break;
+        }
+        host_log("gpu: params ring: BBHOST_PARAMS_VRAM=1 %s", mai.memoryTypeIndex != UINT32_MAX ? "- in video memory the CPU maps (ReBAR)"
+                                                                                                 : "but no host-visible video-memory heap over 1 GiB; the default");
+    }
+    if (mai.memoryTypeIndex == UINT32_MAX && !params_wc) {
+        mai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                                       VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    }
     if (mai.memoryTypeIndex == UINT32_MAX) {
         mai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
@@ -2398,8 +2955,8 @@ bool init_locked() {
         return false;
     }
     bindless_dummies_locked(g.dummy_view, g.dummy_view, g.dummy_sampler);  // slot 0 of the global arrays
-    if (!create_dev_buffer(g.l1, gcn::kL1Entries * 8, true) || !create_dev_buffer(g.sink, 1ull << gcn::kPageShift, false) ||
-        !create_dev_buffer(g.sink_l2, gcn::kL2Entries * 8, true)) {
+    if (!create_table_buffer(g.l1, gcn::kL1Entries * 8) || !create_dev_buffer(g.sink, 1ull << gcn::kPageShift, false) ||
+        !create_table_buffer(g.sink_l2, gcn::kL2Entries * 8)) {
         host_log("gpu: page table buffers failed");
         return false;
     }
@@ -2486,6 +3043,134 @@ bool extract_program(std::uint64_t code_va, std::vector<std::uint32_t>& words, s
     return true;
 }
 
+// rc2, the GPU sampler: one frame every ~10 s timed pass by pass with the
+// BBHOST_GPU_PROFILE=3 machinery (a timestamp pair a render pass, named by
+// its first draw's program; each dispatch and host copy), for the
+// performance capture (host/perf_capture.h) and a `gpu sample:` log line.
+// Turned on and off only where a command buffer starts, so no pair spans a
+// switch. The frame's draws are recorded in place (no deferred packets)
+// while it is on; a frame after one over budget is not sampled (the sample
+// waits for a smooth one), nor a loading screen.
+struct Sampler {
+    enum State { kIdle, kArmed, kRunning, kCollecting } state = kIdle;
+    std::uint64_t flip = 0;
+    std::chrono::steady_clock::time_point last{};
+    int pending = 0;  // slots recorded while running, not collected yet
+    std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> ns;  // by name: ns, count
+    std::uint64_t span_ns = 0;
+    std::map<std::string, std::array<std::uint64_t, 6>> stats;  // rc4: by name, Gpu::profile_stats_sum's order
+};
+// rc4: the last sample's statistics for its top passes (snapshots: [pass_stats]).
+std::mutex g_pass_stats_mu;
+std::string g_pass_stats_text = "no sample yet";
+std::string pass_stats_section() {
+    std::lock_guard<std::mutex> lk(g_pass_stats_mu);
+    return g_pass_stats_text;
+}
+const bool g_pass_stats_section = (perf::add_section("pass_stats", pass_stats_section), true);
+Sampler g_sampler;
+std::atomic<bool> g_sampler_running{false};
+
+void sampler_finish_locked() {
+    std::vector<std::pair<std::string, double>> top;
+    double timed = 0;
+    for (const auto& [name, v] : g_sampler.ns) {
+        top.emplace_back(name, static_cast<double>(v.first) / 1e6);
+        timed += static_cast<double>(v.first) / 1e6;
+    }
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    const std::size_t entries = top.size();
+    if (top.size() > 16) top.resize(16);
+    const double span = static_cast<double>(g_sampler.span_ns) / 1e6;
+    std::string list;
+    for (std::size_t i = 0; i < top.size() && i < 10; ++i) {
+        char b[128];
+        std::snprintf(b, sizeof(b), " %s=%.2f", top[i].first.c_str(), top[i].second);
+        list += b;
+    }
+    host_log("gpu sample: flip %llu: command buffers %.2f ms on the GPU, %.2f ms in %zu timed passes/dispatches; top:%s",
+             static_cast<unsigned long long>(g_sampler.flip), span, timed, entries, list.c_str());
+    perf::note_gpu_sample(g_sampler.flip, span, timed, entries, top);
+    // rc4: the top passes' pipeline statistics: vertices in, vertex-shader
+    // invocations, primitives in, into and out of clipping, fragment-shader
+    // invocations; and the rates over the pass's own time. A pass whose
+    // time follows its fragment invocations (fs_per_us near the GPU's fill
+    // rate, few vertices) is pixel-bound; one with many vertex invocations
+    // per microsecond and few fragments is vertex-bound - read across
+    // samples of the same pass (TESTING.md, rc4).
+    if (g.sample_stats || g.profile_stats) {
+        std::string text, line;
+        char b[512];
+        std::snprintf(b, sizeof(b), "flip=%llu (the GPU sampler's frame; per pass: k = thousands, rates per microsecond of the pass)",
+                      static_cast<unsigned long long>(g_sampler.flip));
+        text = b;
+        int listed = 0;
+        for (std::size_t i = 0; i < top.size() && listed < 8; ++i) {
+            const auto it = g_sampler.stats.find(top[i].first);
+            if (it == g_sampler.stats.end()) continue;
+            const auto& a = it->second;
+            const double us = top[i].second * 1000.0;
+            const auto per_us = [&](std::uint64_t v) { return us > 0 ? static_cast<double>(v) / us : 0.0; };
+            std::snprintf(b, sizeof(b),
+                          "\npass: %s ms=%.3f verts_k=%.1f vs_k=%.1f prims_k=%.1f clip_in_k=%.1f clip_out_k=%.1f fs_k=%.1f vs_per_us=%.1f "
+                          "fs_per_us=%.1f fs_per_prim=%.1f",
+                          top[i].first.c_str(), top[i].second, a[0] / 1e3, a[2] / 1e3, a[1] / 1e3, a[3] / 1e3, a[4] / 1e3, a[5] / 1e3,
+                          per_us(a[2]), per_us(a[5]), a[4] ? static_cast<double>(a[5]) / static_cast<double>(a[4]) : 0.0);
+            text += b;
+            std::snprintf(b, sizeof(b), " %s=%.0f/%.0f/%.0fk", top[i].first.c_str(), a[2] / 1e3, a[4] / 1e3, a[5] / 1e3);
+            line += b;
+            ++listed;
+        }
+        if (listed) host_log("gpu sample stats: flip %llu (vs/clip-out prims/fs invocations, k):%s",
+                             static_cast<unsigned long long>(g_sampler.flip), line.c_str());
+        std::lock_guard<std::mutex> lk(g_pass_stats_mu);
+        g_pass_stats_text = text;
+    }
+    g_sampler.stats.clear();
+    g_sampler.ns.clear();
+    g_sampler.span_ns = 0;
+}
+
+void sampler_begin_recording_locked() {
+    if (!g.profile_pools) return;
+    const std::uint64_t flip = hle_video_flip_count();
+    const auto now = std::chrono::steady_clock::now();
+    switch (g_sampler.state) {
+        case Sampler::kIdle: {
+            if (now - g_sampler.last < std::chrono::seconds(10) || hle_video_loading()) return;
+            // Over budget: the last present interval past 1.06x the game's pace.
+            const std::int64_t last = perf::last_interval_ns();
+            const int fps = host_settings().frame_cap > 0 ? host_settings().frame_cap : 120;
+            if (last <= 0 || static_cast<double>(last) > 1.06e9 / static_cast<double>(fps)) return;
+            g_sampler.flip = flip + 1;
+            g_sampler.state = Sampler::kArmed;
+            return;
+        }
+        case Sampler::kArmed:
+            if (flip < g_sampler.flip) return;
+            if (flip > g_sampler.flip) {  // missed its start: next time
+                g_sampler.state = Sampler::kIdle;
+                return;
+            }
+            g.profile = g.profile_passes = true;
+            g_sampler_running.store(true, std::memory_order_relaxed);
+            g_sampler.state = Sampler::kRunning;
+            return;
+        case Sampler::kRunning:
+            if (flip == g_sampler.flip) return;
+            g.profile = g.profile_passes = false;
+            g_sampler_running.store(false, std::memory_order_relaxed);
+            g_sampler.state = Sampler::kCollecting;
+            [[fallthrough]];
+        case Sampler::kCollecting:
+            if (g_sampler.pending > 0) return;
+            sampler_finish_locked();
+            g_sampler.last = now;
+            g_sampler.state = Sampler::kIdle;
+            return;
+    }
+}
+
 void begin_recording_locked() {
     if (!g.recording) {
         if (stream_on()) {
@@ -2500,13 +3185,42 @@ void begin_recording_locked() {
         }
         ++g.record_serial;  // dynamic state recorded so far is gone
         g.recording = true;
-        busy_begin_locked(g.slots[g.slot]);
+        // rc4: every query-pool reset before the first timestamp. On RADV a
+        // timestamp leaves the command buffer's "active query" flush pending
+        // (PS/CS partial flush, L2 write-back and invalidate, CB/DB flush:
+        // radv_query.c, radv_CmdWriteTimestamp2) and the next
+        // vkCmdResetQueryPool emits it, so the occlusion, coverage and
+        // profile resets that followed the busy meter's TOP timestamp drained
+        // the GPU and flushed L2 at the start of every command buffer.
+        // BBHOST_RESET_ORDER=0: the order before (for an A/B).
+        static const bool reset_first = [] {
+            const char* e = std::getenv("BBHOST_RESET_ORDER");
+            const bool on = !(e && e[0] == '0');
+            host_log("gpu: query resets %s", on ? "before the first timestamp of each command buffer (BBHOST_RESET_ORDER=0: after)"
+                                                : "after the busy meter's timestamp (BBHOST_RESET_ORDER=0)");
+            return on;
+        }();
+        if (!reset_first) busy_begin_locked(g.slots[g.slot]);
         glitch_begin_recording_locked();
         occlusion_begin_recording_locked();
+        sampler_begin_recording_locked();
+        g.slots[g.slot].sampled = g.profile && !g.profile_env;
+        if (g.slots[g.slot].sampled) ++g_sampler.pending;
         if (g.profile) {
             Gpu::Slot& sl = g.slots[g.slot];
             rec().reset_query_pool(sl.qpool, 0, kQueriesPerSlot);
+            // rc4: the statistics pool too - profile_begin_locked's reset is
+            // skipped once qreset is set, so its queries began unreset.
+            if (g.profile_stats && sl.stat_pool) rec().reset_query_pool(sl.stat_pool, 0, kMaxQueued * kStageSlots);
+            sl.stat_open = false;
             sl.qreset = true;
+        }
+        if (reset_first) {
+            busy_begin_locked(g.slots[g.slot]);  // its own reset, then the TOP timestamp
+            g_reset_first_cmdbufs.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (g.profile) {
+            Gpu::Slot& sl = g.slots[g.slot];
             rec().write_timestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, sl.qpool, kQueriesPerSlot - 2);
             sl.span = true;
         }
@@ -2739,6 +3453,12 @@ gcn::TranslateOptions compute_options(std::uint32_t rsrc1, std::uint32_t rsrc2, 
     o.cs_threads[1] = threads[1];
     o.cs_threads[2] = threads[2];
     o.exec_known = g.exec_known;
+    // rc5b: constant buffers through storage-buffer bindings, as the
+    // graphics stages read theirs, in the dispatch's own set from binding
+    // 112 (g.cs_set_layout). The page-table walk stays every buffer's
+    // fallback (no lean variant): host_gpu_dispatch binds only what it can
+    // prove reads the same bytes (resolve_compute_buffers_locked).
+    o.cb_ssbo = compute_cb_on();
     return o;
 }
 
@@ -2842,6 +3562,7 @@ struct CsOptimizer {
         std::vector<std::uint32_t> spirv;
         std::uint64_t flip = 0;        // when its stand-in was built
         std::uint64_t standin_us = 0;  // and how long that took
+        VkPipelineLayout layout = VK_NULL_HANDLE;  // rc5b: the stand-in's (null: g.pipe_layout)
     };
     struct Running {
         std::string name;  // empty: the thread is idle
@@ -2915,7 +3636,7 @@ CsOptimize cs_optimize_mode() {
 // cache has it optimized, VK_NULL_HANDLE at once otherwise. `own_cache`: a
 // bb-cs-optimize build's, instead of the main cache.
 VkPipeline create_compute(VkShaderModule module, CsBuild how, const std::string& watch, const std::vector<std::uint32_t>* spirv,
-                          VkPipelineCache own_cache = VK_NULL_HANDLE) {
+                          VkPipelineCache own_cache = VK_NULL_HANDLE, VkPipelineLayout layout = VK_NULL_HANDLE) {
     if (how == CsBuild::kOptimizedCached && !g.cache_control) return VK_NULL_HANDLE;
     VkComputePipelineCreateInfo cpci{};
     cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -2923,21 +3644,39 @@ VkPipeline create_compute(VkShaderModule module, CsBuild how, const std::string&
     cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     cpci.stage.module = module;
     cpci.stage.pName = "main";
-    cpci.layout = g.pipe_layout;
+    cpci.layout = layout ? layout : g.pipe_layout;
     cpci.flags = how == CsBuild::kUnoptimized        ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT
                  : how == CsBuild::kOptimizedCached ? VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT
                                                      : 0;
     VkPipeline p = VK_NULL_HANDLE;
     VkResult r;
+    const auto t_build = std::chrono::steady_clock::now();
+    // rc2: into the performance capture (an optimizer's background rebuild,
+    // own_cache, never holds a frame up; an inline build on the command
+    // processor does).
+    struct Noted {
+        const std::chrono::steady_clock::time_point& t0;
+        const std::string& name;
+        bool background, probe;
+        ~Noted() {
+            if (probe) return;  // a cache lookup (kOptimizedCached), not a compile
+            const std::uint64_t us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+            const bool worker = background || perf::on_worker_thread();
+            perf::note_compile("compute", name, us, worker, !worker);
+        }
+    } noted{t_build, watch, own_cache != VK_NULL_HANDLE, how == CsBuild::kOptimizedCached};
+    cpci.flags |= shader_stats_flags();  // rc2: bbtest profile only (0 otherwise)
     if (how == CsBuild::kOptimizedCached) {
-        r = vkCreateComputePipelines(g.device, PipelineCacheUse().cache, 1, &cpci, nullptr, &p);  // VK_PIPELINE_COMPILE_REQUIRED: not there
+        r = vkCreateComputePipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &cpci, nullptr, &p);  // VK_PIPELINE_COMPILE_REQUIRED: not there
     } else if (own_cache != VK_NULL_HANDLE) {
         CompilingScope compiling(watch, spirv);
-        r = vkCreateComputePipelines(g.device, own_cache, 1, &cpci, nullptr, &p);
+        r = vkCreateComputePipelines(g.device, shader_stats_cache(own_cache), 1, &cpci, nullptr, &p);
     } else {
         CompilingScope compiling(watch, spirv);
-        r = vkCreateComputePipelines(g.device, PipelineCacheUse().cache, 1, &cpci, nullptr, &p);
+        r = vkCreateComputePipelines(g.device, shader_stats_cache(PipelineCacheUse().cache), 1, &cpci, nullptr, &p);
     }
+    if (g.shader_stats && r == VK_SUCCESS) shader_stats_note(p, how == CsBuild::kUnoptimized ? "compute-unoptimized" : "compute", watch);
     return r == VK_SUCCESS ? p : VK_NULL_HANDLE;
 }
 
@@ -2948,6 +3687,7 @@ std::uint64_t cs_us_since(std::chrono::steady_clock::time_point t0) {
 // bb-cs-optimize: the optimized builds, behind everything else.
 void cs_optimize_thread(int index) {
     host_thread_set_name("bb-cs-optimize");
+    host_thread_place(HostPlace::Cold, "bb-cs-optimize");  // rc5: off the hot chain's CPUs
     static const int delay_ms = [] {
         const char* d = std::getenv("BBHOST_CS_OPTIMIZE_DELAY_MS");
         return d ? std::atoi(d) : 0;
@@ -2978,7 +3718,7 @@ void cs_optimize_thread(int index) {
             VkPipelineCacheCreateInfo pcci{};
             pcci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
             if (g.opt_cache == VK_NULL_HANDLE || vkCreatePipelineCache(g.device, &pcci, nullptr, &own) != VK_SUCCESS) own = VK_NULL_HANDLE;
-            p = create_compute(module, CsBuild::kOptimized, job.name + watch, &job.spirv, own);
+            p = create_compute(module, CsBuild::kOptimized, job.name + watch, &job.spirv, own, job.layout);
             if (own != VK_NULL_HANDLE) {
                 if (p) {
                     std::lock_guard<std::mutex> lk(g_opt_cache_mu);
@@ -3016,7 +3756,8 @@ void cs_optimize_thread(int index) {
     }
 }
 
-void queue_compute_optimize(std::uint64_t key, const std::string& name, const std::vector<std::uint32_t>& spirv, std::uint64_t standin_us) {
+void queue_compute_optimize(std::uint64_t key, const std::string& name, const std::vector<std::uint32_t>& spirv, std::uint64_t standin_us,
+                            VkPipelineLayout layout) {
     static std::once_flag started;
     std::call_once(started, [] {
         {
@@ -3034,6 +3775,7 @@ void queue_compute_optimize(std::uint64_t key, const std::string& name, const st
         job.spirv = spirv;
         job.flip = hle_video_flip_count();
         job.standin_us = standin_us;
+        job.layout = layout;
         g_cs_opt.jobs.push_back(std::move(job));
     }
     g_cs_opt.cv.notify_one();
@@ -3042,36 +3784,37 @@ void queue_compute_optimize(std::uint64_t key, const std::string& name, const st
 }  // namespace
 
 VkPipeline first_compute_pipeline(VkShaderModule module, std::uint64_t opt_key, const std::string& name,
-                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch) {
+                                  const std::vector<std::uint32_t>& spirv, bool& standin, const std::string& watch,
+                                  VkPipelineLayout layout) {
     standin = false;
     switch (cs_optimize_mode()) {
     case CsOptimize::kNever:
-        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv);
+        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     case CsOptimize::kAlways:
-        return create_compute(module, CsBuild::kOptimized, watch, &spirv);
+        return create_compute(module, CsBuild::kOptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     case CsOptimize::kBackground:
         break;
     }
     if (g_cs_opt.keep_unoptimized.count(name)) {
         g_cs_opt.kept.fetch_add(1, std::memory_order_relaxed);
-        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv);
+        return create_compute(module, CsBuild::kUnoptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     }
     {
         // Built this run already, for an earlier pipeline of the same key.
         std::lock_guard<std::mutex> lk(g_cs_opt.mu);
         if (const auto it = g_cs_opt.ready.find(opt_key); it != g_cs_opt.ready.end()) return it->second;
     }
-    if (const VkPipeline p = create_compute(module, CsBuild::kOptimizedCached, watch, &spirv)) {
+    if (const VkPipeline p = create_compute(module, CsBuild::kOptimizedCached, watch, &spirv, VK_NULL_HANDLE, layout)) {
         g_cs_opt.from_cache.fetch_add(1, std::memory_order_relaxed);
         return p;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    const VkPipeline p = create_compute(module, CsBuild::kUnoptimized, watch, &spirv);
+    const VkPipeline p = create_compute(module, CsBuild::kUnoptimized, watch, &spirv, VK_NULL_HANDLE, layout);
     if (!p) return p;
     standin = true;
     g_cs_opt.standins.fetch_add(1, std::memory_order_relaxed);
     if (!t_compute_worker) g_cs_opt.standins_cp.fetch_add(1, std::memory_order_relaxed);
-    queue_compute_optimize(opt_key, name, spirv, cs_us_since(t0));
+    queue_compute_optimize(opt_key, name, spirv, cs_us_since(t0), layout);
     return p;
 }
 
@@ -3219,6 +3962,7 @@ Precompiled take_precompiled_compute(std::uint64_t key, const GpuDispatch& d, co
     if (waited) {
         g_cs_pre.waited += 1;
         g_cs_pre.wait_us += wait_us;
+        perf::note_compile("compute", name + " (the dispatch waited for its worker)", wait_us, false, true);
     }
     PrecompiledCompute::Entry& e = g_cs_pre.by_key[key];
     if (e.failed) return Precompiled::kBuildHere;  // the dispatch's own build reports the failure
@@ -3316,7 +4060,7 @@ ComputePipeline& pipeline_for(const GpuDispatch& d, std::uint64_t key, const std
         return pl;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    pl.pipeline = first_compute_pipeline(pl.module, key, name, pl.meta.spirv, pl.standin, name + " (at its dispatch)");
+    pl.pipeline = first_compute_pipeline(pl.module, key, name, pl.meta.spirv, pl.standin, name + " (at its dispatch)", g.cs_pipe_layout);
     if (!pl.pipeline) {
         host_log("gpu: shader %s: pipeline creation failed", name.c_str());
         pl.failed = true;
@@ -3457,7 +4201,7 @@ void precompile_compute(const std::string& name, const std::vector<std::uint8_t>
         }();
         if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         t_compute_worker = true;
-        e.pipeline = first_compute_pipeline(e.module, key, name, e.meta.spirv, e.standin, name);
+        e.pipeline = first_compute_pipeline(e.module, key, name, e.meta.spirv, e.standin, name, g.cs_pipe_layout);
         if (!e.pipeline) why = "pipeline";
     }
     e.us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
@@ -3844,8 +4588,10 @@ void retire_slot_locked(int k) {
     const auto t0 = std::chrono::steady_clock::now();
     g.wait_started_ns.store(static_cast<std::uint64_t>(t0.time_since_epoch().count()), std::memory_order_relaxed);
     g.waiting_slot.store(k, std::memory_order_relaxed);
-    const VkResult r = vkWaitForFences(g.device, 1, &sl.fence, VK_TRUE, 10000000000ull);
+    const VkFence cover = slot_fence(sl);  // test7c: its own, or the batch's (BBHOST_SUBMIT_BATCH)
+    const VkResult r = cover ? vkWaitForFences(g.device, 1, &cover, VK_TRUE, 10000000000ull) : VK_SUCCESS;
     g.waiting_slot.store(-1, std::memory_order_relaxed);
+    if (r == VK_SUCCESS) g_completed_atomic.store(std::max(g_completed_atomic.load(std::memory_order_relaxed), sl.serial + 1), std::memory_order_release);
     const auto fence_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
     g.gpu_us.fetch_add(fence_us);
     bump(g_stream_stats.fence_ns, static_cast<std::uint64_t>(fence_us) * 1000);
@@ -4165,11 +4911,14 @@ bool image_memory_alloc(const VkMemoryRequirements& req, ImageMemory& out) {
     return true;
 }
 
+static void pass_views_image_gone_locked(VkImage image);  // below, with pass_view_locked
+
 void defer_destroy_image(VkImage image, const ImageMemory& m) {
     if (m.block < 0) {
         defer_destroy_image(image, m.memory);
         return;
     }
+    if (image) pass_views_image_gone_locked(image);
     bump_view_epoch();
     if (image) g.slots[g.slot].dead_images.push_back(image);
     g.slots[g.slot].dead_ranges.push_back(m);
@@ -4229,6 +4978,7 @@ void start_memory_reserve() {
     const bool keeper = env("BBHOST_MEMORY_KEEPER", 1) != 0;
     std::thread([=] {
         host_thread_set_name("bb-reserve");
+        host_thread_place(HostPlace::Any, "bb-reserve");  // rc5: not the hot mask of the thread that made it
         // The heap's blocks are of the memory type its first image asked for.
         std::uint32_t type = UINT32_MAX;
         const auto make_staging = [&](std::uint64_t upto) {
@@ -4391,7 +5141,56 @@ void start_memory_reserve() {
     }).detach();
 }
 
+namespace {
+// pass_view_locked's views (gpu_internal.h), newest last. A handful: the
+// motion pass's two and FSR 4.1.1's three, plus the ones a resize leaves.
+struct PassView {
+    VkImage image;
+    VkFormat format;
+    VkImageAspectFlags aspect;
+    VkImageView view;
+};
+std::vector<PassView> g_pass_views;
+constexpr std::size_t kMaxPassViews = 16;
+void pass_views_forget_locked(VkImage image) {
+    for (std::size_t i = 0; i < g_pass_views.size();) {
+        if (g_pass_views[i].image == image) {
+            defer_destroy_private_view(g_pass_views[i].view);
+            g_pass_views.erase(g_pass_views.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+}  // namespace
+
+static void pass_views_image_gone_locked(VkImage image) {
+    if (!g_pass_views.empty()) pass_views_forget_locked(image);
+}
+
+VkImageView pass_view_locked(VkImage image, VkFormat format, VkImageAspectFlags aspect) {
+    if (!image) return VK_NULL_HANDLE;
+    for (std::size_t i = 0; i < g_pass_views.size(); ++i) {
+        const PassView& v = g_pass_views[i];
+        if (v.image == image && v.format == format && v.aspect == aspect) return v.view;
+    }
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = format;
+    vci.subresourceRange = {aspect, 0, 1, 0, 1};
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(g.device, &vci, nullptr, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (g_pass_views.size() >= kMaxPassViews) {  // the oldest goes (deferred: a recording may still use it)
+        defer_destroy_private_view(g_pass_views.front().view);
+        g_pass_views.erase(g_pass_views.begin());
+    }
+    g_pass_views.push_back({image, format, aspect, view});
+    return view;
+}
+
 void defer_destroy_image(VkImage image, VkDeviceMemory memory) {
+    if (image) pass_views_image_gone_locked(image);
     bump_view_epoch();
     if (image) g.slots[g.slot].dead_images.push_back(image);
     if (memory) g.slots[g.slot].dead_memory.push_back(memory);
@@ -4457,6 +5256,13 @@ std::array<void*, 4> g_gap_sites{};
 bool g_in_profiler = false;
 }  // namespace
 
+void debug_label_locked(const std::string* name) {
+    if (!g.debug_labels || !g_insert_label) return;
+    VkDebugUtilsLabelEXT l{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+    l.pLabelName = name && !name->empty() ? name->c_str() : "pass";
+    g_insert_label(g_cmd(), &l);
+}
+
 void profile_note_site_locked(void* site) {
     if (g_in_profiler) return;
     for (void*& s : g_gap_sites) {
@@ -4480,7 +5286,8 @@ void profile_begin_locked(const std::string* name) {
     }
     vkCmdWriteTimestamp(g_cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, sl.qpool, static_cast<std::uint32_t>(sl.qnames.size() * 2));
     if (g.profile_stats && !sl.stat_open) {
-        vkCmdBeginQuery(g_cmd(), sl.stat_pool, static_cast<std::uint32_t>(sl.qnames.size()), 0);
+        sl.stat_index = static_cast<std::uint32_t>(sl.qnames.size());
+        vkCmdBeginQuery(g_cmd(), sl.stat_pool, sl.stat_index, 0);
         sl.stat_open = true;
     }
     g_in_profiler = false;
@@ -4497,8 +5304,8 @@ void profile_end_locked() {
     if (sl.qnames.empty()) return;
     g_in_profiler = true;
     vkCmdWriteTimestamp(g_cmd(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sl.qpool, static_cast<std::uint32_t>(sl.qnames.size() * 2 - 1));
-    if (sl.stat_open) {
-        vkCmdEndQuery(g_cmd(), sl.stat_pool, static_cast<std::uint32_t>(sl.qnames.size() - 1));
+    if (sl.stat_open && sl.stat_index == sl.qnames.size() - 1) {  // rc4: only the pair that began it (a nested one never did)
+        vkCmdEndQuery(g_cmd(), sl.stat_pool, sl.stat_index);
         sl.stat_open = false;
     }
     g_in_profiler = false;
@@ -4508,22 +5315,31 @@ void profile_end_locked() {
 void collect_profile_locked(Gpu::Slot& sl) {
     std::uint64_t span[2] = {};
     bool have_span = false;
-    if (g.profile && sl.span) {
+    const bool sampled = sl.sampled;  // rc2: the GPU sampler's, not BBHOST_GPU_PROFILE's
+    if ((g.profile || sampled) && sl.span) {
         if (vkGetQueryPoolResults(g.device, sl.qpool, kQueriesPerSlot - 2, 2, sizeof(span), span, 8,
                                   VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS &&
             span[1] > span[0]) {
-            g.cmdbuf_ns += static_cast<std::uint64_t>((span[1] - span[0]) * g.timestamp_period_ns);
-            ++g.cmdbuf_count;
+            if (sampled) {
+                g_sampler.span_ns += static_cast<std::uint64_t>((span[1] - span[0]) * g.timestamp_period_ns);
+            } else {
+                g.cmdbuf_ns += static_cast<std::uint64_t>((span[1] - span[0]) * g.timestamp_period_ns);
+                ++g.cmdbuf_count;
+            }
             have_span = true;
         }
     }
     sl.span = false;
+    if (sampled) {
+        sl.sampled = false;
+        if (g_sampler.pending > 0) --g_sampler.pending;
+    }
     const auto charge_gap = [&](const std::array<void*, 4>& sites, std::uint64_t from, std::uint64_t to) {
         auto& e = g.profile_gap_ns[sites];
         e.first += to > from ? static_cast<std::uint64_t>((to - from) * g.timestamp_period_ns) : 0;
         e.second += 1;
     };
-    if (!g.profile || sl.qnames.empty()) {
+    if (!(g.profile || sampled) || sl.qnames.empty()) {
         if (g.profile_gaps && have_span) charge_gap(sl.tail_gap, span[0], span[1]);
         sl.qnames.clear();
         sl.qgaps.clear();
@@ -4535,17 +5351,24 @@ void collect_profile_locked(Gpu::Slot& sl) {
                               VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         for (std::size_t i = 0; i < sl.qnames.size(); ++i) {
             const std::uint64_t dt = ts[i * 2 + 1] > ts[i * 2] ? ts[i * 2 + 1] - ts[i * 2] : 0;
-            auto& e = g.profile_ns[*sl.qnames[i]];
+            auto& e = sampled ? g_sampler.ns[*sl.qnames[i]] : g.profile_ns[*sl.qnames[i]];
             e.first += static_cast<std::uint64_t>(dt * g.timestamp_period_ns);
             e.second += 1;
         }
-        std::vector<std::uint64_t> stats(sl.qnames.size() * 6);
-        if (g.profile_stats &&
-            vkGetQueryPoolResults(g.device, sl.stat_pool, 0, static_cast<std::uint32_t>(sl.qnames.size()), stats.size() * 8, stats.data(),
-                                  6 * 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
+        // rc4: with availability, not waiting - a pair nested in another
+        // began no query of its own, and waiting on one never written would
+        // not return; the timestamps above waited for the command buffer.
+        std::vector<std::uint64_t> stats(sl.qnames.size() * 7);
+        const VkResult sr = g.profile_stats
+                                ? vkGetQueryPoolResults(g.device, sl.stat_pool, 0, static_cast<std::uint32_t>(sl.qnames.size()),
+                                                        stats.size() * 8, stats.data(), 7 * 8,
+                                                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+                                : VK_ERROR_UNKNOWN;
+        if (sr == VK_SUCCESS || sr == VK_NOT_READY) {
             for (std::size_t i = 0; i < sl.qnames.size(); ++i) {
-                auto& e = g.profile_stats_sum[*sl.qnames[i]];
-                for (int k = 0; k < 6; ++k) e[k] += stats[i * 6 + k];
+                if (!stats[i * 7 + 6]) continue;
+                auto& e = sampled ? g_sampler.stats[*sl.qnames[i]] : g.profile_stats_sum[*sl.qnames[i]];
+                for (int k = 0; k < 6; ++k) e[k] += stats[i * 7 + k];
             }
         }
         // BBHOST_GPU_SLOW_MS (8): a command buffer that ran that long on the
@@ -4594,13 +5417,13 @@ void collect_profile_locked(Gpu::Slot& sl) {
 
 // Submits the recorded work and moves on to the next command buffer,
 // waiting only if that one is still executing.
-void submit_locked() {
+__attribute__((noinline)) void submit_locked() {
     if (!g.recording) {
         return;
     }
     // The occlusion counters this recording dumped land before its labels,
     // as the PS4's DBs write them before the end-of-pipe event that follows.
-    occlusion_submit_locked();
+    const bool occl = occlusion_submit_locked();
     flush_deferred_writes_locked();  // (its transfer batch puts deferred copy-backs in place first)
     transfer_flush_locked();
     render_end_pass_locked();
@@ -4643,6 +5466,16 @@ void submit_locked() {
     }
     Gpu::Slot& cur = g.slots[g.slot];
     cur.serial = g.flushes;
+    {
+        const std::uint64_t k = cur.serial % kSubRing;
+        g_sub_site[k].store(t_flush_site ? t_flush_site : __builtin_return_address(0), std::memory_order_relaxed);
+        g_sub_handover_ns[k].store(host_clock_monotonic_ns(), std::memory_order_relaxed);
+        g_sub_recorded_ns[k].store(0, std::memory_order_relaxed);
+        g_sub_starved[k].store(0, std::memory_order_relaxed);  // submit_job_now sets it
+        g_fence_owner[k].store(cur.serial, std::memory_order_relaxed);  // its own fence, unless bb-submit merges it
+        g_sub_occl[k].store(occl ? 1 : 0, std::memory_order_relaxed);
+        t_flush_site = nullptr;
+    }
     textures_before_submit();  // the staging spans its copies read are filled
     // BBHOST_TEST_DEVICE_LOST=<flip>: from that flip on, act as if the device
     // were lost (it is not; the GPU only gets no more work) - the reports, the
@@ -4708,9 +5541,90 @@ void submit_locked() {
 
 // Submits and waits for everything in flight (frame dumps, resource
 // re-purposing, BBHOST_SYNC_GNM).
-void flush_locked() {
+__attribute__((noinline)) void flush_locked() {
+    t_flush_site = __builtin_return_address(0);  // test7: the gap after it is this wait's (gpu idle:)
     submit_locked();
+    const std::uint64_t t0 = host_clock_monotonic_ns();
     retire_through_locked(g.flushes - 1);
+    g_cp_flush_ns.fetch_add(host_clock_monotonic_ns() - t0, std::memory_order_relaxed);
+    g_cp_flushes.fetch_add(1, std::memory_order_relaxed);
+}
+
+// test7c: the fence that signals once slot `sl`'s submission has run: its
+// own, or that of the later job whose vkQueueSubmit it went in with
+// (BBHOST_SUBMIT_BATCH); null when that one has retired already (done).
+// Slots retire in order, so the later one is still in its slot while this
+// one is in flight. Under g.mu, after the submission was published.
+VkFence slot_fence(const Gpu::Slot& sl) {
+    const std::uint64_t o = g_fence_owner[sl.serial % kSubRing].load(std::memory_order_acquire);
+    if (o <= sl.serial) return sl.fence;
+    const Gpu::Slot& os = g.slots[o % static_cast<std::uint64_t>(g.slot_count)];
+    return os.in_flight && os.serial == o ? os.fence : VK_NULL_HANDLE;
+}
+bool slot_fence_signaled(const Gpu::Slot& sl) {
+    const VkFence f = slot_fence(sl);
+    return !f || vkGetFenceStatus(g.device, f) == VK_SUCCESS;
+}
+
+// test7: a game submission's record for the idle report (gpu_busy.cpp).
+bool submit_had_occlusion(std::uint64_t serial) { return g_sub_occl[serial % kSubRing].load(std::memory_order_relaxed) != 0; }
+
+bool submit_record(std::uint64_t serial, void** site) {
+    const std::uint64_t k = serial % kSubRing;
+    *site = g_sub_site[k].load(std::memory_order_relaxed);
+    return g_sub_starved[k].load(std::memory_order_relaxed) != 0;
+}
+
+SubmitLatencyTotals submit_latency_totals() {
+    SubmitLatencyTotals t;
+    t.n = g_sub_lat.n.load(std::memory_order_relaxed);
+    t.starved = g_sub_lat.starved.load(std::memory_order_relaxed);
+    t.record_ns = g_sub_lat.record_ns.load(std::memory_order_relaxed);
+    t.queue_ns = g_sub_lat.queue_ns.load(std::memory_order_relaxed);
+    t.submit_ns = g_sub_lat.submit_ns.load(std::memory_order_relaxed);
+    // The maxima are per report: taken and cleared.
+    t.record_max = g_sub_lat.record_max.exchange(0, std::memory_order_relaxed);
+    t.queue_max = g_sub_lat.queue_max.exchange(0, std::memory_order_relaxed);
+    t.submit_max = g_sub_lat.submit_max.exchange(0, std::memory_order_relaxed);
+    t.flushes = g_cp_flushes.load(std::memory_order_relaxed);
+    t.flush_ns = g_cp_flush_ns.load(std::memory_order_relaxed);
+    t.splits = g_submit_splits.load(std::memory_order_relaxed);
+    t.batch_submits = g_batch_submits.load(std::memory_order_relaxed);
+    t.batch_jobs = g_batch_jobs.load(std::memory_order_relaxed);
+    t.batch_holds = g_batch_holds.load(std::memory_order_relaxed);
+    t.batch_hold_ns = g_batch_hold_ns.load(std::memory_order_relaxed);
+    return t;
+}
+
+// test7, BBHOST_SUBMIT_SPLIT=<n> (off by default): every n-th draw, when the
+// GPU has run out of work (the last game submission's fence has signalled)
+// and the recording holds at least 16 items, submit what is recorded so far
+// instead of keeping the GPU idle until the job ends. A submission at a draw
+// boundary mid-job is what BBHOST_PASS_BREAK_SUBMIT and the renderer's own
+// flush_locked callers already do; the labels recorded so far land at its
+// end, after their work, as they would at the job's end.
+void submit_split_point() {
+    static const std::uint64_t every = [] {
+        const char* e = std::getenv("BBHOST_SUBMIT_SPLIT");
+        const std::uint64_t n = e ? std::strtoull(e, nullptr, 10) : 0ull;
+        if (n) host_log("gpu: BBHOST_SUBMIT_SPLIT=%llu: a recording is submitted mid-job when the GPU has run dry (checked every %llu draws)",
+                        static_cast<unsigned long long>(n), static_cast<unsigned long long>(n));
+        return n;
+    }();
+    if (!every) return;
+    static thread_local std::uint64_t seen = 0;
+    if (++seen % every != 0) return;
+    std::lock_guard<GpuMutex> lock(g.mu);
+    if (!g.ok || !g.recording || g.queued < 16 || g.flushes == 0) return;
+    const std::uint64_t prev = g.flushes - 1;
+    const Gpu::Slot& sl = g.slots[prev % static_cast<std::uint64_t>(g.slot_count)];
+    if (sl.in_flight && sl.serial == prev) {
+        if (stream_submitted_serial() <= prev) return;  // not even on the queue yet: the recorder is behind, not the GPU
+        const VkFence cover = slot_fence(sl);
+        if (cover && vkGetFenceStatus(g.device, cover) != VK_SUCCESS) return;  // the GPU still has work
+    }
+    submit_locked();
+    g_submit_splits.fetch_add(1, std::memory_order_relaxed);
 }
 
 void wait_submission_locked(std::uint64_t serial) {
@@ -4719,7 +5633,7 @@ void wait_submission_locked(std::uint64_t serial) {
     if (!sl.in_flight || sl.serial != serial) return;  // retired, and its slot taken again
     stream_wait_submitted(serial);                      // its fence has gone to the queue
     const auto t0 = std::chrono::steady_clock::now();
-    vkWaitForFences(g.device, 1, &sl.fence, VK_TRUE, 10000000000ull);
+    if (const VkFence cover = slot_fence(sl)) vkWaitForFences(g.device, 1, &cover, VK_TRUE, 10000000000ull);
     g.gpu_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
 }
 
@@ -4852,6 +5766,179 @@ void host_gpu_wait_submitted(std::uint64_t ticket) {
     g_sub_idle.wait(lk, [ticket] { return g_sub_submitted.load(std::memory_order_acquire) >= ticket; });
 }
 
+bool host_gpu_wait_submitted_until(std::uint64_t ticket, std::int64_t deadline_ns) {
+    if (!ticket) return true;
+    const auto deadline = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline_ns));
+    std::unique_lock<std::mutex> lk(g_sub_mu);
+    if (ticket & kForeignTicket) {
+        const std::uint64_t id = ticket & ~kForeignTicket;
+        return g_sub_idle.wait_until(lk, deadline, [id] { return g_foreign_submitted.load(std::memory_order_acquire) >= id; });
+    }
+    return g_sub_idle.wait_until(lk, deadline, [ticket] { return g_sub_submitted.load(std::memory_order_acquire) >= ticket; });
+}
+
+namespace {
+bool present_priority_env() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_PRESENT_PRIORITY");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+std::atomic<std::uint64_t> g_prio_direct{0}, g_prio_stream{0}, g_prio_wait_ns{0}, g_prio_timeouts{0};
+std::atomic<std::uint64_t> g_blit_rode{0}, g_blit_alone{0}, g_blit_ride_missed{0}, g_prio_fallbacks{0}, g_prio_wait_over50{0},
+    g_prio_wait_max_ns{0};  // rc4
+}  // namespace
+
+std::uint64_t host_gpu_stream_mark() { return stream_activity() + g.flushes; }
+
+bool host_gpu_presenter_priority_ok(std::uint64_t need, std::uint64_t mark) {
+    // The stream on (bb-submit and the recorder: the default), the blit
+    // recorded nothing into the game's stream - a transition or clear there
+    // would be in a later submission, and the blit must not pass it - and
+    // the flip names the submissions it needs.
+    const bool ok = present_priority_env() && g_sub_running && stream_on() && need != ~0ull && g.ok &&
+                    !g_device_lost.load(std::memory_order_acquire) && host_gpu_stream_mark() == mark;
+    (ok ? g_prio_direct : g_prio_stream).fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+std::uint64_t host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence,
+                                                std::uint64_t need) {
+    // The flip's frame on the queue first: submissions on one queue execute
+    // in submission order, so what it rendered is ahead of the blit; only
+    // the next frame's, recorded since, may come after it.
+    // rc4: bounded at BBHOST_PRESENT_PRIORITY_WAIT_MS (100 ms; it was 2 s)
+    // - past that, the stream path (behind the frame in the recorder's order,
+    // as with BBHOST_PRESENT_PRIORITY=0); a wait over 50 ms is logged. And the
+    // blit rides the flip's last submission when that has not gone in yet
+    // (g_rider; BBHOST_BLIT_RIDE=0: never), with an empty vkQueueSubmit for
+    // the presenter's fence after it (RADV: no GPU job, the fence takes the
+    // queue's last submission's).
+    static const std::uint64_t cap_ns = [] {
+        const char* e = std::getenv("BBHOST_PRESENT_PRIORITY_WAIT_MS");
+        const long v = e && *e ? std::atol(e) : 100;
+        return static_cast<std::uint64_t>(std::clamp<long>(v, 5, 2000)) * 1000000ull;
+    }();
+    static const bool ride_on = [] {
+        const char* e = std::getenv("BBHOST_BLIT_RIDE");
+        return !(e && e[0] == '0');
+    }();
+    VkCommandBuffer c = static_cast<VkCommandBuffer>(cmd);
+    VkSemaphore w = static_cast<VkSemaphore>(wait), sg = static_cast<VkSemaphore>(signal);
+    bool offered = false;
+    if (g_stream_submitted.load(std::memory_order_acquire) < need) {
+        const std::uint64_t t0 = host_clock_monotonic_ns();
+        std::unique_lock<std::mutex> lk(g_sub_mu);
+        // A blit waiting on a semaphore (the acquire, without the fence) does not ride.
+        if (ride_on && !w && !g_rider.armed && g_stream_submitted.load(std::memory_order_acquire) < need) {
+            g_rider = BlitRider{};
+            g_rider.armed = true;
+            g_rider.need = need;
+            g_rider.cmd = c;
+            g_rider.signal = sg;
+            offered = true;
+        }
+        const bool got = g_sub_idle.wait_for(lk, std::chrono::nanoseconds(cap_ns), [need] {
+            return g_stream_submitted.load(std::memory_order_acquire) >= need || g_device_lost.load(std::memory_order_acquire);
+        });
+        bool taken = false, failed = false;
+        if (offered) {
+            if (g_rider.taken && !g_rider.done) {
+                // Taken and in vkQueueSubmit now: its result is moments away.
+                g_sub_idle.wait_for(lk, std::chrono::milliseconds(50), [] { return g_rider.done; });
+            }
+            taken = g_rider.taken;
+            failed = taken && (!g_rider.done || g_rider.result != VK_SUCCESS);
+            g_rider = BlitRider{};  // revoked, or used
+        }
+        lk.unlock();
+        const std::uint64_t waited = host_clock_monotonic_ns() - t0;
+        g_prio_wait_ns.fetch_add(waited, std::memory_order_relaxed);
+        bump_max(g_prio_wait_max_ns, waited);
+        if (waited > 50000000ull) {
+            g_prio_wait_over50.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<int> logs{0};
+            if (logs.fetch_add(1) < 16) {
+                host_log("present: the blit waited %.1f ms for the flip's submission %llu (%s)", waited / 1e6,
+                         static_cast<unsigned long long>(need - 1), got ? "then went" : "past the cap: the stream path");
+            }
+        }
+        if (taken && !failed) {
+            g_blit_rode.fetch_add(1, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> q(g.queue_mu);
+            const VkResult r = vkQueueSubmit(g.queue, 0, nullptr, static_cast<VkFence>(fence));
+            if (r != VK_SUCCESS) {
+                int none = 0;
+                g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
+            }
+            return 0;
+        }
+        if (taken && failed) {
+            // Its submission failed (the device is going): the fence alone, so the presenter does not wait forever.
+            std::lock_guard<std::mutex> q(g.queue_mu);
+            vkQueueSubmit(g.queue, 0, nullptr, static_cast<VkFence>(fence));
+            return 0;
+        }
+        if (offered) g_blit_ride_missed.fetch_add(1, std::memory_order_relaxed);
+        if (!got) {
+            g_prio_timeouts.fetch_add(1, std::memory_order_relaxed);
+            if (!g_device_lost.load(std::memory_order_acquire)) {
+                std::uint64_t ticket = 0;
+                {
+                    std::lock_guard<GpuMutex> lock(g.mu);
+                    if (g.ok) ticket = host_gpu_submit_presenter(cmd, wait, wait_stage, signal, fence);
+                }
+                if (ticket) {
+                    g_prio_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                    return ticket;
+                }
+            }
+        }
+    }
+    g_blit_alone.fetch_add(1, std::memory_order_relaxed);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkPipelineStageFlags ws = wait_stage;
+    si.waitSemaphoreCount = w ? 1 : 0;
+    si.pWaitSemaphores = w ? &w : nullptr;
+    si.pWaitDstStageMask = w ? &ws : nullptr;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &c;
+    si.signalSemaphoreCount = sg ? 1 : 0;
+    si.pSignalSemaphores = sg ? &sg : nullptr;
+    VkResult r;
+    {
+        std::lock_guard<std::mutex> q(g.queue_mu);
+        r = vkQueueSubmit(g.queue, 1, &si, static_cast<VkFence>(fence));
+    }
+    if (r != VK_SUCCESS) {
+        int none = 0;
+        g_sub_failed.compare_exchange_strong(none, static_cast<int>(r));
+        static std::atomic<int> logs{0};
+        if (logs.fetch_add(1) < 4) host_log("present: the blit's priority submit failed (%d)", static_cast<int>(r));
+    }
+    return 0;
+}
+
+void host_gpu_blit_ride_stats(std::uint64_t* rode, std::uint64_t* alone, std::uint64_t* missed, std::uint64_t* fallbacks,
+                              std::uint64_t* over50, std::uint64_t* max_ns) {
+    *rode = g_blit_rode.load(std::memory_order_relaxed);
+    *alone = g_blit_alone.load(std::memory_order_relaxed);
+    *missed = g_blit_ride_missed.load(std::memory_order_relaxed);
+    *fallbacks = g_prio_fallbacks.load(std::memory_order_relaxed);
+    *over50 = g_prio_wait_over50.load(std::memory_order_relaxed);
+    *max_ns = g_prio_wait_max_ns.load(std::memory_order_relaxed);
+}
+
+std::uint64_t host_gpu_reset_first_cmdbufs() { return g_reset_first_cmdbufs.load(std::memory_order_relaxed); }
+
+void host_gpu_presenter_priority_stats(std::uint64_t* direct, std::uint64_t* stream, std::uint64_t* wait_ns, std::uint64_t* timeouts) {
+    *direct = g_prio_direct.load(std::memory_order_relaxed);
+    *stream = g_prio_stream.load(std::memory_order_relaxed);
+    *wait_ns = g_prio_wait_ns.load(std::memory_order_relaxed);
+    *timeouts = g_prio_timeouts.load(std::memory_order_relaxed);
+}
+
 bool host_gpu_submit_for_flip(std::uint64_t need) {
     {
         // The command processor submits after every job (gnm_exec.cpp,
@@ -4950,6 +6037,105 @@ std::atomic<std::uint64_t> g_unresolved_stores{0};
 const bool g_store_log = std::getenv("BBHOST_STORE_LOG") != nullptr;
 std::atomic<std::uint64_t> g_store_logs{0};
 }
+
+namespace {
+// rc5b: a compute shader's constant buffers (TranslateOptions::cb_ssbo, which
+// keeps the page-table walk as every buffer's fallback). One is bound only
+// when the binding provably reads what the walk would: a V# or pointer read
+// at constant offsets (not by index), over memory imported as one buffer,
+// that no copy-back holds, that this dispatch does not store to and that the
+// GPU has not written earlier in this recording, at a base on a vec4 of its
+// binding. The binding is the same memory the page table maps, read when the
+// dispatch runs, as the walk reads it; there is no copy and no snapshot. All
+// else stays on the walk (cb_valid bit clear) with the dummy buffer.
+void resolve_compute_buffers_locked(const ComputePipeline& pl, const std::uint32_t* user, gcn::StageParams& params,
+                                    std::vector<VkDescriptorBufferInfo>& infos) {
+    const gcn::TranslateResult& meta = pl.meta;
+    infos.assign(meta.buffers.size(), VkDescriptorBufferInfo{g.dummy_ssbo, 0, VK_WHOLE_SIZE});
+    // What this dispatch stores to; a store that does not resolve to a
+    // range, or one through a V# not traced to user data, could be anywhere.
+    bool stores_unknown = meta.untraced_stores != 0;
+    static thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>> stores;
+    stores.clear();
+    for (const gcn::ResourcePath& path : meta.store_buffers) {
+        std::uint32_t v[4]{};
+        if (!resolve_resource(path, user, 4, v)) {
+            stores_unknown = true;
+            break;
+        }
+        const std::uint64_t base = v[0] | (static_cast<std::uint64_t>(v[1] & 0xff) << 32);
+        const std::uint32_t stride = (v[1] >> 16) & 0x3fff;
+        const std::uint64_t bytes = stride ? std::uint64_t{v[2]} * stride : v[2];
+        std::uint64_t lo = 0, hi = 0;
+        if (!bytes || !memory_range_key(base, bytes, lo, hi)) {
+            stores_unknown = true;
+            break;
+        }
+        stores.emplace_back(lo, hi);
+    }
+    std::uint32_t bound = 0;
+    for (std::size_t i = 0; i < meta.buffers.size(); ++i) {
+        const gcn::BufferBinding& b = meta.buffers[i];
+        std::uint32_t words[4] = {};
+        // The tables the V# was read from, as the walk reads them on the GPU:
+        // none of them may have been written by the GPU in this recording either.
+        static thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>> touched;
+        touched.clear();
+        const bool resolved = resolve_resource(b.path, user, b.pointer ? 2 : 4, words, &touched);
+        const bool tables_written =
+            std::any_of(touched.begin(), touched.end(), [](const auto& t) { return gpu_written_locked(t.first, t.second); });
+        const std::uint64_t hi = b.pointer ? words[1] : (words[1] & 0xff);
+        const std::uint64_t base = resolved ? static_cast<std::uint64_t>(words[0]) | (hi << 32) : 0;
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(b.max_dw) * 4;
+        CsCbOutcome outcome = kCsBound;
+        Located loc;
+        std::uint64_t klo = 0, khi = 0;
+        if (!base || !bytes) {
+            outcome = kCsNoBase;
+        } else if (b.indexed) {
+            outcome = kCsIndexed;  // read anywhere in its records: past them GCN reads zeros
+        } else if (base & 3) {
+            outcome = kCsUnaligned;
+        } else if (stores_unknown || tables_written || gpu_written_locked(base, bytes)) {
+            outcome = kCsWritten;
+        } else if (!memory_range_key(base, bytes, klo, khi)) {
+            outcome = kCsWritten;
+        } else if (std::any_of(stores.begin(), stores.end(), [&](const auto& s) { return klo < s.second && s.first < khi; }) ||
+                   std::any_of(touched.begin(), touched.end(), [&](const auto& t) {
+                       std::uint64_t tlo = 0, thi = 0;
+                       if (!memory_range_key(t.first, t.second, tlo, thi)) return true;
+                       return std::any_of(stores.begin(), stores.end(), [&](const auto& s) { return tlo < s.second && s.first < thi; });
+                   })) {
+            outcome = kCsWritten;
+        } else if (copy_version_lookup_locked(base, bytes, nullptr) != kCopyVersionNone) {
+            outcome = kCsCopyVersion;
+        } else {
+            loc = locate(base, std::min<std::uint64_t>(bytes, g.ssbo_max_range ? g.ssbo_max_range : bytes));
+            if (!loc.buffer) {
+                outcome = kCsUnmapped;
+            } else {
+                const VkDeviceSize start = loc.offset & ~(g.ssbo_align - 1);
+                const VkDeviceSize bias = loc.offset - start;
+                if (bias % 16 != 0) {
+                    outcome = kCsUnaligned;  // as the graphics stages' realignment: a base off a vec4 stays on the walk
+                } else if (bytes <= loc.avail && bias + bytes <= g.ssbo_max_range) {
+                    infos[i] = {loc.buffer, start, bias + bytes};
+                    params.cb_valid |= 1u << i;
+                    params.cb_bias_dw[i] = static_cast<std::uint32_t>(bias / 4);
+                    ++bound;
+                } else {
+                    outcome = kCsTooLong;
+                }
+            }
+        }
+        g_cs_cb_outcomes[outcome].fetch_add(1, std::memory_order_relaxed);
+    }
+    g_cs_cb_dispatches.fetch_add(1, std::memory_order_relaxed);
+    if (bound == meta.buffers.size()) g_cs_cb_dispatches_all.fetch_add(1, std::memory_order_relaxed);
+    static std::uint64_t logged = 0;
+    if (++logged % 20000 == 0) host_log("gpu: compute cb: %s", compute_cb_line().c_str());
+}
+}  // namespace
 
 bool host_gpu_dispatch(const GpuDispatch& d) {
     DispatchStamp stamp;
@@ -5122,9 +6308,28 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     gcn::StageParams params{};
     params.l1_table = g.l1.address;
     std::memcpy(params.user_sgpr, d.user_data, sizeof(params.user_sgpr));
+    // rc5b: its constant buffers, where they bind (resolve_compute_buffers_locked).
+    static thread_local std::vector<VkDescriptorBufferInfo> cb_infos;
+    cb_infos.clear();
+    if (g_cs_cb && !pl.meta.buffers.empty()) {
+        if (!pl.cb_counted) {
+            pl.cb_counted = true;
+            g_cs_cb_pipelines.fetch_add(1, std::memory_order_relaxed);
+            g_cs_cb_pipeline_buffers.fetch_add(pl.meta.buffers.size(), std::memory_order_relaxed);
+            if (g_cs_cb_pipelines.load(std::memory_order_relaxed) <= 24) {
+                host_log("gpu: compute cb: %s reads %zu constant buffer(s) through bindings (walk as their fallback)", pl.name.c_str(),
+                         pl.meta.buffers.size());
+            }
+        }
+        resolve_compute_buffers_locked(pl, d.user_data, params, cb_infos);
+    }
+    if (g_cs_cb && !pl.cb_counted) {
+        pl.cb_counted = true;
+        g_cs_cb_pipelines_seen.fetch_add(1, std::memory_order_relaxed);
+    }
     VkDescriptorBufferInfo ubi{};
     alloc_params_slot_locked(params, ubi);
-    VkDescriptorSet set = alloc_set_locked();
+    VkDescriptorSet set = alloc_set_locked(g.cs_set_layout);
     if (!set) {
         host_log("gpu: descriptor set allocation failed");
         g.failures.fetch_add(1);
@@ -5141,10 +6346,19 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     std::vector<VkDescriptorImageInfo> infos;
     infos.reserve(pl.meta.images.size() + pl.meta.samplers.size() + 1);
     bind_stage_images(set, pl.meta, stage_images, writes, infos, pl.name.c_str());
+    for (std::size_t i = 0; i < cb_infos.size(); ++i) {
+        VkWriteDescriptorSet bw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        bw.dstSet = set;
+        bw.dstBinding = pl.meta.buffers[i].binding;
+        bw.descriptorCount = 1;
+        bw.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bw.pBufferInfo = &cb_infos[i];
+        writes.push_back(bw);
+    }
     vkUpdateDescriptorSets(g.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     rec().bind_pipeline(VK_PIPELINE_BIND_POINT_COMPUTE, pl.pipeline);
     const std::uint32_t params_offset = static_cast<std::uint32_t>(ubi.offset);
-    rec().bind_sets(VK_PIPELINE_BIND_POINT_COMPUTE, g.pipe_layout, 0, 1, &set, set_cache_on() ? 1 : 0, &params_offset);
+    rec().bind_sets(VK_PIPELINE_BIND_POINT_COMPUTE, g.cs_pipe_layout, 0, 1, &set, set_cache_on() ? 1 : 0, &params_offset);
     profile_begin_locked(&pl.name);
     note_dispatch_name(g.dispatches.load(), pl.name.c_str());
     gpu_checkpoint(2, g.dispatches.load());
@@ -5167,6 +6381,7 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
     for (const gcn::ResourcePath& path : pl.meta.store_buffers) {
         std::uint32_t v[4]{};
         if (!resolve_resource(path, d.user_data, 4, v)) {
+            gpu_write_taint_locked();  // rc5b: written somewhere
             if (g_unresolved_stores.fetch_add(1, std::memory_order_relaxed) < 8) {
                 host_log("gpu: dispatch %s stores through %s, which did not resolve", pl.name.c_str(), path.str().c_str());
             }
@@ -5180,7 +6395,9 @@ bool host_gpu_dispatch(const GpuDispatch& d) {
                      static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), stride, v[2]);
         }
         shadow_written_locked(base, bytes, true);
+        if (!bytes) gpu_write_taint_locked();  // rc5b: no extent to go by
     }
+    if (pl.meta.untraced_stores) gpu_write_taint_locked();  // rc5b
     if (pl.meta.untraced_stores && !pl.untraced_stores_logged) {
         pl.untraced_stores_logged = true;
         host_log("gpu: dispatch %s has %u store(s) through a V# not traced to user data", pl.name.c_str(), pl.meta.untraced_stores);
@@ -5222,7 +6439,7 @@ void host_gpu_flush() {
 // last call, "name=ms(count)" for the top eight.
 std::string host_gpu_profile_report() {
     std::lock_guard<GpuMutex> lock(g.mu);
-    if (!g.profile) return "";
+    if (!g.profile_env) return "";  // rc2: not the GPU sampler's frames
     std::vector<std::pair<std::string, std::pair<std::uint64_t, std::uint64_t>>> v(g.profile_ns.begin(), g.profile_ns.end());
     std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
     std::string out;
@@ -5713,6 +6930,7 @@ void host_gpu_set_loading(bool loading) {
 }
 
 void host_gpu_world_reached() { gpu::precompile_set_world_reached(); }
+bool host_gpu_sample_running() { return gpu::g_sampler_running.load(std::memory_order_relaxed); }
 std::size_t host_gpu_shader_backlog() { return gpu::translation_cache_cold() ? gpu::precompile_backlog() : 0; }
 
 std::string host_gpu_image_heap_report() {
@@ -6190,6 +7408,48 @@ std::string copy_versions_report() {
                   static_cast<ull>(g_batch_orders.load()));
     return b;
 }
+
+bool compute_cb_on() { return g_cs_cb; }
+
+std::string compute_cb_line() {
+    const auto n = [](const std::atomic<std::uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
+    char b[640];
+    std::snprintf(b, sizeof(b),
+                  "compute_cb: on=%d pipelines=%llu buffers=%llu pipelines_without=%llu dispatches=%llu all_bound=%llu bound=%llu "
+                  "walk_no_base=%llu walk_indexed=%llu walk_unaligned=%llu walk_gpu_written=%llu walk_copy_version=%llu "
+                  "walk_unmapped=%llu walk_too_long=%llu",
+                  g_cs_cb ? 1 : 0, n(g_cs_cb_pipelines), n(g_cs_cb_pipeline_buffers), n(g_cs_cb_pipelines_seen), n(g_cs_cb_dispatches),
+                  n(g_cs_cb_dispatches_all), n(g_cs_cb_outcomes[kCsBound]), n(g_cs_cb_outcomes[kCsNoBase]), n(g_cs_cb_outcomes[kCsIndexed]),
+                  n(g_cs_cb_outcomes[kCsUnaligned]), n(g_cs_cb_outcomes[kCsWritten]), n(g_cs_cb_outcomes[kCsCopyVersion]),
+                  n(g_cs_cb_outcomes[kCsUnmapped]), n(g_cs_cb_outcomes[kCsTooLong]));
+    return b;
+}
+
+void gpu_write_note_locked(std::uint64_t va, std::uint64_t bytes) {
+    if (!g_cs_cb || !bytes) return;
+    gpu_writes_sync_locked();
+    if (g_gpu_writes_all) return;
+    std::uint64_t lo = 0, hi = 0;
+    if (g_gpu_writes.size() >= kMaxGpuWrites || !memory_range_key(va, bytes, lo, hi)) {
+        g_gpu_writes_all = true;
+        return;
+    }
+    // Neighbouring writes (a dispatch's stores, label after label) as one range.
+    for (auto& w : g_gpu_writes) {
+        if (lo <= w.second && w.first <= hi) {
+            w.first = std::min(w.first, lo);
+            w.second = std::max(w.second, hi);
+            return;
+        }
+    }
+    g_gpu_writes.emplace_back(lo, hi);
+}
+
+void gpu_write_taint_locked() {
+    if (!g_cs_cb) return;
+    gpu_writes_sync_locked();
+    g_gpu_writes_all = true;
+}
 }  // namespace gpu
 
 bool host_gpu_copy_back(std::uint64_t dst, std::uint64_t src, std::size_t bytes) {
@@ -6215,7 +7475,7 @@ std::uint64_t host_gpu_submissions_completed() {
     std::uint64_t done = g.completed_submits;
     for (const Gpu::Slot& sl : g.slots) {
         // Only a fence already submitted (bb-submit may be submitting it now).
-        if (sl.in_flight && sl.serial + 1 > done && sl.serial < stream_submitted_serial() && vkGetFenceStatus(g.device, sl.fence) == VK_SUCCESS) {
+        if (sl.in_flight && sl.serial + 1 > done && sl.serial < stream_submitted_serial() && slot_fence_signaled(sl)) {
             done = sl.serial + 1;
         }
     }
@@ -6272,3 +7532,13 @@ void host_gpu_report() {
     if (occlusion_on()) host_log("%s", occlusion_report(true).c_str());
     render_report();
 }
+
+namespace gpu {
+// rc5: the snapshot line for create_table_buffer (gpu_internal.h).
+std::string page_tables_line() {
+    char b[160];
+    std::snprintf(b, sizeof(b), "page_tables: vram=%u system=%u", g_tables_vram.load(std::memory_order_relaxed),
+                  g_tables_sys.load(std::memory_order_relaxed));
+    return b;
+}
+}  // namespace gpu

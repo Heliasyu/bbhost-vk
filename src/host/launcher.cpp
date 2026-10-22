@@ -4,6 +4,7 @@
 #include "core/sha256.h"
 #include "engine/addr.h"
 #include "engine/patch_manifest.h"
+#include "host/fsr4_pass.h"
 #include "host/options.h"
 #include "net/account.h"
 #include "host/plugin_ui.h"
@@ -16,6 +17,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -160,13 +162,14 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     ImGui_ImplSDLRenderer3_Init(ren);
 
     // The fields, from what the configuration holds now.
-    enum { kApp0, kEboot, kData, kToken, kHost, kFields };
+    enum { kApp0, kEboot, kData, kToken, kHost, kDll, kFields };
     Field f[kFields];
     f[kApp0].set(cfg.app0);
     f[kEboot].set(cfg.eboot);
     f[kData].set(cfg.data == config_default_data_dir() ? std::string() : cfg.data);
     f[kToken].set(cfg.update_token_file);
     f[kHost].set(cfg.online_host);
+    f[kDll].set(cfg.fsr4_dll);
     int server = cfg.online_host.empty() ? 0 : 2;  // nothing set yet: the live server; else custom unless it is one of these
     for (int i = 0; i < 2; ++i) {
         if (cfg.online_host == kServers[i].host) server = i;
@@ -187,6 +190,18 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     bool debug_camera = host_opt_get("debug_camera");
     int frame_cap = host_opt_frame_cap();
     int resolution = host_opt_resolution_index();
+    // bbhost-vk's upscaler and its quality (host/upscaler_presets.h). Phase 1:
+    // the quality sets the scene's render size (engine/scene_split.h); the
+    // presenter is still FSR 1 at the render resolution.
+    int upscaler = std::clamp(host_opt_index("upscaler"), 0, 3);
+    int upscale_quality = std::clamp(host_opt_index("upscale_quality"), 0, 4);
+    int upscale_sharpness = std::clamp(host_opt_index("upscale_sharpness"), 0, 10);  // tenths
+    // test7: the game's AA - On, Off, or Auto (off while FSR 4.1.1 upscales).
+    int anti_alias = std::clamp(host_opt_index("anti_alias"), 0, 2);
+    bool debug_motion_vectors = host_opt_get("debug_motion_vectors");
+    bool debug_upscaler_time = host_opt_get("debug_upscaler_time");
+    bool upscale_reactive = host_opt_get("upscale_reactive");
+    bool upscale_jitter = host_opt_get("upscale_jitter");
     static const char* const kResolutions[] = {"1280x720",         "1600x900",         "1920x1080",        "2560x1440",
                                                "3200x1800",        "3840x2160",        "2560x1080 (21:9)", "3440x1440 (21:9)",
                                                "5120x2160 (21:9)", "3840x1080 (32:9)", "5120x1440 (32:9)", "1280x800 (16:10)",
@@ -294,6 +309,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         if (!custom) e.push_back({"online", "auth_server", toml_string(kServers[server].auth_server)});
         e.push_back({"update", "check", check_updates ? "true" : "false"});
         if (!f[kToken].str().empty()) e.push_back({"update", "token_file", toml_string(saved_path(f[kToken].str()))});
+        if (!f[kDll].str().empty()) e.push_back({"upscaler", "fsr4_dll", toml_string(saved_path(f[kDll].str()))});
         e.push_back({"startup", "setup_window", show_every_start ? "true" : "false"});
         // What this bbhost's file looks like (core/config.h): a value saved
         // from here is a choice.
@@ -318,6 +334,14 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         host_opt_set("debug_camera", debug_camera);
         host_opt_set_frame_cap(kCaps[cap_choice]);
         host_opt_set_resolution_index(resolution);
+        host_opt_set_index("upscaler", upscaler);
+        host_opt_set_index("upscale_quality", upscale_quality);
+        host_opt_set_index("upscale_sharpness", upscale_sharpness);
+        host_opt_set_index("anti_alias", anti_alias);
+        host_opt_set("debug_motion_vectors", debug_motion_vectors);
+        host_opt_set("debug_upscaler_time", debug_upscaler_time);
+        host_opt_set("upscale_reactive", upscale_reactive);
+        host_opt_set("upscale_jitter", upscale_jitter);
         for (const Enhancement& x : enhancements) host_opt_set(x.key, x.on);
         host_options_save_now();
         saved_note = "Saved to " + file;
@@ -612,13 +636,8 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::EndDisabled();
         }
 
-        ImGui::SeparatorText("Start-up and display");
+        ImGui::SeparatorText("Display");  // rc2: the F10 menu's sections, mirrored
         ImGui::Checkbox("Fullscreen", &fullscreen);
-        ImGui::SameLine(260 * scale);
-        ImGui::Checkbox("Skip company logos", &skip_logos);
-        ImGui::Checkbox("Debug camera", &debug_camera);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Lance McDonald's free camera: hold Interact (E) and press L3 (Left Ctrl). The debug menu's LOAD TEST crashes while it is on.");
         ImGui::SetNextItemWidth(200 * scale);
         static const char* const kCapLabels[] = {"30 fps", "60 fps", "90 fps", "120 fps", "Uncapped"};
         ImGui::Combo("Frame rate", &cap_choice, kCapLabels, 5);
@@ -626,6 +645,71 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::SetTooltip("The game's own speed. 120 and Uncapped step it by the frame time: 120 at most 120 fps; Uncapped the display's refresh rate with V-Sync on, up to 240 fps off.");
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::Combo("Render resolution", &resolution, kResolutions, static_cast<int>(sizeof(kResolutions) / sizeof(kResolutions[0])));
+        ImGui::SetNextItemWidth(200 * scale);
+        static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
+        ImGui::Combo("Upscaler", &upscaler, kUpscalers, 4);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk: Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (FSR 3.1 is temporal; FSR 4.1.1 needs assets built once from your own DLL, tools/fsr4cap, and is FSR 3.1 without them).");
+        ImGui::SetNextItemWidth(200 * scale);
+        static const char* const kQualities[] = {"Native AA (100%)", "Quality (67%)", "Balanced (58%)", "Performance (50%)",
+                                                 "Ultra Performance (33%)"};
+        ImGui::Combo("Upscaling quality", &upscale_quality, kQualities, 5);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk: the 3D scene's render scale, with the menus, text and post-processing kept at the render resolution. Native AA is stock. Not used while Upscaler is Off.");
+        ImGui::SetNextItemWidth(200 * scale);
+        ImGui::SliderInt("Upscaler sharpness", &upscale_sharpness, 0, 10, "%d / 10");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("bbhost-vk: FSR 3.1's and FSR 4.1.1's sharpening (RCAS); 0 turns it off. 8 matches stock bbhost's FSR 1, which keeps its own.");
+        ImGui::Checkbox("Upscaler reactive mask", &upscale_reactive);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk, FSR 3.1: keeps particles, fog, Blood Echoes and the lantern's glow from smearing. Off for comparison.");
+        ImGui::SameLine(260 * scale);
+        ImGui::Checkbox("Upscaler jitter", &upscale_jitter);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk, FSR 3.1 / 4.1.1: the scene's sub-pixel jitter that lets the upscaler rebuild detail. Off for comparison only.");
+        ImGui::SeparatorText("Graphics & effects");
+        ImGui::SetNextItemWidth(200 * scale);
+        static const char* const kAntiAlias[] = {"On", "Off", "Auto (off with FSR 4.1.1)"};
+        ImGui::Combo("Anti-aliasing", &anti_alias, kAntiAlias, 3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The game's own AA pass (about 0.35 ms at 4K). Auto turns it off while FSR 4.1.1 upscales, which smooths edges itself, and keeps it on otherwise.");
+        ImGui::SeparatorText("Game");
+        ImGui::Checkbox("Skip company logos", &skip_logos);
+        ImGui::SeparatorText("Debug");
+        ImGui::Checkbox("Show motion vectors", &debug_motion_vectors);
+        ImGui::SameLine(260 * scale);
+        ImGui::Checkbox("Show upscaler GPU time", &debug_upscaler_time);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("bbhost-vk debug: the presenter's GPU time per pass under the FPS counter. Motion vectors: red/green = horizontal/vertical motion, blue = object motion, dark = no camera found (needs the scene/UI split).");
+        ImGui::Checkbox("Debug camera", &debug_camera);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lance McDonald's free camera: hold Interact (E) and press L3 (Left Ctrl). The debug menu's LOAD TEST crashes while it is on.");
+        ImGui::SeparatorText("FSR 4.1.1 assets");
+        // bbhost-vk Phase 4: FSR 4.1.1 is built once from the player's own
+        // DLL (tools/fsr4cap) into the asset folder; without it, FSR 3.1.
+        path_row("FSR 4.1.1: your amd_fidelityfx_upscaler_dx12.dll (4.1.x, e.g. from OptiScaler)", kDll, false, "");
+        {
+            static const std::string assets = gpu::fsr4_assets_dir();
+            static int checked = -1;
+            static bool built = false;
+            if (checked < 0 || ++checked > 120) {  // every ~2 s: a build may finish while the window is open
+                checked = 0;
+                built = gpu::fsr4_assets_present(assets);
+            }
+            const std::string dll = f[kDll].str();
+            if (built) {
+                status_line(true, ("FSR 4.1.1 assets built in " + assets).c_str(), "");
+            } else {
+                status_line(false, "", "FSR 4.1.1 assets not built (" + assets + "): FSR 4.1.1 runs as FSR 3.1");
+                if (is_file(dll)) {
+                    const std::string cmd = "tools/fsr4cap/build_assets.sh \"" + dll + "\"";
+                    ImGui::TextDisabled("Build them once (Proton needed): %s", cmd.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Copy command")) SDL_SetClipboardText(cmd.c_str());
+                } else if (!dll.empty()) {
+                    status_line(false, "", "that DLL does not exist");
+                }
+            }
+        }
         ImGui::TextDisabled("F10 in the game has every other setting.");
 
         ImGui::SeparatorText("Updates");
@@ -634,7 +718,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
             ImGui::TextDisabled("%s", updater::status().c_str());
             if (const std::string d = updater::detail(); !d.empty()) ImGui::TextDisabled("%s", d.c_str());
         }
-        path_row("GitHub token file (only while the releases are private)", kToken, false, "");
+        path_row("GitHub token file (optional; the update check works without one)", kToken, false, "");
 
         }
         if (game_tab) ImGui::EndChild();

@@ -5,7 +5,13 @@
 #include "host/present_pass.h"
 
 #include "host/present_spv.h"
+#include "host/shaders/motion_view_frag.spv.h"
 #include "log.h"
+
+#include <atomic>
+#include <cstdlib>
+#include <chrono>
+#include <cmath>
 
 namespace {
 
@@ -15,6 +21,10 @@ VkFormat g_format = VK_FORMAT_UNDEFINED;  // the swapchain's, the pipeline's att
 VkDescriptorSetLayout g_dsl = VK_NULL_HANDLE;
 VkPipelineLayout g_layout = VK_NULL_HANDLE;
 VkPipeline g_pipeline = VK_NULL_HANDLE;
+VkPipeline g_sharpen_pipeline = VK_NULL_HANDLE;  // rc2: present_sharpen.frag (BBHOST_SHARPEN_AT_PRESENT=1)
+std::atomic<float> g_sharpen_con{0.0f};          // the last request's, 0: none
+std::atomic<std::int64_t> g_sharpen_at{0};       // steady ns of that request (FSR's recording thread)
+std::int64_t steady_now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 VkSampler g_sampler = VK_NULL_HANDLE;
 VkDescriptorPool g_pool = VK_NULL_HANDLE;
 VkDescriptorSet g_set = VK_NULL_HANDLE;
@@ -23,6 +33,13 @@ VkDescriptorSet g_set = VK_NULL_HANDLE;
 // picture's size changes, and a view kept across frames could outlive its
 // image (a handle the driver then hands to the next image made).
 VkImageView g_source_view = VK_NULL_HANDLE;
+// bbhost-vk Phase 2: the motion-vector view's pipeline (the same vertex
+// stage, its own fragment stage, blended over the picture), set and view.
+VkPipeline g_motion_pipeline = VK_NULL_HANDLE;
+VkDescriptorPool g_motion_pool = VK_NULL_HANDLE;
+VkDescriptorSet g_motion_set = VK_NULL_HANDLE;
+VkSampler g_point = VK_NULL_HANDLE;
+VkImageView g_motion_view = VK_NULL_HANDLE;
 // The last source format asked about, and whether it filters linearly.
 VkFormat g_checked = VK_FORMAT_UNDEFINED;
 bool g_checked_ok = false;
@@ -46,12 +63,13 @@ bool build(VkDevice device) {
     dslci.pBindings = &b;
     if (vkCreateDescriptorSetLayout(device, &dslci, nullptr, &g_dsl) != VK_SUCCESS) return false;
 
-    VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4};
+    const VkPushConstantRange pcrs[2] = {{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4},
+                                         {VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(float) * 4}};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &g_dsl;
-    plci.pushConstantRangeCount = 1;
-    plci.pPushConstantRanges = &pcr;
+    plci.pushConstantRangeCount = 2;
+    plci.pPushConstantRanges = pcrs;
     if (vkCreatePipelineLayout(device, &plci, nullptr, &g_layout) != VK_SUCCESS) return false;
 
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -127,6 +145,37 @@ bool build(VkDevice device) {
     gp.pDynamicState = &ds;
     gp.layout = g_layout;
     const VkResult r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_pipeline);
+    if (r == VK_SUCCESS) {  // rc2: its sharpening variant; its failure costs only that
+        if (VkShaderModule sfs = make_module(device, present_spv::kFragSharpen, sizeof(present_spv::kFragSharpen) / 4)) {
+            stages[1].module = sfs;
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_sharpen_pipeline) != VK_SUCCESS)
+                g_sharpen_pipeline = VK_NULL_HANDLE;
+            stages[1].module = fs;
+            vkDestroyShaderModule(device, sfs, nullptr);
+        }
+    }
+    // The motion-vector view: blended (its alpha over the picture). Its
+    // failure costs only the view.
+    VkShaderModule mfs = make_module(device, k_motion_view_frag_spv, sizeof(k_motion_view_frag_spv) / 4);
+    if (r == VK_SUCCESS && mfs) {
+        stages[1].module = mfs;
+        cba.blendEnable = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.colorBlendOp = VK_BLEND_OP_ADD;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_motion_pipeline) != VK_SUCCESS) g_motion_pipeline = VK_NULL_HANDLE;
+        sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+        if (vkCreateSampler(device, &sci, nullptr, &g_point) != VK_SUCCESS) g_point = VK_NULL_HANDLE;
+        VkDescriptorPoolCreateInfo mp = dpci;
+        if (vkCreateDescriptorPool(device, &mp, nullptr, &g_motion_pool) == VK_SUCCESS) {
+            dsai.descriptorPool = g_motion_pool;
+            if (vkAllocateDescriptorSets(device, &dsai, &g_motion_set) != VK_SUCCESS) g_motion_set = VK_NULL_HANDLE;
+        }
+    }
+    if (mfs) vkDestroyShaderModule(device, mfs, nullptr);
     vkDestroyShaderModule(device, vs, nullptr);
     vkDestroyShaderModule(device, fs, nullptr);
     return r == VK_SUCCESS;
@@ -164,6 +213,17 @@ void present_pass_shutdown(VkDevice device) {
     if (!device) return;
     if (g_source_view) vkDestroyImageView(device, g_source_view, nullptr);
     if (g_pipeline) vkDestroyPipeline(device, g_pipeline, nullptr);
+    if (g_sharpen_pipeline) vkDestroyPipeline(device, g_sharpen_pipeline, nullptr);
+    g_sharpen_pipeline = VK_NULL_HANDLE;
+    if (g_motion_view) vkDestroyImageView(device, g_motion_view, nullptr);
+    if (g_motion_pipeline) vkDestroyPipeline(device, g_motion_pipeline, nullptr);
+    if (g_motion_pool) vkDestroyDescriptorPool(device, g_motion_pool, nullptr);
+    if (g_point) vkDestroySampler(device, g_point, nullptr);
+    g_motion_view = VK_NULL_HANDLE;
+    g_motion_pipeline = VK_NULL_HANDLE;
+    g_motion_pool = VK_NULL_HANDLE;
+    g_motion_set = VK_NULL_HANDLE;
+    g_point = VK_NULL_HANDLE;
     if (g_layout) vkDestroyPipelineLayout(device, g_layout, nullptr);
     if (g_pool) vkDestroyDescriptorPool(device, g_pool, nullptr);
     if (g_dsl) vkDestroyDescriptorSetLayout(device, g_dsl, nullptr);
@@ -181,6 +241,27 @@ void present_pass_shutdown(VkDevice device) {
 }
 
 bool present_pass_ready() { return g_pipeline != VK_NULL_HANDLE; }
+
+bool present_sharpen_at_present() {
+    static const bool on = [] {
+        const char* e = std::getenv("BBHOST_SHARPEN_AT_PRESENT");
+        const bool v = e && e[0] == '1';
+        if (v) host_log("present: BBHOST_SHARPEN_AT_PRESENT=1: FSR's sharpening is done in the presenting pass (the HUD is sharpened too)");
+        return v;
+    }();
+    return on;
+}
+
+bool present_pass_set_sharpen(float sharpness) {
+    if (sharpness <= 0.0f || !g_sharpen_pipeline) {
+        g_sharpen_con.store(0.0f);
+        return false;
+    }
+    const float s = sharpness > 1.0f ? 1.0f : sharpness;
+    g_sharpen_con.store(std::exp2(-(2.0f - 2.0f * s)));
+    g_sharpen_at.store(steady_now_ns());
+    return true;
+}
 
 bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, VkExtent2D extent, VkRect2D shown,
                         const PresentSource* src, const float clear[4]) {
@@ -247,8 +328,16 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
     ri.pColorAttachments = &att;
     vkCmdBeginRendering(cmd, &ri);
     if (src) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipeline);
+        // rc2: the sharpening variant only one texel a pixel (its taps are texel offsets).
+        // A request older than 100 ms: FSR has stopped upscaling (a menu, a load) - plain.
+        const float con = g_sharpen_con.load();
+        const bool sharpen = con > 0.0f && steady_now_ns() - g_sharpen_at.load() < 100000000 && g_sharpen_pipeline && shown.extent.width == src->w && shown.extent.height == src->h;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sharpen ? g_sharpen_pipeline : g_pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_set, 0, nullptr);
+        if (sharpen) {
+            const float pc[4] = {con, 0.0f, 0.0f, 0.0f};
+            vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
+        }
         const VkViewport vp{static_cast<float>(shown.offset.x), static_cast<float>(shown.offset.y), static_cast<float>(shown.extent.width),
                             static_cast<float>(shown.extent.height), 0.0f, 1.0f};
         vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -275,4 +364,41 @@ void present_pass_end(VkCommandBuffer cmd, VkImage dst) {
     to_present.dstAccessMask = 0;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr,
                          1, &to_present);
+}
+
+bool present_pass_motion(VkCommandBuffer cmd, VkRect2D shown, const PresentSource& motion) {
+    // Last frame's view: its commands are done (the caller waited for the presenter's fence).
+    if (g_motion_view) {
+        vkDestroyImageView(g_device, g_motion_view, nullptr);
+        g_motion_view = VK_NULL_HANDLE;
+    }
+    if (!g_motion_pipeline || !g_motion_set || !g_point || !motion.image || !motion.width || !motion.height) return false;
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = motion.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = motion.format;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(g_device, &vci, nullptr, &g_motion_view) != VK_SUCCESS) {
+        g_motion_view = VK_NULL_HANDLE;
+        return false;
+    }
+    VkDescriptorImageInfo dii{g_point, g_motion_view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = g_motion_set;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(g_device, 1, &w, 0, nullptr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_motion_pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_motion_set, 0, nullptr);
+    const VkViewport vp{static_cast<float>(shown.offset.x), static_cast<float>(shown.offset.y), static_cast<float>(shown.extent.width),
+                        static_cast<float>(shown.extent.height), 0.0f, 1.0f};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &shown);
+    const float iw = 1.0f / static_cast<float>(motion.width), ih = 1.0f / static_cast<float>(motion.height);
+    const float uv[4] = {static_cast<float>(motion.x) * iw, static_cast<float>(motion.y) * ih, static_cast<float>(motion.x + motion.w) * iw,
+                         static_cast<float>(motion.y + motion.h) * ih};
+    vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uv), uv);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    return true;
 }

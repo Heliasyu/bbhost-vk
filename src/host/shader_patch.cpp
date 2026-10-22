@@ -56,6 +56,8 @@ std::uint32_t shader_patch_mask() {
     return g_mask.load(std::memory_order_acquire);
 }
 
+bool shader_patch_motion_blur_off() { return shader_patch_mask() & 1u; }  // kPatches[0]
+
 bool shader_patch_touches(const std::string& name) {
     for (const Patch& p : kPatches) {
         if (name == p.name) return true;

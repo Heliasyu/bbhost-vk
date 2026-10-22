@@ -56,6 +56,8 @@
 // line in the 300-flip report. BBHOST_GPU_BUSY=0 turns all of it off.
 #include "host/gpu.h"
 #include "host/gpu_internal.h"
+#include "host/perf_capture.h"
+#include "core/portable.h"
 #include "log.h"
 
 #include <algorithm>
@@ -64,6 +66,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -80,7 +84,20 @@ constexpr std::size_t kMaxPending = 1024;
 struct Span {
     std::uint64_t t0 = 0, t1 = 0;  // unwrapped ticks
     int source = kGame;
+    bool starved = false;   // test7: the GPU had run dry when it was submitted (game)
+    void* site = nullptr;   // what ended its recording (game; submit_record)
+    bool occl = false;      // rc3: it ended with an occlusion resolve (game)
 };
+
+// test7: the gaps between spans (the GPU idle with nothing of ours on it), by
+// what came after them - a game command buffer submitted once the GPU had run
+// dry ("late"), one that was already queued ("queued": the driver's and the
+// kernel's time between two command buffers, or a semaphore), the presenter's
+// blit - and by size; the late ones also by what ended the command buffer
+// before (submit_locked's caller, or flush_locked's: the CPU waited for the
+// GPU, which then had nothing until the command processor caught up).
+constexpr int kGapKinds = 3, kGapLate = 0, kGapQueued = 1, kGapPresent = 2, kGapSizes = 3;
+const char* const kGapKindName[kGapKinds] = {"late", "queued", "before present"};
 
 struct Meter {
     std::mutex mu;
@@ -101,8 +118,55 @@ struct Meter {
     std::uint64_t src_end[kSources] = {}, src_busy[kSources] = {}, spans[kSources] = {};
     std::uint64_t unreadable = 0, early = 0;
     std::chrono::steady_clock::time_point started{};  // when it was turned on
+    // test7: the gaps (ticks, count) by kind and size (<25 us, 25-250 us, more).
+    std::uint64_t gap_ticks[kGapKinds][kGapSizes] = {}, gap_n[kGapKinds][kGapSizes] = {};
+    void* end_site = nullptr;                                           // the site of the span that reached union_end
+    bool end_occl = false;                                              // rc3: that span ended with an occlusion resolve
+    bool end_present = false;                                           // rc3: that span was the presenter's blit
+    std::uint64_t q_occl_ticks = 0, q_occl_n = 0;                       // rc3: queued gaps after such a span (since the report)
+    std::map<void*, std::pair<std::uint64_t, std::uint64_t>> late_by_site;  // ticks, count
+    // rc4: the queued gaps by what ended the command buffer before them (as
+    // late_by_site), and by how long that span was - a job shorter than the
+    // kernel's round trip to queue the next leaves the GPU idle with it
+    // queued (amdgpu runs two jobs ahead: sched_hw_submission).
+    std::uint64_t end_len = 0;  // ticks of the span that reached union_end
+    std::map<void*, std::pair<std::uint64_t, std::uint64_t>> queued_by_site;
+    std::uint64_t q_len_ticks[4] = {}, q_len_n[4] = {};  // since the report
 };
 Meter g_meter;
+// rc3: the GPU idle with work queued, totals since start (snapshots: [gpu_idle]).
+std::atomic<std::uint64_t> g_idle_queued_ns{0}, g_idle_queued_n{0}, g_idle_queued_occl_ns{0}, g_idle_queued_occl_n{0},
+    g_idle_queued_present_ns{0}, g_idle_queued_present_n{0};
+// rc4: the same by the length of the span before the gap (<50 us, 50-200 us, 200 us-1 ms, more).
+constexpr int kLenBuckets = 4;
+const char* const kLenName[kLenBuckets] = {"lt50us", "50_200us", "200us_1ms", "gt1ms"};
+std::atomic<std::uint64_t> g_idle_queued_len_ns[kLenBuckets], g_idle_queued_len_n[kLenBuckets];
+int len_bucket(double us) { return us < 50.0 ? 0 : us < 200.0 ? 1 : us < 1000.0 ? 2 : 3; }
+std::string idle_section() {
+    char b[1024];
+    const auto ms = [](const std::atomic<std::uint64_t>& v) { return static_cast<double>(v.load()) / 1e6; };
+    std::snprintf(b, sizeof(b),
+                  "idle_with_queued: ms=%.1f gaps=%llu after_occlusion_resolve_ms=%.1f gaps=%llu after_present_ms=%.1f gaps=%llu "
+                  "(totals since start: the GPU idle between two of our command buffers when the second was already submitted; "
+                  "the 300-flip `gpu idle:` lines in [log] have each window's, `queued` and `queued after an occlusion resolve`)",
+                  ms(g_idle_queued_ns), static_cast<unsigned long long>(g_idle_queued_n.load()), ms(g_idle_queued_occl_ns),
+                  static_cast<unsigned long long>(g_idle_queued_occl_n.load()), ms(g_idle_queued_present_ns),
+                  static_cast<unsigned long long>(g_idle_queued_present_n.load()));
+    std::string out = b;
+    out += "\nidle_by_span_before:";
+    for (int k = 0; k < kLenBuckets; ++k) {
+        std::snprintf(b, sizeof(b), " %s_ms=%.1f %s_gaps=%llu", kLenName[k], ms(g_idle_queued_len_ns[k]), kLenName[k],
+                      static_cast<unsigned long long>(g_idle_queued_len_n[k].load()));
+        out += b;
+    }
+    std::snprintf(b, sizeof(b),
+                  " reset_first_cmdbufs=%llu (rc4: queued gaps by the length of the command buffer before them; resets before "
+                  "the first timestamp, BBHOST_RESET_ORDER=0 turns that off; the 300-flip `gpu idle queued after:` lines name the sites)",
+                  static_cast<unsigned long long>(host_gpu_reset_first_cmdbufs()));
+    out += b;
+    return out;
+}
+const bool g_idle_section = (perf::add_section("gpu_idle", idle_section), true);
 
 // The presenter's pair: it has one command buffer, and waits for its fence
 // before recording it again.
@@ -130,7 +194,48 @@ std::uint64_t unwrap_locked(Meter& m, std::uint64_t raw) {
 }
 
 void count_locked(Meter& m, const Span& s) {
+    if (m.union_end && s.t0 > m.union_end) {
+        const std::uint64_t gap = s.t0 - m.union_end;
+        const int kind = s.source == kPresenter ? kGapPresent : s.starved ? kGapLate : kGapQueued;
+        const double us = static_cast<double>(gap) * m.tick_ns / 1000.0;
+        const int size = us < 25.0 ? 0 : us < 250.0 ? 1 : 2;
+        m.gap_ticks[kind][size] += gap;
+        ++m.gap_n[kind][size];
+        if (kind == kGapLate) {
+            auto& e = m.late_by_site[m.end_site];
+            e.first += gap;
+            ++e.second;
+        }
+        if (kind == kGapQueued) {  // rc3: the GPU idle with work queued (snapshots: [gpu_idle])
+            const std::uint64_t ns = static_cast<std::uint64_t>(static_cast<double>(gap) * m.tick_ns);
+            g_idle_queued_ns.fetch_add(ns, std::memory_order_relaxed);
+            g_idle_queued_n.fetch_add(1, std::memory_order_relaxed);
+            const int lb = len_bucket(static_cast<double>(m.end_len) * m.tick_ns / 1000.0);
+            g_idle_queued_len_ns[lb].fetch_add(ns, std::memory_order_relaxed);
+            g_idle_queued_len_n[lb].fetch_add(1, std::memory_order_relaxed);
+            m.q_len_ticks[lb] += gap;
+            ++m.q_len_n[lb];
+            if (m.queued_by_site.size() < 256 || m.queued_by_site.count(m.end_site)) {
+                auto& e = m.queued_by_site[m.end_present ? reinterpret_cast<void*>(1) : m.end_site];
+                e.first += gap;
+                ++e.second;
+            }
+            if (m.end_occl) {
+                m.q_occl_ticks += gap;
+                ++m.q_occl_n;
+                g_idle_queued_occl_ns.fetch_add(ns, std::memory_order_relaxed);
+                g_idle_queued_occl_n.fetch_add(1, std::memory_order_relaxed);
+            } else if (m.end_present) {
+                g_idle_queued_present_ns.fetch_add(ns, std::memory_order_relaxed);
+                g_idle_queued_present_n.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     if (s.t1 > m.union_end) {
+        m.end_occl = s.source == kGame && s.occl;
+        m.end_present = s.source == kPresenter;
+        m.end_site = s.source == kGame ? s.site : nullptr;
+        m.end_len = s.t1 - s.t0;
         m.busy += s.t1 - std::max(s.t0, m.union_end);
         m.union_end = s.t1;
     }
@@ -158,13 +263,16 @@ void drain_locked(Meter& m) {
 
 // A command buffer of `source` is done: its two raw timestamps, or `ok`
 // false when they could not be read (a lost device).
-void deliver(int source, std::uint64_t raw0, std::uint64_t raw1, bool ok) {
+void deliver(int source, std::uint64_t raw0, std::uint64_t raw1, bool ok, bool starved = false, void* site = nullptr, bool occl = false) {
     Meter& m = g_meter;
     std::lock_guard<std::mutex> lk(m.mu);
     if (m.out[source] > 0) --m.out[source];
     if (ok) {
         Span s;
         s.source = source;
+        s.starved = starved;
+        s.site = site;
+        s.occl = occl;
         s.t0 = unwrap_locked(m, raw0);
         s.t1 = s.t0 + ((raw1 - raw0) & m.mask);
         // Ten seconds in one command buffer would have been a device loss:
@@ -305,7 +413,9 @@ void busy_retired_locked(Gpu::Slot& sl, bool ok) {
     sl.busy_written = false;
     std::uint64_t ts[2] = {0, 0};
     const bool have = ok && read_pair(sl.busy_pool, ts);
-    deliver(kGame, ts[0], ts[1], have);
+    void* site = nullptr;
+    const bool starved = submit_record(sl.serial, &site);
+    deliver(kGame, ts[0], ts[1], have, starved, site, submit_had_occlusion(sl.serial));
 }
 
 }  // namespace gpu
@@ -379,5 +489,132 @@ std::string host_gpu_busy_report() {
     }
     last = now;
     last_t = t;
+    return r;
+}
+
+// test7: the second line under `gpu busy:` - where the idle time went since
+// the last report (see Meter's gaps), the submissions' hand-over latency, the
+// command processor's waits for the GPU, and BBHOST_SUBMIT_SPLIT's splits.
+std::string host_gpu_idle_report() {
+    static bool started = false;
+    static std::chrono::steady_clock::time_point last_t;
+    static SubmitLatencyTotals last;
+    const auto t = std::chrono::steady_clock::now();
+    const double secs = started ? std::chrono::duration<double>(t - last_t).count() : 0.0;
+    started = true;
+    last_t = t;
+    const SubmitLatencyTotals lat = submit_latency_totals();
+    std::uint64_t ticks[kGapKinds][kGapSizes], n[kGapKinds][kGapSizes];
+    std::vector<std::pair<void*, std::pair<std::uint64_t, std::uint64_t>>> sites;
+    std::uint64_t q_occl_ticks = 0, q_occl_n = 0;
+    std::vector<std::pair<void*, std::pair<std::uint64_t, std::uint64_t>>> qsites;
+    std::uint64_t q_len_ticks[kLenBuckets] = {}, q_len_n[kLenBuckets] = {};
+    double tick_ns = 1.0;
+    {
+        std::lock_guard<std::mutex> lk(g_meter.mu);
+        if (!g_meter.on) return {};
+        tick_ns = g_meter.tick_ns;
+        std::memcpy(ticks, g_meter.gap_ticks, sizeof(ticks));
+        std::memcpy(n, g_meter.gap_n, sizeof(n));
+        std::memset(g_meter.gap_ticks, 0, sizeof(g_meter.gap_ticks));
+        std::memset(g_meter.gap_n, 0, sizeof(g_meter.gap_n));
+        sites.assign(g_meter.late_by_site.begin(), g_meter.late_by_site.end());
+        g_meter.late_by_site.clear();
+        q_occl_ticks = g_meter.q_occl_ticks;
+        q_occl_n = g_meter.q_occl_n;
+        g_meter.q_occl_ticks = g_meter.q_occl_n = 0;
+        qsites.assign(g_meter.queued_by_site.begin(), g_meter.queued_by_site.end());
+        g_meter.queued_by_site.clear();
+        std::memcpy(q_len_ticks, g_meter.q_len_ticks, sizeof(q_len_ticks));
+        std::memcpy(q_len_n, g_meter.q_len_n, sizeof(q_len_n));
+        std::memset(g_meter.q_len_ticks, 0, sizeof(g_meter.q_len_ticks));
+        std::memset(g_meter.q_len_n, 0, sizeof(g_meter.q_len_n));
+    }
+    const SubmitLatencyTotals prev = last;
+    last = lat;
+    if (secs < 0.5) return {};
+    const double per_s = 1.0 / secs;
+    auto ms_s = [&](std::uint64_t tk) { return static_cast<double>(tk) * tick_ns / 1e6 * per_s; };
+    std::uint64_t all = 0, all_n = 0;
+    for (int k = 0; k < kGapKinds; ++k)
+        for (int z = 0; z < kGapSizes; ++z) {
+            all += ticks[k][z];
+            all_n += n[k][z];
+        }
+    std::string r;
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "gpu idle: %.1f ms/s in %.0f gaps/s;", ms_s(all), static_cast<double>(all_n) * per_s);
+    r += buf;
+    for (int k = 0; k < kGapKinds; ++k) {
+        std::uint64_t kt = 0, kn = 0;
+        for (int z = 0; z < kGapSizes; ++z) {
+            kt += ticks[k][z];
+            kn += n[k][z];
+        }
+        std::snprintf(buf, sizeof(buf), " %s %.2f ms/s (%.0f/s: <25us %.2f, 25-250us %.2f, >250us %.2f ms/s);", kGapKindName[k], ms_s(kt),
+                      static_cast<double>(kn) * per_s, ms_s(ticks[k][0]), ms_s(ticks[k][1]), ms_s(ticks[k][2]));
+        r += buf;
+    }
+    // rc3: the queued gaps after a command buffer that ended with an occlusion resolve.
+    std::snprintf(buf, sizeof(buf), " queued after an occlusion resolve %.2f ms/s (%.0f/s);", ms_s(q_occl_ticks), static_cast<double>(q_occl_n) * per_s);
+    r += buf;
+    const std::uint64_t subs = lat.n - prev.n;
+    const double sn = subs ? static_cast<double>(subs) : 1.0;
+    std::snprintf(buf, sizeof(buf),
+                  " submits %.0f/s, %.0f%% found the GPU idle; hand-over to recorded %.0f us (max %.0f), to vkQueueSubmit %.0f us (max %.0f), "
+                  "vkQueueSubmit %.0f us (max %.0f);",
+                  static_cast<double>(subs) * per_s, 100.0 * static_cast<double>(lat.starved - prev.starved) / sn,
+                  static_cast<double>(lat.record_ns - prev.record_ns) / 1e3 / sn, static_cast<double>(lat.record_max) / 1e3,
+                  static_cast<double>(lat.queue_ns - prev.queue_ns) / 1e3 / sn, static_cast<double>(lat.queue_max) / 1e3,
+                  static_cast<double>(lat.submit_ns - prev.submit_ns) / 1e3 / sn, static_cast<double>(lat.submit_max) / 1e3);
+    r += buf;
+    std::snprintf(buf, sizeof(buf), " cpu waits for the GPU (flush_locked) %.0f/s, %.2f ms/s; splits %.0f/s",
+                  static_cast<double>(lat.flushes - prev.flushes) * per_s, static_cast<double>(lat.flush_ns - prev.flush_ns) / 1e6 * per_s,
+                  static_cast<double>(lat.splits - prev.splits) * per_s);
+    r += buf;
+    // test7c, BBHOST_SUBMIT_BATCH: merged submissions, the jobs in them, and the holds.
+    std::snprintf(buf, sizeof(buf), "; batched %.0f jobs/s into %.0f submits/s, held %.0f/s for %.2f ms/s",
+                  static_cast<double>(lat.batch_jobs - prev.batch_jobs) * per_s, static_cast<double>(lat.batch_submits - prev.batch_submits) * per_s,
+                  static_cast<double>(lat.batch_holds - prev.batch_holds) * per_s,
+                  static_cast<double>(lat.batch_hold_ns - prev.batch_hold_ns) / 1e6 * per_s);
+    r += buf;
+    // The late gaps by what ended the command buffer before them, the top
+    // eight, as offsets in bbhost's image (tools/gpu_gaps.py --idle names them).
+    std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+    if (!sites.empty()) r += "\n[bbhost]   gpu idle late after:";
+    for (std::size_t i = 0; i < sites.size() && i < 8; ++i) {
+        if (sites[i].first)
+            std::snprintf(buf, sizeof(buf), " %llx=%.2fms/s(%.0f/s)",
+                          static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sites[i].first) - host_image_base()),
+                          ms_s(sites[i].second.first), static_cast<double>(sites[i].second.second) * per_s);
+        else
+            std::snprintf(buf, sizeof(buf), " present=%.2fms/s(%.0f/s)", ms_s(sites[i].second.first),
+                          static_cast<double>(sites[i].second.second) * per_s);
+        r += buf;
+    }
+    // rc4: the queued gaps the same way - by the site that ended the command
+    // buffer before them (present: the blit) - and by that command buffer's length.
+    std::sort(qsites.begin(), qsites.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+    if (!qsites.empty()) {
+        r += "\n[bbhost]   gpu idle queued after:";
+        for (std::size_t i = 0; i < qsites.size() && i < 10; ++i) {
+            if (qsites[i].first == reinterpret_cast<void*>(1))
+                std::snprintf(buf, sizeof(buf), " present=%.2fms/s(%.0f/s)", ms_s(qsites[i].second.first),
+                              static_cast<double>(qsites[i].second.second) * per_s);
+            else if (qsites[i].first)
+                std::snprintf(buf, sizeof(buf), " %llx=%.2fms/s(%.0f/s)",
+                              static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(qsites[i].first) - host_image_base()),
+                              ms_s(qsites[i].second.first), static_cast<double>(qsites[i].second.second) * per_s);
+            else
+                std::snprintf(buf, sizeof(buf), " unknown=%.2fms/s(%.0f/s)", ms_s(qsites[i].second.first),
+                              static_cast<double>(qsites[i].second.second) * per_s);
+            r += buf;
+        }
+        r += "; by the command buffer before:";
+        for (int k = 0; k < kLenBuckets; ++k) {
+            std::snprintf(buf, sizeof(buf), " %s %.2fms/s(%.0f/s)", kLenName[k], ms_s(q_len_ticks[k]), static_cast<double>(q_len_n[k]) * per_s);
+            r += buf;
+        }
+    }
     return r;
 }

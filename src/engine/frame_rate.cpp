@@ -19,6 +19,7 @@
 #include "engine/graphics_patch.h"
 #include "hle/hle.h"
 #include "hle/modules.h"
+#include "host/flip_trace.h"
 #include "host/frame_stats.h"
 #include "host/plugins.h"
 #include "host/options.h"
@@ -609,7 +610,13 @@ void limiter_note_sleep(std::int64_t asked_us, std::int64_t took_us) {
         }
     }
     t.late_p99_us = second;
-    t.margin_us = std::clamp<std::int64_t>(second + 200, 300, 2000);
+    // rc5: with the 1 ns timer slack (host_tight_timers_on) a sleep wakes
+    // within a few tens of microseconds, not ~55 us late, so the margin is
+    // the second-latest plus 100 us, at least 150 us (it was plus 200, at least
+    // 300): about 0.15 ms a frame less spinning on the main thread. The
+    // margin is still learnt: late sleeps raise it at once.
+    const bool tight = host_tight_timers_on();
+    t.margin_us = std::clamp<std::int64_t>(second + (tight ? 100 : 200), tight ? 150 : 300, 2000);
     t.shown_margin_us.store(t.margin_us, std::memory_order_relaxed);
     t.shown_late_p99_us.store(second, std::memory_order_relaxed);
 }
@@ -912,12 +919,15 @@ namespace {
 // manager's +0x28 still holds the time (gettimeofday, us) it released the last
 // frame at, until the update about to run replaces it.
 void note_main_frame_work(std::uint64_t m) {
-    if (!frame_stats_enabled()) return;
+    if (!frame_stats_enabled() && !fliptrace::on()) return;
     // The same clock the guest's gettimeofday reads (hle/libc.cpp), on both
     // platforms.
     const std::int64_t now = host_clock_realtime_us();
     const std::int64_t last = get<std::int64_t>(m + 0x28);
-    if (last > 0 && now >= last && now - last < 10000000) frame_stats_main_frame(static_cast<std::uint64_t>(now - last), hle_video_flip_count());
+    if (last > 0 && now >= last && now - last < 10000000) {
+        frame_stats_main_frame(static_cast<std::uint64_t>(now - last), hle_video_flip_count());  // returns at once when off
+        fliptrace::main_frame(static_cast<std::uint64_t>(now - last));                          // BBHOST_FLIP_TRACE
+    }
 }
 
 // The uncapped mode's frame limit: BBHOST_UNCAPPED_FPS=N (30..240) if set;
@@ -1046,6 +1056,15 @@ GUEST_ABI std::int64_t frame_manager_hook(std::uint64_t, const std::uint64_t* sa
     const bool converted = g_game_fps != 30;
     if (g_source == Source::Ours) {
         note_main_frame_work(saved[5]);
+        // rc5: the game's main thread (the limiter's) - the timer slack its
+        // sleeps need to wake on time, and the hot chain's CPUs
+        // (core/host_clock.h). Once.
+        static const bool placed = [] {
+            host_thread_tight_timers("the game's main thread (frame limiter)");
+            host_thread_place(HostPlace::Hot, "the game's main thread");
+            return true;
+        }();
+        (void)placed;
         RealClock clock;
         g_fast_target = converted && (g_bench_uncapped || loading_fast_now());
         sprj_flipper_update(f, clock, pace_target());

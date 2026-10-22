@@ -528,11 +528,59 @@ std::uint64_t hle_kernel_maps_generation() { return g_maps_gen.load(); }
 // below 1 TiB (the 40-bit GPU VA space), clear of the dmem ranges. Hints go
 // down from 960 GiB a GiB at a time and never replace a mapping. Recorded as
 // an anonymous mapping, so the page tables import it on their next rebuild.
+//
+// rc6: where the GPU side imports direct memory as dma-bufs (AMD on Linux,
+// hle_kernel_host_maps_shared), the mapping is a sealed memfd of its own
+// instead of anonymous memory, and the page tables import it the same way
+// (host/gpu.cpp, import_anon): as a host pointer it was a userptr, which
+// amdgpu checks page by page (hmm_range_fault) at every submission - 22.6% of
+// bb-submit in the rc5 profile, for the 128 MiB GX table ring. The bytes and
+// the CPU's view are the same; only the kind of pages behind them differs.
+namespace {
+std::atomic<bool> g_host_maps_shared{false};
+std::vector<std::pair<std::uint64_t, int>> g_host_map_fds;  // under g_dmem_mu
+}  // namespace
+
+void hle_kernel_host_maps_shared(bool on) { g_host_maps_shared.store(on); }
+
+int hle_kernel_host_map_fd(std::uint64_t va) {
+    std::lock_guard<std::mutex> lock(g_dmem_mu);
+    for (const auto& [at, fd] : g_host_map_fds) {
+        if (at == va) return fd;
+    }
+    return -1;
+}
+
 std::uint64_t hle_kernel_map_host(std::uint64_t len) {
     const std::uint64_t page = 0x10000;
     len = (len + page - 1) & ~(page - 1);
+#if !defined(_WIN32)
+    int fd = -1;
+    if (len && g_host_maps_shared.load()) {
+        const long f = syscall(SYS_memfd_create, "bb-host-map", 1 | 2 /* MFD_CLOEXEC | MFD_ALLOW_SEALING */);
+        if (f >= 0 && ftruncate(static_cast<int>(f), static_cast<off_t>(len)) == 0 &&
+            fcntl(static_cast<int>(f), F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) == 0) {
+            fd = static_cast<int>(f);
+        } else {
+            host_log("kernel: a memfd for a host mapping of 0x%llx failed (errno %d); anonymous memory instead",
+                     static_cast<unsigned long long>(len), errno);
+            if (f >= 0) close(static_cast<int>(f));
+        }
+    }
+#endif
     for (std::uint64_t hint = 0xF000000000ull; len && hint >= 0xC000000000ull; hint -= 0x40000000ull) {
         const int prot = kProtCpuRead | kProtCpuWrite;
+#if !defined(_WIN32)
+        if (fd >= 0) {
+            void* want = reinterpret_cast<void*>(static_cast<std::uintptr_t>(hint));
+            void* p = mmap(want, static_cast<std::size_t>(len), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE, fd, 0);
+            if (p == MAP_FAILED) continue;
+            if (p != want) {
+                munmap(p, static_cast<std::size_t>(len));
+                continue;
+            }
+        } else
+#endif
         if (!host_map_anon(reinterpret_cast<void*>(static_cast<std::uintptr_t>(hint)), len, prot, Fix::NoReplace)) continue;
         MappedRegion r{};
         r.start = static_cast<std::uintptr_t>(hint);
@@ -544,11 +592,22 @@ std::uint64_t hle_kernel_map_host(std::uint64_t len) {
             std::lock_guard<std::mutex> lock(g_dmem_mu);
             maps_cut_locked(r.start, r.start + r.len);
             g_maps.push_back(r);
+#if !defined(_WIN32)
+            if (fd >= 0) g_host_map_fds.emplace_back(hint, fd);
+#endif
             g_maps_gen.fetch_add(1);
         }
+#if !defined(_WIN32)
+        host_log("kernel: host mapping 0x%llx len 0x%llx%s", static_cast<unsigned long long>(hint), static_cast<unsigned long long>(len),
+                 fd >= 0 ? " (a memfd, for a dma-buf import)" : "");
+#else
         host_log("kernel: host mapping 0x%llx len 0x%llx", static_cast<unsigned long long>(hint), static_cast<unsigned long long>(len));
+#endif
         return hint;
     }
+#if !defined(_WIN32)
+    if (fd >= 0) close(fd);
+#endif
     return 0;
 }
 

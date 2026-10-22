@@ -42,7 +42,10 @@ constexpr std::uint8_t kReleaseKey[32] = {
 const std::uint8_t* release_key() { return kReleaseKey; }
 
 namespace {
-constexpr const char* kDefaultSource = "https://api.github.com/repos/droogie/bbhost/releases/latest";
+// bbhost-vk: the fork's own releases (a public repository: read anonymously, as upstream's).
+constexpr const char* kDefaultSource = "https://api.github.com/repos/Heliasyu/bbhost-vk/releases/latest";
+// The official plugins stay upstream's: signed with upstream's release key (kReleaseKey).
+constexpr const char* kPluginSource = "https://api.github.com/repos/droogie/bbhost/releases/latest";
 constexpr std::size_t kMaxDownload = 256u << 20;
 
 std::mutex g_mu;
@@ -148,7 +151,7 @@ void check_thread(const std::string& source, const std::string& token) {
     if (!f.ok() || !parse_release(f.body, tag, page)) {
         std::string why = !f.error.empty() ? f.error : f.ok() ? "the answer is not a release" : "HTTP " + std::to_string(f.status);
         if (f.status == 404) {
-            why = token.empty() ? "no releases visible (a private repository needs update.token_file)" : "no release found";
+            why = "no release found";
         }
         host_log("update: check failed: %s", why.c_str());
         set_lines(std::string("bbhost ") + BBHOST_VERSION + " - could not check for updates", why);
@@ -223,13 +226,12 @@ constexpr const char* kPluginExt = ".so";
 // Windows), which plugins_load puts in place at the next start.
 void fetch_plugins_thread(std::string dir) {
     set_plugins_status("looking for the latest official plugins...");
-    const std::string source = config().update_source.empty() ? kDefaultSource : config().update_source;
+    const std::string source = config().update_source.empty() ? kPluginSource : config().update_source;
     const Fetch f = fetch(source, false, 20000);
     json::Value v;
     std::string err;
     if (!f.ok() || !json::parse(f.body, v, err) || v.type != json::Value::Type::Object) {
-        set_plugins_status("could not read the latest release: " + (!f.error.empty() ? f.error : "HTTP " + std::to_string(f.status)) +
-                           (f.status == 404 && read_token().empty() ? " (a private repository needs update.token_file)" : ""));
+        set_plugins_status("could not read the latest release: " + (!f.error.empty() ? f.error : "HTTP " + std::to_string(f.status)));
         g_plugins_busy.store(false);
         return;
     }

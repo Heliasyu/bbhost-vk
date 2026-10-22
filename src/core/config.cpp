@@ -148,6 +148,7 @@ void apply_values(const std::map<std::string, std::string>& kv, HostConfig* c) {
     }
     str("update.source", &c->update_source);
     str("update.token_file", &c->update_token_file);
+    str("upscaler.fsr4_dll", &c->fsr4_dll);
     str("player.name", &c->player_name);
     str("player.ime", &c->ime_mode);
     num("video.width", &c->width);
@@ -165,6 +166,18 @@ void apply_values(const std::map<std::string, std::string>& kv, HostConfig* c) {
         auto it = kv.find("startup.skip_intro");
         if (it != kv.end()) {
             c->skip_intro = it->second == "true" || it->second == "1";
+        }
+    }
+    {
+        // bbhost-vk test3: [debug] fsr_dump = true is BBHOST_FSR_DUMP=1 (host/fsr_dump.h),
+        // unless the environment says otherwise.
+        auto it = kv.find("debug.fsr_dump");
+        if (it != kv.end() && (it->second == "true" || it->second == "1") && !std::getenv("BBHOST_FSR_DUMP")) {
+#if defined(_WIN32)
+            _putenv_s("BBHOST_FSR_DUMP", "1");
+#else
+            setenv("BBHOST_FSR_DUMP", "1", 0);
+#endif
         }
     }
     {

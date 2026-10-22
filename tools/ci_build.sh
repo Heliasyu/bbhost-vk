@@ -97,12 +97,14 @@ fi
 export PKG_CONFIG_PATH=$P/lib/pkgconfig
 static=""
 [ "${CI_PORTABLE:-0}" = 1 ] && static="-static-libstdc++ -static-libgcc"
-cmake -S "$SRC" -B "$W/build" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH="$P" \
+B=${CI_BUILD_DIR:-$W/build}  # rc6: another build folder over the same prefix (packaging/vk/build.sh: the non-PGO twin)
+LOGP=$W/bbhost${CI_BUILD_DIR:+-$(basename "$B")}
+cmake -S "$SRC" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH="$P" \
     -DVulkan_INCLUDE_DIR="$P/include" -DCMAKE_EXE_LINKER_FLAGS="$static -fuse-ld=lld" \
-    -DCMAKE_MODULE_LINKER_FLAGS="${static#-static-libstdc++ } -fuse-ld=lld" ${CI_CMAKE_ARGS:-} > "$W/bbhost-configure.log" \
-    || { tail -30 "$W/bbhost-configure.log"; exit 1; }
-grep -E "^-- bbhost" "$W/bbhost-configure.log" || true
-cmake --build "$W/build" -j"$JOBS" 2>&1 | tee "$W/bbhost-build.log" | grep -E "error|warning: unused|FAILED" | head -40 || true
-[ "${PIPESTATUS[0]}" = 0 ] || { echo "build failed (log: $W/bbhost-build.log)"; exit 1; }
-(cd "$W/build" && ctest --output-on-failure)
-echo "ci build: $W/build/bbhost"
+    -DCMAKE_MODULE_LINKER_FLAGS="${static#-static-libstdc++ } -fuse-ld=lld" ${CI_CMAKE_ARGS:-} > "$LOGP-configure.log" \
+    || { tail -30 "$LOGP-configure.log"; exit 1; }
+grep -E "^-- bbhost" "$LOGP-configure.log" || true
+cmake --build "$B" -j"$JOBS" 2>&1 | tee "$LOGP-build.log" | grep -E "error|warning: unused|FAILED" | head -40 || true
+[ "${PIPESTATUS[0]}" = 0 ] || { echo "build failed (log: $LOGP-build.log)"; exit 1; }
+(cd "$B" && ctest --output-on-failure)
+echo "ci build: $B/bbhost"

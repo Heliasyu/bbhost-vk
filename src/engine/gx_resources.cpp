@@ -26,6 +26,7 @@
 //             prologue starts with a rip-relative lea of the vtable, run in
 //             the stub as a movabs), and a buffer's resource release
 //             0x256d690 (rdi = holder + 0x18).
+#include "core/host_clock.h"
 #include "engine/gx_resources.h"
 
 #include "core/elf.h"
@@ -316,6 +317,7 @@ std::deque<AheadJob>* const g_ahead_jobs = new std::deque<AheadJob>;  // under g
 
 void ahead_thread() {
     host_thread_set_name("bb-tex-ahead");
+    host_thread_place(HostPlace::Any, "bb-tex-ahead");  // rc5: not the hot mask of the thread that made it
     for (;;) {
         AheadJob job;
         {

@@ -1,0 +1,3 @@
+[submodule "third_party/FSR-Vulkan"]
+	path = third_party/FSR-Vulkan
+	url = https://github.com/FireBurn/FSR-Vulkan.git

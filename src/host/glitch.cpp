@@ -366,7 +366,7 @@ bool serial_done_locked(std::uint64_t serial) {
     if (g.completed_submits > serial) return true;
     for (const Gpu::Slot& sl : g.slots) {
         if (sl.in_flight && sl.serial == serial) {
-            return serial < stream_submitted_serial() && vkGetFenceStatus(g.device, sl.fence) == VK_SUCCESS;  // submitted (bb-submit) first
+            return serial < stream_submitted_serial() && slot_fence_signaled(sl);  // submitted (bb-submit) first
         }
     }
     return false;  // not submitted yet
@@ -1126,7 +1126,7 @@ void host_gpu_glitch_watch(std::uint64_t display_va, std::uint64_t mark) {
     }
     for (Gpu::Slot& sl : g.slots) {
         if (sl.in_flight && (!sl.cov_recs.empty() || !g_watch_pending.empty()) && sl.serial < stream_submitted_serial() &&
-            vkGetFenceStatus(g.device, sl.fence) == VK_SUCCESS) {
+            slot_fence_signaled(sl)) {
             collect_locked(sl);
         }
     }

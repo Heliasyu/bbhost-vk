@@ -378,6 +378,13 @@ struct TranslateResult {
     // typed lift (gcn/lift.h) has no cross-lane
     // operation at all: the renderer clears it for one.
     std::uint32_t wave64_needs = kWave64NotPixel;
+    // rc4: the fetch shader ran inline, straight-line, in place of
+    // s_swappc_b64 (both programs branch-free; BBHOST_FETCH_INLINE=0 keeps
+    // the dispatcher). Counted in the [walks] snapshot as fetch_inlined.
+    bool fetch_inlined = false;
+    // rc4: bound loads at an SGPR offset (indexed_buffer_load), each with the
+    // walk as its fallback. [walks] soffset_bound.
+    std::uint32_t soffset_bound = 0;
     bool ok() const { return errors.empty(); }
 };
 

@@ -90,6 +90,7 @@ const std::uint8_t kCaCopyBytes[] = {0x8b, 0x85, 0x90, 0xf5, 0xff, 0xff, 0x89, 0
 std::atomic<std::uint32_t>* g_ca_mask = nullptr;  // in the stub's page
 std::atomic<std::uint64_t> g_seen_serial{0};
 std::atomic<bool> g_ssao{true}, g_aa{true};
+std::atomic<bool> g_aa_said{false};  // the first setting logged
 
 // ---- Draw parameters ---------------------------------------------------------
 //
@@ -341,7 +342,10 @@ void refresh_settings() {
     if (g_seen_serial.exchange(serial) == serial) return;
     const HostSettings hs = host_settings();
     g_ssao.store(hs.ssao);
-    g_aa.store(hs.anti_alias);
+    // test7: said, so a log shows when AA changed (Auto follows the upscaler).
+    if (g_aa.exchange(hs.anti_alias) != hs.anti_alias || !g_aa_said.exchange(true))
+        host_log("graphics: the game's anti-aliasing %s%s", hs.anti_alias ? "on" : "off",
+                 hs.anti_alias_auto ? (hs.anti_alias ? " (Auto: FSR 4.1.1 not upscaling)" : " (Auto: FSR 4.1.1 upscales)") : "");
     set_chromatic_aberration(hs.chromatic_aberration);
     g_bloom.store(hs.bloom);
     g_saturation.store(hs.saturation);
@@ -1310,6 +1314,8 @@ bool engine_prologue_hook_exec(ElfImage* image, std::uint64_t at, const std::uin
                                const std::uint8_t* exec, std::size_t m, void* host, std::uint64_t id) {
     return install_prologue_hook(image, at, prologue, n, host, id, exec, m);
 }
+
+void* engine_alloc_exec_near(std::uint64_t at) { return alloc_exec_near(at); }
 
 bool engine_call_site_hook(ElfImage* image, std::uint64_t at, std::uint64_t target, void* host) {
     return install_jump_hook(image, at, target, host);

@@ -67,6 +67,10 @@ struct GuestMapInfo {
 };
 void hle_kernel_snapshot_maps(std::vector<GuestMapInfo>& out);
 std::uint64_t hle_kernel_maps_generation();  // changes whenever the map list does
+// rc6: host mappings made from here on are memfds (the GPU side imports
+// them as dma-bufs, host/gpu.cpp), and the memfd behind one (-1: anonymous).
+void hle_kernel_host_maps_shared(bool on);
+int hle_kernel_host_map_fd(std::uint64_t va);
 std::uint64_t hle_kernel_map_host(std::uint64_t len);  // host read/write memory in the GPU page table; 0 on failure
 std::uint64_t hle_kernel_gpu_alias(std::uint64_t va);  // direct memory's GPU alias of a CPU address; 0 when none
 std::uint64_t hle_kernel_mappings_of(std::uint64_t va);
@@ -168,6 +172,7 @@ void hle_video_set_fps_cap(int fps);  // video.fps_cap (upper bound on presented
 // A frame rate set after that applies on the next run.
 void hle_video_set_game_pace(int fps);
 void hle_video_set_loading_uncapped(bool on);  // flips complete at once while a loading screen is up (engine/loading.cpp)
+bool hle_video_loading();  // a loading screen is up (v0.2.18-vk.1: the present pacing waits it out)
 std::uint64_t hle_video_loading_unshown();      // loading flips completed without being shown, so far (video.cpp)
 void hle_dialog_set_default_name(const char* name, bool type_in_window);  // IME text (player.name) and whether to type it
 void hle_np_set_online_id(const char* id);          // sceNpGetOnlineId (online.online_id)

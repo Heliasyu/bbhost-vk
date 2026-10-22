@@ -63,5 +63,8 @@ bool engine_prologue_hook_exec(ElfImage* image, std::uint64_t at, const std::uin
 bool engine_call_site_hook(ElfImage* image, std::uint64_t at, std::uint64_t target, void* host);
 // The same, for a variadic guest function: the stub keeps rax, which SysV uses
 // to tell the callee how many vector registers hold arguments (core/thunk.h).
+// A page for host code within a rel32 of `at` (read, write, execute); null
+// when none could be had. For stubs reached by a jmp or call at `at`.
+void* engine_alloc_exec_near(std::uint64_t at);
 bool engine_prologue_hook_variadic(ElfImage* image, std::uint64_t at, const std::uint8_t* prologue, std::size_t n,
                                    void* host, std::uint64_t id = 0);

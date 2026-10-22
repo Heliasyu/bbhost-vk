@@ -1,0 +1,47 @@
+#version 460
+// bbhost-vk Phase 3: the reactive mask for the temporal upscalers
+// (host/temporal_inputs.cpp), one invocation per render pixel. Where the
+// finished scene differs from the opaque snapshot - the scene before its first
+// blended draw - something transparent was drawn over it: particles, fog,
+// Blood Echoes, the lantern's glow, glass. The upscaler trusts its history
+// less there, so those do not smear or ghost.
+//
+// The rule is AMD's ffxFsr3UpscalerGenerateReactiveMask (FidelityFX SDK, MIT)
+// with the flags its samples use - TONEMAP, APPLY_THRESHOLD,
+// USE_COMPONENTS_MAX: both colours tone-mapped c / (1 + max(c)), the largest
+// component of their difference, times `scale`; below `threshold` 0, else
+// `binary_value`. Written from that description for bbhost's bindings.
+//
+// Out: R8, 0 opaque .. 1 fully reactive. Compiled offline
+// (tools/build_shaders.sh) into reactive.spv.h.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D opaque_color;
+layout(set = 0, binding = 1) uniform sampler point_sampler;
+layout(set = 0, binding = 2) uniform texture2D scene_color;
+layout(set = 0, binding = 3, r8) uniform writeonly image2D reactive;
+
+layout(push_constant) uniform Params {
+    uvec2 extent;  // the render size
+    float scale;
+    float threshold;
+    float binary_value;  // 0: no threshold, the scaled difference itself
+    uint pad0, pad1, pad2;
+} pc;
+
+vec3 tonemap(vec3 c) {
+    c = max(c, vec3(0.0));
+    return c / (1.0 + max(c.r, max(c.g, c.b)));
+}
+
+void main() {
+    const ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= int(pc.extent.x) || xy.y >= int(pc.extent.y)) return;
+    const vec3 before = tonemap(texelFetch(sampler2D(opaque_color, point_sampler), xy, 0).rgb);
+    const vec3 after = tonemap(texelFetch(sampler2D(scene_color, point_sampler), xy, 0).rgb);
+    const vec3 d = abs(after - before);
+    float r = max(d.r, max(d.g, d.b)) * pc.scale;
+    if (pc.binary_value > 0.0) r = r < pc.threshold ? 0.0 : pc.binary_value;
+    if (isnan(r)) r = 0.0;
+    imageStore(reactive, xy, vec4(clamp(r, 0.0, 1.0)));
+}

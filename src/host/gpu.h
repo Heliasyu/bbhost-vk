@@ -444,6 +444,34 @@ void host_gpu_queue_unlock();
 std::uint64_t host_gpu_submit_presenter(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence);
 void host_gpu_queue_lock_only();  // the queue's mutex without waiting for the thread (after host_gpu_wait_submitted)
 void host_gpu_wait_submitted(std::uint64_t ticket);
+// rc3: as host_gpu_wait_submitted, until steady-clock `deadline_ns` at the
+// latest; whether it has gone.
+bool host_gpu_wait_submitted_until(std::uint64_t ticket, std::int64_t deadline_ns);
+// rc3, the presenter's priority submit (BBHOST_PRESENT_PRIORITY=0 turns it
+// off, for debugging). The blit straight to the queue - not behind the
+// stream's kForeignSubmit and bb-submit's FIFO, i.e. not behind the next
+// frame's submissions - once the flip's own submissions (`need`, its
+// Gpu::flushes) have gone in. host_gpu_stream_mark() under the renderer's
+// lock before recording the blit; host_gpu_presenter_priority_ok(need, mark)
+// under it after: whether the blit recorded nothing into the game's stream
+// (else the stream path, which keeps that order). Then, with the lock
+// released, host_gpu_submit_presenter_priority() waits for `need` and
+// submits under the queue's mutex (at most one bb-submit ioctl ahead).
+std::uint64_t host_gpu_stream_mark();
+void host_gpu_presenter_priority_stats(std::uint64_t* direct, std::uint64_t* stream, std::uint64_t* wait_ns, std::uint64_t* timeouts);
+bool host_gpu_presenter_priority_ok(std::uint64_t need, std::uint64_t mark);
+// rc4: its ticket when it fell back to the stream past the wait's cap
+// (host_gpu_wait_submitted it, as host_gpu_submit_presenter's), else 0: gone
+// in - by itself, or riding the flip's last submission (BBHOST_BLIT_RIDE).
+std::uint64_t host_gpu_submit_presenter_priority(void* cmd, void* wait, std::uint32_t wait_stage, void* signal, void* fence,
+                                                std::uint64_t need);
+// rc4: blits that rode the flip's last submission, went alone, were offered
+// and missed it, fell back to the stream past the cap; waits over 50 ms; the
+// longest wait.
+void host_gpu_blit_ride_stats(std::uint64_t* rode, std::uint64_t* alone, std::uint64_t* missed, std::uint64_t* fallbacks,
+                              std::uint64_t* over50, std::uint64_t* max_ns);
+// rc4: command buffers begun with every query reset before the first timestamp (BBHOST_RESET_ORDER).
+std::uint64_t host_gpu_reset_first_cmdbufs();
 // How busy the GPU is with our work (gpu_busy.cpp): the union of the time
 // our command buffers - the game's and the presenter's - spent on the GPU,
 // from a timestamp at each one's start and end. Windows' per-process GPU
@@ -460,6 +488,8 @@ struct GpuBusy {
     std::uint64_t cmdbufs = 0, presents = 0;
 };
 GpuBusy host_gpu_busy();
+// rc2: the GPU sampler's frame is being recorded (the pass timer times it too).
+bool host_gpu_sample_running();
 // The presenter's command buffer (a VkCommandBuffer): its first command and
 // its last (before vkEndCommandBuffer), and once its fence has signalled - or
 // before the next one is recorded, which waits for it. Caller holds the lock
@@ -469,6 +499,8 @@ void host_gpu_busy_present_end(void* cmd);
 void host_gpu_busy_present_done();
 // The 300-flip report's line: busy over the window since the last call.
 std::string host_gpu_busy_report();
+// test7: "gpu idle: ..." - the idle time between command buffers by cause, after the busy line.
+std::string host_gpu_idle_report();
 // The presenter's, before its blit: submits the renderer's recording only when
 // the flip's own work is still in it - `need` is host_gpu_work_needs() taken
 // when the flip arrived; ~0ull (not known) always submits. True when it did.

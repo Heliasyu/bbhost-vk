@@ -57,6 +57,7 @@
 // exit ("occlusion:").
 
 #include "host/gpu_internal.h"
+#include "host/perf_capture.h"
 #include "host/shaders/occlusion.spv.h"
 #include "log.h"
 
@@ -137,6 +138,17 @@ struct SlotOcc {
     std::uint32_t queries_done = 0, items_done = 0;   // resolved so far
     std::uint32_t to_reset = kQueries;                 // reset at the next recording's start (all, the first time)
     bool ready = false;                                // this recording reset its queries
+    // rc3: the items' dumps by address since the last resolve - a block
+    // dumped again, or overlapping another, makes the resolve serial (lane 0
+    // takes every item, rc2's walk; the shader's lanes otherwise write their
+    // chunks in any order).
+    std::unordered_map<std::uint64_t, std::uint32_t> dumps;
+    bool serial = false;
+    // rc3: the submission's end-of-recording resolve timed on the GPU (its
+    // copy, dispatch and barriers), read when the slot is next recorded.
+    VkQueryPool ts_pool = VK_NULL_HANDLE;
+    bool ts_written = false;
+    bool resolved_any = false;  // rc3: this recording resolved on the GPU (the idle report's "queued after a resolve")
 };
 SlotOcc g_occ[kSlots];
 
@@ -172,6 +184,16 @@ struct Counts {
 };
 Counts g_counts;
 std::atomic<std::uint64_t> g_pred_skipped{0};
+// rc3: the resolves' GPU time (the end-of-submission one, each submission).
+std::atomic<std::uint64_t> g_resolve_ns{0}, g_resolve_n{0}, g_resolve_max_ns{0}, g_resolve_items{0}, g_resolve_serial{0};
+// BBHOST_OCCLUSION_STATS=1: the pair statistics (how a block's second dump
+// reads - a read of guest memory per dump on the GPU; a diagnostic, rc2
+// always did it).
+const bool g_stats = [] {
+    const char* e = std::getenv("BBHOST_OCCLUSION_STATS");
+    return e && e[0] == '1';
+}();
+constexpr std::uint32_t kFlagStats = 2u, kFlagSerial = 4u;
 
 void push_item(SlotOcc& so, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t w) {
     static_cast<Item*>(so.items.map)[so.nitems++] = Item{x, y, z, w};
@@ -254,6 +276,9 @@ void resolve_locked(bool mid) {
     mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     rec().pipeline_barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
                            nullptr, 0, nullptr);
+    // rc3: timed (the submission's own resolve, once a recording).
+    const bool timed = !mid && !so.ts_written && so.ts_pool && g.busy;
+    if (timed) rec().write_timestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, so.ts_pool, 0);
     if (so.queries > so.queries_done) {
         // With availability and without waiting: a query AMD never resolves
         // must not hang the GPU; the shader leaves its dump unwritten.
@@ -265,19 +290,37 @@ void resolve_locked(bool mid) {
         rec().pipeline_barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &cb, 0, nullptr, 0, nullptr);
     }
     const Push push{so.items.address + 16ull * so.items_done, so.results.address, g_state.address, g_preds.address,
-                    so.nitems - so.items_done, g_precise ? 0u : 1u};
+                    so.nitems - so.items_done, (g_precise ? 0u : 1u) | (g_stats ? kFlagStats : 0u) | (so.serial ? kFlagSerial : 0u)};
     rec().bind_pipeline(VK_PIPELINE_BIND_POINT_COMPUTE, g_pipeline);
     rec().push_constants(g_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     rec().dispatch(1, 1, 1);
-    // The counts in guest memory before anything after them - the label
-    // fills, the game's own reads, conditional rendering's predicate reads.
+    // The counts in guest memory before what reads or writes them after:
+    // the label fills (transfer), the next resolve's copy and shader, the
+    // CPU (host), conditional rendering's predicate reads. rc3: no longer
+    // ALL_COMMANDS - the next frame's draws need not wait for this
+    // workgroup to finish (they do not read the blocks; the game reads them
+    // on the CPU after its fence).
     VkMemoryBarrier ab{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     ab.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    ab.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
-    rec().pipeline_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &ab, 0,
-                           nullptr, 0, nullptr);
+    ab.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                       VK_ACCESS_HOST_READ_BIT;
+    VkPipelineStageFlags dst = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT;
+    if (g_cond) {
+        ab.dstAccessMask |= VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT;
+        dst |= VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT;
+    }
+    rec().pipeline_barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, dst, 0, 1, &ab, 0, nullptr, 0, nullptr);
+    if (timed) {
+        rec().write_timestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, so.ts_pool, 1);
+        so.ts_written = true;
+        g_resolve_items.fetch_add(so.nitems - so.items_done, std::memory_order_relaxed);
+    }
+    if (so.serial) g_resolve_serial.fetch_add(1, std::memory_order_relaxed);
     so.items_done = so.nitems;
     so.queries_done = so.queries;
+    so.resolved_any = true;
+    so.dumps.clear();
+    so.serial = false;
     ++g_counts.resolves;
     if (mid) ++g_counts.mid_resolves;
 }
@@ -358,6 +401,12 @@ void occlusion_device_ready_locked() {
         if (vkCreateQueryPool(g.device, &qci, nullptr, &so.pool) != VK_SUCCESS) failed = "a query pool";
         else if (!create_dev_buffer(so.items, 16ull * kItems, true)) failed = "an item buffer";
         else if (!create_dev_buffer(so.results, 16ull * kQueries, false)) failed = "a result buffer";
+        if (!failed) {  // rc3: the resolve's GPU time; without it, untimed
+            VkQueryPoolCreateInfo tci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            tci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            tci.queryCount = 2;
+            if (vkCreateQueryPool(g.device, &tci, nullptr, &so.ts_pool) != VK_SUCCESS) so.ts_pool = VK_NULL_HANDLE;
+        }
     }
     if (failed) {
         host_log("occlusion: off - %s could not be made; every query reads visible, as before", failed);
@@ -379,7 +428,24 @@ void occlusion_begin_recording_locked() {
     // The queries the slot's last recording used; its submission has retired.
     if (so.to_reset) rec().reset_query_pool(so.pool, 0, so.to_reset);
     so.to_reset = 0;
+    if (so.ts_pool) {
+        if (so.ts_written) {  // its submission has retired: no wait
+            std::uint64_t ts[2] = {0, 0};
+            if (vkGetQueryPoolResults(g.device, so.ts_pool, 0, 2, sizeof(ts), ts, sizeof(ts[0]), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+                ts[1] >= ts[0]) {
+                const std::uint64_t ns = static_cast<std::uint64_t>(static_cast<double>(ts[1] - ts[0]) * g.timestamp_period_ns);
+                g_resolve_ns.fetch_add(ns, std::memory_order_relaxed);
+                g_resolve_n.fetch_add(1, std::memory_order_relaxed);
+                std::uint64_t m = g_resolve_max_ns.load(std::memory_order_relaxed);
+                while (ns > m && !g_resolve_max_ns.compare_exchange_weak(m, ns, std::memory_order_relaxed)) {}
+            }
+        }
+        rec().reset_query_pool(so.ts_pool, 0, 2);
+        so.ts_written = false;
+    }
     so.queries = so.nitems = so.queries_done = so.items_done = 0;
+    so.dumps.clear();
+    so.serial = false;
     so.ready = true;
 }
 
@@ -425,10 +491,14 @@ void occlusion_draw_locked(DrawCall& call) {
     }
 }
 
-void occlusion_submit_locked() {
-    if (!g_on) return;
+bool occlusion_submit_locked() {
+    if (!g_on) return false;
     resolve_locked(false);
-    g_occ[g.slot].ready = false;  // until the slot's next recording resets its queries
+    SlotOcc& so = g_occ[g.slot];
+    so.ready = false;  // until the slot's next recording resets its queries
+    const bool any = so.resolved_any;
+    so.resolved_any = false;
+    return any;
 }
 
 void occlusion_record_cond(VkCommandBuffer cmd, const DrawCall& call, bool begin) {
@@ -457,7 +527,7 @@ std::string occlusion_report(bool totals) {
     const unsigned long long visible = dg(kGpuPairsVisible), occluded = dg(kGpuPairsOccluded);
     static std::uint64_t last_skipped = 0;
     const std::uint64_t skipped = g_pred_skipped.load(std::memory_order_relaxed);
-    char buf[1024];
+    char buf[1536];
     std::snprintf(buf, sizeof(buf),
                   "occlusion%s: %llu dumps (%llu fake: not imported; %llu lost), %llu queries, %llu unmeasured draws (%llu intervals read visible), %llu resolves "
                   "(%llu mid-recording); on the GPU %llu dumps written, %llu left not ready (%llu queries unavailable), pairs %llu "
@@ -469,6 +539,24 @@ std::string occlusion_report(bool totals) {
                   d(&Counts::pred_sets), d(&Counts::pred_known), d(&Counts::pred_gpu_sets),
                   static_cast<unsigned long long>(totals ? skipped : skipped - last_skipped), d(&Counts::pred_gpu_draws), dg(kGpuPredDraw),
                   dg(kGpuPredSkip), dg(kGpuPredUnknown), d(&Counts::pred_drawn));
+    {  // rc3: the resolve's GPU time
+        static std::uint64_t last_ns = 0, last_n = 0, last_items = 0, last_serial = 0;
+        const std::uint64_t ns = g_resolve_ns.load(), n = g_resolve_n.load(), items = g_resolve_items.load(), ser = g_resolve_serial.load();
+        const std::uint64_t dn = totals ? n : n - last_n, dns = totals ? ns : ns - last_ns;
+        char t[256];
+        std::snprintf(t, sizeof(t), "; resolve on the GPU %.1f us avg over %llu timed (max %.1f us), %.0f items avg, %llu walked serially%s",
+                      dn ? static_cast<double>(dns) / 1e3 / static_cast<double>(dn) : 0.0, static_cast<unsigned long long>(dn),
+                      static_cast<double>(g_resolve_max_ns.load()) / 1e3,
+                      dn ? static_cast<double>(totals ? items : items - last_items) / static_cast<double>(dn) : 0.0,
+                      static_cast<unsigned long long>(totals ? ser : ser - last_serial), g_stats ? "" : " (pairs: BBHOST_OCCLUSION_STATS=1)");
+        std::strncat(buf, t, sizeof(buf) - std::strlen(buf) - 1);
+        if (!totals) {
+            last_ns = ns;
+            last_n = n;
+            last_items = items;
+            last_serial = ser;
+        }
+    }
     if (!totals) {
         last = now;
         last_skipped = skipped;
@@ -510,6 +598,15 @@ bool host_gpu_zpass_dump(std::uint64_t va) {
         // report - only where the whole block is one import, so the read
         // cannot leave it.
         const bool pair = (va & 15) == 8 && guest_device_address(va - 8, 16 * kPipes) == at - 8;
+        // rc3: the shader's lanes write their chunks' dumps in any order. A
+        // block dumped again in this resolve, or one overlapping another's
+        // words (16-byte steps, under its extent): the walk's order decides
+        // which write stays (a later dump left not ready keeps the earlier
+        // one's), so the whole resolve walks in order on one lane.
+        for (std::uint64_t d = 0; d < 16 * kPipes && !so.serial; d += 16) {
+            so.serial = so.dumps.count(at + d) || (d && at >= d && so.dumps.count(at - d));
+        }
+        so.dumps[at] = so.nitems;
         push_item(so, kItemDump | kPipes << 8 | (pair ? 1u << 16 : 0u), static_cast<std::uint32_t>(at), static_cast<std::uint32_t>(at >> 32),
                   0);
         shadow_written_locked(va, kBlockExtent, true);  // lands on the GPU's timeline
@@ -587,6 +684,20 @@ void host_gpu_set_predication(std::uint64_t block, unsigned op, bool draw_if_vis
     g_pred_index = index;
     g_pred_mode.store(kPredGpu, std::memory_order_relaxed);
 }
+
+namespace {
+std::string occlusion_section() {
+    char b[256];
+    const std::uint64_t n = g_resolve_n.load(), ns = g_resolve_ns.load();
+    std::snprintf(b, sizeof(b), "resolve_gpu: timed=%llu avg_us=%.1f max_us=%.1f items_avg=%.0f serial=%llu (totals since start; the 300-flip "
+                  "occlusion: lines in [log] have each window's)",
+                  static_cast<unsigned long long>(n), n ? static_cast<double>(ns) / 1e3 / static_cast<double>(n) : 0.0,
+                  static_cast<double>(g_resolve_max_ns.load()) / 1e3, n ? static_cast<double>(g_resolve_items.load()) / static_cast<double>(n) : 0.0,
+                  static_cast<unsigned long long>(g_resolve_serial.load()));
+    return b;
+}
+const bool g_occ_section = (perf::add_section("occlusion", occlusion_section), true);
+}  // namespace
 
 std::string host_gpu_occlusion_report() {
     if (!g_on) return {};

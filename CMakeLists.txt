@@ -45,6 +45,7 @@ add_executable(bbhost
   src/core/imports.cpp
   src/core/thunk.cpp
   src/core/portable.cpp
+  src/core/log_async.cpp
   src/core/host_clock.cpp
   src/core/futex.cpp
   src/core/win_vm.cpp
@@ -86,6 +87,7 @@ add_executable(bbhost
   src/engine/yebis_bind.cpp
   src/engine/graphics_patch.cpp
   src/engine/live_resolution.cpp
+  src/engine/scene_split.cpp
   src/engine/loading.cpp
   src/engine/camera.cpp
   src/engine/mouse_camera.cpp
@@ -110,12 +112,14 @@ add_executable(bbhost
   src/host/present_pass.cpp
   src/host/ingame_menu.cpp
   src/host/options.cpp
+  src/host/upscaler.cpp
   src/host/updater.cpp
   src/host/update_verify.cpp
   src/host/bindings.cpp
   src/host/audio.cpp
   src/host/frame_stats.cpp
   src/host/main_wait.cpp
+  src/host/flip_trace.cpp
   src/host/sampler.cpp
   src/host/foreign_hooks.cpp
   src/hle/runtime.cpp
@@ -261,7 +265,8 @@ if(Vulkan_FOUND)
   add_library(replay_common STATIC src/replay/json.cpp src/replay/compare.cpp)
   target_include_directories(replay_common PUBLIC src)
   target_link_libraries(replay_common PUBLIC Vulkan::Headers)
-  target_sources(bbhost PRIVATE src/host/gpu.cpp src/host/gpu_busy.cpp src/host/gpu_memtrack.cpp src/host/gpu_mutex.cpp src/host/buffer_shadow.cpp src/host/recorder.cpp src/host/bindless.cpp src/host/render.cpp src/host/textures.cpp src/host/gpu_untile.cpp src/host/depth_copy.cpp src/host/fsr.cpp src/host/glitch.cpp src/host/occlusion.cpp src/host/draw_capture.cpp src/host/stream_selftest.cpp
+  target_sources(bbhost PRIVATE src/host/gpu.cpp src/host/gpu_busy.cpp src/host/gpu_memtrack.cpp src/host/gpu_mutex.cpp src/host/buffer_shadow.cpp src/host/recorder.cpp src/host/bindless.cpp src/host/render.cpp src/host/textures.cpp src/host/gpu_untile.cpp src/host/depth_copy.cpp src/host/temporal_inputs.cpp src/host/fsr3_pass.cpp src/host/fsr4_pass.cpp src/host/fsr_dump.cpp
+    src/host/pass_timer.cpp src/host/perf_capture.cpp src/host/fsr411/fsr411.cpp src/host/fsr.cpp src/host/glitch.cpp src/host/occlusion.cpp src/host/draw_capture.cpp src/host/stream_selftest.cpp
                                 src/host/shader_patch.cpp src/host/translation_cache.cpp)
   target_link_libraries(bbhost PRIVATE Vulkan::Vulkan gcn replay_common)
   # Which user-data tables a no-fallback shader still reads, from the SPIRV-Tools
@@ -301,13 +306,22 @@ if(SDL3_FOUND AND Vulkan_FOUND)
   target_compile_options(imgui PRIVATE -w)
   target_sources(bbhost PRIVATE src/host/launcher.cpp src/host/plugin_ui.cpp)
   target_link_libraries(bbhost PRIVATE imgui)
+  # bbhost-vk debug tooling (docs/vk/PLAN.md, Phase 0): the presenter's
+  # per-pass GPU timer and the presented-frame capture.
+  target_sources(bbhost PRIVATE src/host/gpu_timer.cpp src/host/frame_capture.cpp)
+  set_source_files_properties(src/host/gpu_timer.cpp src/host/frame_capture.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   set_source_files_properties(src/host/window.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   set_source_files_properties(src/host/overlay.cpp src/host/present_pass.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   set_source_files_properties(src/host/ingame_menu.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   set_source_files_properties(src/host/buffer_shadow.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
-  set_source_files_properties(src/host/gpu_untile.cpp src/host/depth_copy.cpp src/host/fsr.cpp src/host/glitch.cpp src/host/occlusion.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
+  set_source_files_properties(src/host/gpu_untile.cpp src/host/depth_copy.cpp src/host/temporal_inputs.cpp src/host/fsr3_pass.cpp src/host/fsr4_pass.cpp src/host/fsr_dump.cpp src/host/fsr411/fsr411.cpp src/host/fsr.cpp src/host/glitch.cpp src/host/occlusion.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
 else()
   message(STATUS "bbhost: SDL3/Vulkan not found; headless only")
+endif()
+# bbhost-vk: AMD FidelityFX FSR 3.1 for Vulkan (FireBurn/FSR-Vulkan, MIT,
+# third_party/FSR-Vulkan), compiled and linked but not yet called (Phase 0).
+if(Vulkan_FOUND)
+  include(cmake/fsr_vulkan.cmake)
 endif()
 
 # The game's functions as ours (src/decomp, docs/decomp.md), one folder per
@@ -337,6 +351,79 @@ set_source_files_properties(${BBHOST_DECOMP_SOURCES} PROPERTIES COMPILE_OPTIONS 
 # The follow camera's step is the game's own AVX, intrinsic for intrinsic
 # (every CPU that runs the eboot has AVX).
 set_property(SOURCE src/decomp/camera/follow_camera.cpp APPEND PROPERTY COMPILE_OPTIONS -mavx)
+
+# rc5: ThinLTO for bbhost's own sources (the command processor's draw path in
+# render.cpp calls across gpu.cpp, recorder.cpp, buffer_shadow.cpp and
+# textures.cpp; LTO inlines across them). The decomp sources stay out of it
+# (-fno-lto): they are guest-facing, built without the stack protector and
+# with -ffp-contract=off for bit-exact floating point, and nothing from
+# another file may be inlined into them. No -march: the release stays
+# portable and its floating point unchanged. -DBBHOST_THINLTO=OFF builds as
+# rc4 did.
+if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  option(BBHOST_THINLTO "ThinLTO for the bbhost executable (clang + lld)" ON)
+  if(BBHOST_THINLTO)
+    target_compile_options(bbhost PRIVATE -flto=thin)
+    target_link_options(bbhost PRIVATE -flto=thin -Wl,--thinlto-jobs=all)
+    set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-lto)
+    message(STATUS "bbhost: ThinLTO on (BBHOST_THINLTO=OFF turns it off)")
+  endif()
+endif()
+
+# Profiling kit: profile-guided optimisation of the bbhost executable (IR PGO,
+# which works with the ThinLTO above). Both off by default; a normal build is
+# unchanged.
+#   -DBBHOST_PGO_GENERATE=ON     an instrumented binary (-fprofile-generate) that
+#                                writes $BBHOST_PGO_DIR/bbhost-<pid>.profraw
+#                                (default ./pgo) every 30 s and at exit
+#                                (src/host/pgo_dump.cpp). For a profiling session
+#                                only: the CPU side runs slower.
+#   -DBBHOST_PGO_USE=<.profdata> the optimised build from the merged profile
+#                                (llvm-profdata merge -o bbhost.profdata *.profraw,
+#                                with the llvm-profdata of the clang that built
+#                                the instrumented binary).
+#   -DBBHOST_PGO=OFF             rc6: ignore BBHOST_PGO_USE (the same commit
+#                                without the profile, for an A/B)
+#   -DBBHOST_PGO_WARN=ON         rc6: report the profile's mismatches (functions
+#                                changed since it was gathered) instead of
+#                                silencing them
+# The decomp sources stay out of both, as they stay out of LTO (bit-exact,
+# guest-facing; nothing instrumented on the game's stacks).
+if(UNIX AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  option(BBHOST_PGO_GENERATE "PGO-instrumented bbhost (-fprofile-generate; profiling sessions only)" OFF)
+  set(BBHOST_PGO_USE "" CACHE FILEPATH "a merged .profdata to build bbhost with (-fprofile-use)")
+  option(BBHOST_PGO "build with BBHOST_PGO_USE's profile when one is given (OFF: without it)" ON)
+  option(BBHOST_PGO_WARN "report PGO profile mismatches (-Wprofile-instr-out-of-date)" OFF)
+  if(NOT BBHOST_PGO AND BBHOST_PGO_USE)
+    message(STATUS "bbhost: PGO off (BBHOST_PGO=OFF; ${BBHOST_PGO_USE} not used)")
+    set(BBHOST_PGO_USE_EFFECTIVE "")
+  else()
+    set(BBHOST_PGO_USE_EFFECTIVE "${BBHOST_PGO_USE}")
+  endif()
+  if(BBHOST_PGO_GENERATE AND BBHOST_PGO_USE)
+    message(FATAL_ERROR "BBHOST_PGO_GENERATE and BBHOST_PGO_USE are exclusive")
+  endif()
+  if(BBHOST_PGO_GENERATE)
+    target_compile_options(bbhost PRIVATE -fprofile-generate)
+    target_link_options(bbhost PRIVATE -fprofile-generate)
+    target_compile_definitions(bbhost PRIVATE BBHOST_PGO_GEN=1)
+    target_sources(bbhost PRIVATE src/host/pgo_dump.cpp)
+    set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-profile-generate)
+    message(STATUS "bbhost: PGO instrumentation on (BBHOST_PGO_GENERATE; profiles to \$BBHOST_PGO_DIR or ./pgo)")
+  elseif(BBHOST_PGO_USE_EFFECTIVE)
+    if(NOT EXISTS "${BBHOST_PGO_USE}")
+      message(FATAL_ERROR "BBHOST_PGO_USE: no file ${BBHOST_PGO_USE}")
+    endif()
+    if(BBHOST_PGO_WARN)
+      target_compile_options(bbhost PRIVATE -fprofile-use=${BBHOST_PGO_USE} -Wprofile-instr-unprofiled -Wprofile-instr-out-of-date
+                                           -Wprofile-instr-missing)
+    else()
+      target_compile_options(bbhost PRIVATE -fprofile-use=${BBHOST_PGO_USE} -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+    endif()
+    set_property(SOURCE ${BBHOST_DECOMP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -fno-profile-instr-use)
+    message(STATUS "bbhost: PGO from ${BBHOST_PGO_USE}")
+  endif()
+endif()
 
 if(MSVC)
   target_compile_options(bbhost PRIVATE /W4)
@@ -380,12 +467,70 @@ if(UNIX)
   target_include_directories(sdk_headers_test PRIVATE include)
   target_compile_features(sdk_headers_test PRIVATE cxx_std_17)
   add_test(NAME sdk_headers_test COMMAND sdk_headers_test)
+  add_executable(memmem_test tests/memmem_test.cpp src/core/thunk.cpp src/core/tls_rewrite.cpp src/core/portable.cpp src/hle/sysv_va.cpp src/host/main_wait.cpp)
+  target_include_directories(memmem_test PRIVATE src)
+  target_link_libraries(memmem_test PRIVATE pthread)
+  add_test(NAME memmem_test COMMAND memmem_test)
+  add_executable(log_async_test tests/log_async_test.cpp src/core/log_async.cpp)
+  target_include_directories(log_async_test PRIVATE src)
+  target_link_libraries(log_async_test PRIVATE pthread)
+  add_test(NAME log_async_test COMMAND log_async_test)
   add_executable(sysv_va_test tests/sysv_va_test.cpp src/hle/sysv_va.cpp)
   target_include_directories(sysv_va_test PRIVATE src)
   add_test(NAME sysv_va_test COMMAND sysv_va_test)
   add_executable(stun_test tests/stun_test.cpp src/net/stun.cpp)
   target_include_directories(stun_test PRIVATE src)
   add_test(NAME stun_test COMMAND stun_test)
+  # bbhost-vk: the upscaler presets, and FSR-Vulkan's shader tables when it is linked.
+  add_executable(upscaler_test tests/upscaler_test.cpp)
+  target_include_directories(upscaler_test PRIVATE src)
+  if(TARGET ffx-vulkan::fsr3-vk-backend-3.1.5)
+    target_sources(upscaler_test PRIVATE src/host/upscaler_fsr3.cpp)
+    target_compile_definitions(upscaler_test PRIVATE UPSCALER_TEST_FSR3=1)
+    target_link_libraries(upscaler_test PRIVATE ffx-vulkan::portable ffx-vulkan::fsr3-vk-backend-3.1.5)
+  endif()
+  add_test(NAME upscaler_test COMMAND upscaler_test)
+  # bbhost-vk Phase 3: FSR 3.1.5 contexts, sizes and a reset on a software (or real) Vulkan device.
+  if(TARGET ffx-vulkan::fsr3-vk-backend-3.1.5)
+    add_executable(fsr3_upscaler_test tests/fsr3_upscaler_test.cpp src/host/fsr3_upscaler.cpp)
+    target_include_directories(fsr3_upscaler_test PRIVATE src)
+    target_link_libraries(fsr3_upscaler_test PRIVATE ffx-vulkan::portable ffx-vulkan::fsr3-vk-backend-3.1.5 Vulkan::Vulkan)
+    add_test(NAME fsr3_upscaler_test COMMAND fsr3_upscaler_test)
+    set_tests_properties(fsr3_upscaler_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+  endif()
+  # bbhost-vk Phase 1: the scene/UI split's sites against Kyo's Decoupled UI patches.
+  add_executable(scene_split_test tests/scene_split_test.cpp)
+  target_include_directories(scene_split_test PRIVATE src)
+  add_test(NAME scene_split_test COMMAND scene_split_test)
+
+  add_executable(temporal_test tests/temporal_test.cpp)
+  target_include_directories(temporal_test PRIVATE src)
+  add_test(NAME temporal_test COMMAND temporal_test)
+  add_executable(mblur_skip_test tests/mblur_skip_test.cpp)
+  target_include_directories(mblur_skip_test PRIVATE src)
+  add_test(NAME mblur_skip_test COMMAND mblur_skip_test)
+  add_executable(present_pacer_test tests/present_pacer_test.cpp)
+  target_include_directories(present_pacer_test PRIVATE src)
+  add_test(NAME present_pacer_test COMMAND present_pacer_test)
+  if(Vulkan_FOUND)
+    # The motion-vector shader on a real (or software) Vulkan device; skipped without one.
+    add_executable(motion_shader_test tests/motion_shader_test.cpp)
+    target_include_directories(motion_shader_test PRIVATE src)
+    target_link_libraries(motion_shader_test PRIVATE Vulkan::Vulkan)
+    add_test(NAME motion_shader_test COMMAND motion_shader_test)
+    set_tests_properties(motion_shader_test PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(fsr4_sharpen_test tests/fsr4_sharpen_test.cpp)
+    target_include_directories(fsr4_sharpen_test PRIVATE src)
+    target_link_libraries(fsr4_sharpen_test PRIVATE Vulkan::Vulkan)
+    add_test(NAME fsr4_sharpen_test COMMAND fsr4_sharpen_test)
+    set_tests_properties(fsr4_sharpen_test PROPERTIES SKIP_RETURN_CODE 77)
+    # bbhost-vk: FSR 4.1.1's failure paths (no or broken assets) before the fallback to FSR 3.1.
+    add_executable(fsr411_fallback_test tests/fsr411_fallback_test.cpp src/host/fsr411/fsr411.cpp)
+    target_include_directories(fsr411_fallback_test PRIVATE src)
+    target_link_libraries(fsr411_fallback_test PRIVATE Vulkan::Vulkan)
+    add_test(NAME fsr411_fallback_test COMMAND fsr411_fallback_test)
+    set_tests_properties(fsr411_fallback_test PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
   add_executable(tess_lds_test tests/tess_lds_test.cpp src/host/tess_lds.cpp)
   target_include_directories(tess_lds_test PRIVATE src)
   add_test(NAME tess_lds_test COMMAND tess_lds_test)
@@ -441,6 +586,12 @@ if(UNIX)
   # The engine's classes by the names they register (tools/class_catalog.cpp).
   add_executable(class_catalog tools/class_catalog.cpp src/decomp/insn.cpp)
   target_link_libraries(class_catalog PRIVATE eboot_kit)
+  # Profiling kit: the per-flip trace (BBHOST_FLIP_TRACE) on simulated flips.
+  add_executable(flip_trace_test tests/flip_trace_test.cpp src/host/flip_trace.cpp)
+  target_include_directories(flip_trace_test PRIVATE src)
+  target_link_libraries(flip_trace_test PRIVATE pthread)
+  add_test(NAME flip_trace_test COMMAND flip_trace_test)
+  set_tests_properties(flip_trace_test PROPERTIES ENVIRONMENT "BBHOST_FLIP_TRACE=1")
   add_executable(sync_test tests/sync_test.cpp src/hle/sync.cpp src/host/main_wait.cpp src/core/futex.cpp)
   target_include_directories(sync_test PRIVATE src)
   target_link_libraries(sync_test PRIVATE pthread)
@@ -521,6 +672,15 @@ if(UNIX)
     target_link_libraries(gcn_lift_test PRIVATE gcn ${SPIRV_TOOLS_LIB})
     add_test(NAME gcn_lift_test COMMAND gcn_lift_test)
   set_tests_properties(gcn_lift_test PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(gcn_mubuf_bound_test tests/gcn_mubuf_bound_test.cpp)
+    target_link_libraries(gcn_mubuf_bound_test PRIVATE gcn ${SPIRV_TOOLS_LIB})
+    add_test(NAME gcn_mubuf_bound_test COMMAND gcn_mubuf_bound_test)
+    add_executable(gcn_cs_cb_test tests/gcn_cs_cb_test.cpp)
+    target_link_libraries(gcn_cs_cb_test PRIVATE gcn ${SPIRV_TOOLS_LIB})
+    add_test(NAME gcn_cs_cb_test COMMAND gcn_cs_cb_test)
+    add_executable(gcn_fetch_inline_test tests/gcn_fetch_inline_test.cpp)
+    target_link_libraries(gcn_fetch_inline_test PRIVATE gcn ${SPIRV_TOOLS_LIB})
+    add_test(NAME gcn_fetch_inline_test COMMAND gcn_fetch_inline_test)
     if(Vulkan_FOUND)
       add_executable(gcn_sampling_test tests/gcn_sampling_test.cpp)
       target_link_libraries(gcn_sampling_test PRIVATE gcn ${SPIRV_TOOLS_LIB} Vulkan::Vulkan)

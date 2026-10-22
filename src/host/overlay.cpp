@@ -8,6 +8,7 @@
 
 #include "host/overlay_font.h"
 #include "host/overlay_spv.h"
+#include "log.h"
 
 #include <atomic>
 #include <cstring>
@@ -50,7 +51,12 @@ void* g_vbo_map = nullptr;
 VkDeviceSize g_vbo_bytes = 0;
 VkFormat g_format = VK_FORMAT_UNDEFINED;
 
-constexpr VkDeviceSize kVboBytes = 256u * 1024u;  // ~5.4k triangles a frame
+// rc2: 1 MiB (~21.8k triangles). vk1-dream's F10 bug: hovering an
+// Upscaling or Resolution row put its note on screen, and those notes are
+// long: the frame's vertices passed 256 KiB and the whole overlay - menu and
+// all - was dropped, not cut. Now a list that does not fit draws what fits
+// (whole triangles, the menu's panel and rows come first), logged once.
+constexpr VkDeviceSize kVboBytes = 1024u * 1024u;
 
 // The atlas texel that is fully lit: a plain rectangle points every corner at
 // it, so one pipeline draws rectangles and glyphs alike.
@@ -99,6 +105,12 @@ void host_overlay_commit() {
     g_shown.swap(g_verts);
     g_shown_count.store(g_shown.size(), std::memory_order_release);
 }
+
+std::size_t host_overlay_built_vertices() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_verts.size();
+}
+std::size_t host_overlay_shown_vertices() { return g_shown_count.load(std::memory_order_acquire); }
 
 bool host_overlay_empty() { return g_shown_count.load(std::memory_order_acquire) == 0; }
 
@@ -430,10 +442,17 @@ std::uint32_t host_overlay_record(VkCommandBuffer cmd, VkRect2D area, float disp
         // Straight into the vertex buffer: the presenter's fence says the GPU
         // is done with what the last frame drew from it.
         std::lock_guard<std::mutex> lk(g_mu);
-        const VkDeviceSize bytes = g_shown.size() * sizeof(Vertex);
-        if (g_shown.empty() || bytes > g_vbo_bytes) return 0;
-        std::memcpy(g_vbo_map, g_shown.data(), bytes);
-        count = static_cast<std::uint32_t>(g_shown.size());
+        if (g_shown.empty()) return 0;
+        std::size_t n = g_shown.size();
+        const std::size_t fit = static_cast<std::size_t>(g_vbo_bytes / sizeof(Vertex)) / 3 * 3;
+        if (n > fit) {
+            static std::atomic<bool> said{false};
+            if (!said.exchange(true))
+                host_log("overlay: %zu vertices this frame, the buffer holds %zu: the first %zu are drawn (logged once)", n, fit, fit);
+            n = fit;
+        }
+        std::memcpy(g_vbo_map, g_shown.data(), n * sizeof(Vertex));
+        count = static_cast<std::uint32_t>(n);
     }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_dset, 0, nullptr);

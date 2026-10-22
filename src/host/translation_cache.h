@@ -66,3 +66,7 @@ const char* translator_fingerprint();
 bool translation_cache_cold();
 
 }  // namespace gpu
+
+// rc2: each translation that missed the cache, for the performance capture
+// (host/perf_capture.cpp sets it; the unit test leaves it unset).
+inline void (*volatile g_translation_compile_hook)(const char* what, std::uint64_t us) = nullptr;

@@ -1,4 +1,5 @@
 #include "engine/option_menu.h"
+#include "engine/live_resolution.h"
 #include "engine/graphics_patch.h"
 #include "host/window.h"
 
@@ -15,6 +16,7 @@
 #include "hle/modules.h"
 #include "host/bindings.h"
 #include "host/options.h"
+#include "host/settings.h"
 #include "log.h"
 
 #include <atomic>
@@ -156,6 +158,13 @@ const char kOurDeckName[] = "PCDeck";
 // Hunters, the mirror, the rebirth, five players. Each is read once at start,
 // which its line help says.
 const char kOurEnhanceName[] = "PCEnhance";
+// bbhost-vk (docs/vk/PLAN.md): the upscaler and its debug views, and the
+// upscaler's quality and sharpness - two sections, because a section takes
+// one pick list, on its last row. Made only when the movie took them
+// (menu_assets_vk_sections); Phase 0 stores the settings and nothing reads
+// them for the picture yet.
+const char kOurUpscaleName[] = "PCUpscale";
+const char kOurUpQualityName[] = "PCUpQuality";
 
 // The overlay asset that has to supply that sprite. Opening a section whose
 // sprite the movie does not define is not something to find out at runtime, so
@@ -223,6 +232,10 @@ constexpr std::uint32_t kSystemEnhanceRowId = 110013;
 // PC Enhancements, 124000: three toggles, each for the next start (124000
 // was The Old Hunters, a patch of its own since: the setup window's Patches tab).
 constexpr std::uint32_t kEnhMirror = 124001, kEnhRebirth = 124002, kEnhFivePlayers = 124003;
+// bbhost-vk: PC Upscaling, 125000, and Upscaling Quality, 126000.
+constexpr std::uint32_t kSystemUpscaleRowId = 110014, kSystemUpQualityRowId = 110015;
+constexpr std::uint32_t kUpMotionVectors = 125000, kUpGpuTime = 125001, kUpUpscaler = 125002;
+constexpr std::uint32_t kUpSharpness = 126000, kUpQuality = 126001;
 // Steam Deck, 123000: its frame rate - the two configurations,
 // host_set_deck_profile - and the model detail.
 constexpr std::uint32_t kDeckFrameRate = 123000, kDeckModelDetail = 123001;
@@ -567,6 +580,7 @@ std::int32_t g_resolution = 2;
 std::int32_t g_last_resolution = -1;
 std::int32_t g_last_frame_cap = -1;
 bool g_seeded = false;
+bool g_vk_sections = false;  // the movie has bbhost-vk's PC Upscaling sections (option_menu_install)
 
 // PC Controls: the mouse, which DS3 PC gives a screen of its own. Camera
 // Sensitivity is the game's own slider (0..10, as Controls' Camera
@@ -616,6 +630,23 @@ Toggle g_enhance[] = {
 };
 constexpr int kEnhanceRows = static_cast<int>(sizeof(g_enhance) / sizeof(g_enhance[0]));
 
+// bbhost-vk's PC Upscaling: the two debug toggles, then the upscaler's pick
+// list (the index into the setting's list: Off, FSR 1, FSR 3.1, FSR 4.1.1);
+// and Upscaling Quality: the sharpness slider (its eleven steps are the
+// setting's 0.0..1.0), then the quality preset's pick list.
+Toggle g_up_toggles[] = {
+    {"debug_motion_vectors", kUpMotionVectors, 0, 0xff},
+    {"debug_upscaler_time", kUpGpuTime, 0, 0xff},
+};
+constexpr int kUpToggleCount = static_cast<int>(sizeof(g_up_toggles) / sizeof(g_up_toggles[0]));
+const Choice kUpscalers[] = {{0, 125030}, {1, 125031}, {2, 125032}, {3, 125033}};
+std::int32_t g_upscaler = 1, g_upscaler_last = -1;
+constexpr int kUpscaleRows = kUpToggleCount + 1;
+Slider g_up_sharpness{"upscale_sharpness", kUpSharpness, 8, 0xff};
+const Choice kUpQualities[] = {{0, 126030}, {1, 126031}, {2, 126032}, {3, 126033}, {4, 126034}};
+std::int32_t g_up_quality = 0, g_up_quality_last = -1;
+constexpr int kUpQualityRows = 2;
+
 void seed_deck() {
     g_deck_rate = g_deck_rate_last = static_cast<std::uint8_t>(host_deck_profile());
     const int m = host_opt_index("model_detail");
@@ -626,7 +657,8 @@ void seed_deck() {
 // changed it since - so each section seeds its values when it opens, and the
 // poll then pushes only what the player changes.
 void seed(Toggle& t) {
-    t.value = host_opt_get(t.key) ? 1 : 0;
+    // anti_alias Auto (test7) shows what is in effect; flipping the row sets On or Off.
+    t.value = (std::strcmp(t.key, "anti_alias") == 0 ? host_settings().anti_alias : host_opt_get(t.key)) ? 1 : 0;
     t.last = t.value;
 }
 
@@ -654,6 +686,15 @@ void push(Toggle& t) {
     t.last = t.value;
     host_opt_set(t.key, t.value != 0);
     host_log("pc-options: %s %s from the System menu", t.key, t.value ? "on" : "off");
+}
+
+void seed_upscale() {
+    for (auto& t : g_up_toggles) seed(t);
+    seed(g_up_sharpness);
+    const int u = host_opt_index("upscaler");
+    g_upscaler = g_upscaler_last = u < 0 ? 1 : u;
+    const int q = host_opt_index("upscale_quality");
+    g_up_quality = g_up_quality_last = q < 0 ? 0 : q;
 }
 
 void seed_controls() {
@@ -685,6 +726,7 @@ constexpr int kSectionSlots = 6, kKeysSlots = 8;
 constexpr int kRowCount = kToggleCount + 1;
 static_assert(kRowCount <= kSectionSlots && kGraphicsRows <= kSectionSlots && kControlsRows <= kSectionSlots &&
                   kCameraRows <= kSectionSlots && kDeckRows <= kSectionSlots && kEnhanceRows <= kSectionSlots &&
+                  kUpscaleRows <= kSectionSlots && kUpQualityRows <= kSectionSlots &&
                   kEffectsRows <= kSectionSlots && 1 + kBindPerPage <= kKeysSlots,
               "more rows than the section sprite has slots: the extra ones have nowhere to draw. "
               "Add slots in engine/menu_assets.cpp (build_option_movie), or split into a second section.");
@@ -839,6 +881,58 @@ GUEST_ABI void pc_enhance_handler(void* dialog, void* params) {
     for (auto& t : g_enhance) seed(t);
     for (auto& t : g_enhance) add_toggle_row(dialog, &t.value, t.id, default_of(t));
     log_rows("PCEnhance", dialog, kEnhanceRows, kEnhanceRows);
+}
+
+// bbhost-vk: PC Upscaling and Upscaling Quality as last opened, as PC
+// Graphics is kept (g_gfx_dialog): a resize waits while a pick list is up on
+// one of them (option_menu_popup_open). Menu thread.
+std::uint8_t* g_up_dialog = nullptr;
+std::uint8_t* g_upq_dialog = nullptr;
+std::uint64_t g_up_vtable = 0, g_upq_vtable = 0, g_up_base_depth = 0, g_upq_base_depth = 0;
+void track(std::uint8_t** dialog, std::uint64_t* vtable, std::uint64_t* base, void* d) {
+    *dialog = static_cast<std::uint8_t*>(d);
+    std::memcpy(vtable, d, sizeof(*vtable));
+    std::memcpy(base, *dialog + 0x40, sizeof(*base));
+}
+// Still open, as gfx_alive tells: its vtable, and row `row` still bound to `value`.
+bool tracked_alive(std::uint8_t* dialog, std::uint64_t vtable, int row, const void* value) {
+    if (!dialog) return false;
+    std::uint64_t vt = 0;
+    std::memcpy(&vt, dialog, sizeof(vt));
+    if (vt != vtable || dialog_row_count(dialog) <= row) return false;
+    std::uint64_t v = 0;
+    std::memcpy(&v, dialog_widget(dialog, row) + kChoiceValue, sizeof(v));
+    return v == reinterpret_cast<std::uint64_t>(value);
+}
+bool up_alive() { return tracked_alive(g_up_dialog, g_up_vtable, 0, &g_up_toggles[0].value); }
+bool upq_alive() { return tracked_alive(g_upq_dialog, g_upq_vtable, kUpQualityRows - 1, &g_up_quality); }
+
+// bbhost-vk's PC Upscaling: two toggles, then the upscaler's pick list, last.
+GUEST_ABI void pc_upscale_handler(void* dialog, void* params) {
+    host_log("pc-options: PCUpscale opened, dialog=%p params=%p", dialog, params);
+    track(&g_up_dialog, &g_up_vtable, &g_up_base_depth, dialog);
+    alignas(16) std::uint8_t scratch[0x100]{};
+    hle_call_guest<std::int64_t>(guest_fn(kScratchInit), &scratch);
+    seed_upscale();
+    for (auto& t : g_up_toggles) add_toggle_row(dialog, &t.value, t.id, default_of(t));
+    const int def = host_opt_default_index("upscaler");
+    add_list_row(dialog, &g_upscaler, kUpUpscaler, kUpscalers, static_cast<int>(sizeof(kUpscalers) / sizeof(kUpscalers[0])),
+                 def < 0 ? 1 : def);
+    log_rows("PCUpscale", dialog, kUpscaleRows, kUpscaleRows);
+}
+
+// bbhost-vk's Upscaling Quality: the sharpness slider, then the quality's pick list.
+GUEST_ABI void pc_upquality_handler(void* dialog, void* params) {
+    host_log("pc-options: PCUpQuality opened, dialog=%p params=%p", dialog, params);
+    track(&g_upq_dialog, &g_upq_vtable, &g_upq_base_depth, dialog);
+    alignas(16) std::uint8_t scratch[0x100]{};
+    hle_call_guest<std::int64_t>(guest_fn(kScratchInit), &scratch);
+    seed_upscale();
+    add_slider_row(dialog, &g_up_sharpness.value, g_up_sharpness.id, default_of(g_up_sharpness));
+    const int def = host_opt_default_index("upscale_quality");
+    add_list_row(dialog, &g_up_quality, kUpQuality, kUpQualities, static_cast<int>(sizeof(kUpQualities) / sizeof(kUpQualities[0])),
+                 def < 0 ? 0 : def);
+    log_rows("PCUpQuality", dialog, kUpQualityRows, kUpQualityRows);
 }
 
 // Steam Deck: the frame rate's pair, then the model detail's pick list.
@@ -1297,7 +1391,9 @@ constexpr std::uint64_t kDropdownVTable = 0x5739e90, kDropdownRedraw = 0x1f2b7c0
 std::atomic<int> g_confirm_answer{0};         // 1 yes, 2 no
 std::atomic<bool> g_confirm_yes{false};
 std::atomic<bool> g_confirm_timed_out{false};  // whatever closes it now counts as no
-bool g_confirm_open = false;  // menu thread
+// Set and cleared on the menu thread; read by option_menu_confirm_close from
+// the present step (live_resolution's confirm_tick), so atomic.
+std::atomic<bool> g_confirm_open{false};
 std::uint64_t g_confirm_popup = 0;  // ours, on the stack
 
 // PC Graphics still open: the dialog keeps its vtable and its first row
@@ -1470,6 +1566,14 @@ GUEST_ABI std::int64_t pc_open_enhance(void* root, void* params) {
     static void* handler = hle_wrap_fn(reinterpret_cast<void*>(&pc_enhance_handler));
     return open_named(root, params, kOurEnhanceName, handler, -1);
 }
+GUEST_ABI std::int64_t pc_open_upscale(void* root, void* params) {
+    static void* handler = hle_wrap_fn(reinterpret_cast<void*>(&pc_upscale_handler));
+    return open_named(root, params, kOurUpscaleName, handler, kUpscaleRows - 1);  // the upscaler
+}
+GUEST_ABI std::int64_t pc_open_upquality(void* root, void* params) {
+    static void* handler = hle_wrap_fn(reinterpret_cast<void*>(&pc_upquality_handler));
+    return open_named(root, params, kOurUpQualityName, handler, kUpQualityRows - 1);  // the quality
+}
 GUEST_ABI std::int64_t pc_open_keys(void* root, void* params) {
     static void* handler = hle_wrap_fn(reinterpret_cast<void*>(&pc_keys_handler));
     return open_named(root, params, kOurKeysName, handler, -2);
@@ -1509,6 +1613,14 @@ GUEST_ABI void* pc_deck_row_open(void* out, void* ctx) {
 }
 GUEST_ABI void* pc_enhance_row_open(void* out, void* ctx) {
     static void* opener = hle_wrap_fn(reinterpret_cast<void*>(&pc_open_enhance));
+    return row_open(out, ctx, opener);
+}
+GUEST_ABI void* pc_upscale_row_open(void* out, void* ctx) {
+    static void* opener = hle_wrap_fn(reinterpret_cast<void*>(&pc_open_upscale));
+    return row_open(out, ctx, opener);
+}
+GUEST_ABI void* pc_upquality_row_open(void* out, void* ctx) {
+    static void* opener = hle_wrap_fn(reinterpret_cast<void*>(&pc_open_upquality));
     return row_open(out, ctx, opener);
 }
 GUEST_ABI void* pc_keys_row_open(void* out, void* ctx) {
@@ -1574,6 +1686,11 @@ GUEST_ABI void* pc_system_finalize(void* out, void* builder, void* arg3) {
          hle_wrap_fn(reinterpret_cast<void*>(&pc_row_open))},
         {reinterpret_cast<void*>(static_cast<std::uintptr_t>(kSystemGraphicsRowId)),
          hle_wrap_fn(reinterpret_cast<void*>(&pc_graphics_row_open))},
+        // bbhost-vk, beside PC Graphics; left out below when the movie has no sections for them.
+        {reinterpret_cast<void*>(static_cast<std::uintptr_t>(kSystemUpscaleRowId)),
+         hle_wrap_fn(reinterpret_cast<void*>(&pc_upscale_row_open))},
+        {reinterpret_cast<void*>(static_cast<std::uintptr_t>(kSystemUpQualityRowId)),
+         hle_wrap_fn(reinterpret_cast<void*>(&pc_upquality_row_open))},
         {reinterpret_cast<void*>(static_cast<std::uintptr_t>(kSystemEffectsRowId)),
          hle_wrap_fn(reinterpret_cast<void*>(&pc_effects_row_open))},
         {reinterpret_cast<void*>(static_cast<std::uintptr_t>(kSystemControlsRowId)),
@@ -1607,7 +1724,9 @@ GUEST_ABI void* pc_system_finalize(void* out, void* builder, void* arg3) {
     // lines and **scrolls**, with the scroll bar the port's movie gives it, so
     // rows past the fifth need no slot of their own.
     for (const auto& r : rows) {
-        Captions c(static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(r[0])));
+        const auto id = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(r[0]));
+        if ((id == kSystemUpscaleRowId || id == kSystemUpQualityRowId) && !g_vk_sections) continue;
+        Captions c(id);
         GuestFunction f(kRowFunctorVTable, r[1]);
         hle_call_guest<std::int64_t>(guest_fn(kAddCommandRow), builder, c.buf, f.buf, &flag);
     }
@@ -1759,6 +1878,7 @@ void option_menu_poll() {
         seed(g_cam_mouse_auto_rotation);
         seed_controls();
         seed_deck();
+        seed_upscale();
         g_resolution = host_opt_resolution_index();
         g_last_resolution = g_resolution;
         g_frame_cap = host_opt_frame_cap();
@@ -1767,7 +1887,9 @@ void option_menu_poll() {
     }
     if (g_resolution != g_last_resolution) {
         g_last_resolution = g_resolution;
+        live_resolution_from_game_menu(true);
         host_opt_set_resolution_index(g_resolution);
+        live_resolution_from_game_menu(false);
         host_log("pc-options: resolution entry %d from the System menu", g_resolution);
     } else if (host_opt_resolution_index() != g_last_resolution) {
         // Changed elsewhere - F10, or the keep-or-revert question going
@@ -1788,6 +1910,23 @@ void option_menu_poll() {
     push(g_cam_mouse_auto_rotation);
     for (auto& t : g_toggles) push(t);
     for (auto& t : g_enhance) push(t);
+    // bbhost-vk's PC Upscaling and Upscaling Quality (Phase 1: the quality sizes the scene).
+    for (auto& t : g_up_toggles) push(t);
+    push(g_up_sharpness);
+    if (g_upscaler != g_upscaler_last) {
+        g_upscaler_last = g_upscaler;
+        live_resolution_from_game_menu(true);
+        host_opt_set_index("upscaler", g_upscaler);
+        live_resolution_from_game_menu(false);
+        host_log("pc-options: upscaler entry %d from the System menu", g_upscaler);
+    }
+    if (g_up_quality != g_up_quality_last) {
+        g_up_quality_last = g_up_quality;
+        live_resolution_from_game_menu(true);
+        host_opt_set_index("upscale_quality", g_up_quality);
+        live_resolution_from_game_menu(false);
+        host_log("pc-options: upscaling quality entry %d from the System menu", g_up_quality);
+    }
     // Steam Deck: the frame rate sets the frame cap, the resolution and the
     // model detail at once, and the model detail row then shows what it set -
     // unless that row changed too (Defaults puts back both), when it has the
@@ -1894,11 +2033,25 @@ void option_menu_install(ElfImage* image) {
     if (!engine_call_site_hook(image, guest(kTitleFinalizeCall), guest(kTitleFinalize), reinterpret_cast<void*>(&title_finalize_hook)))
         host_log("pc-options: the title menu's Quit Game did not go in");
     g_installed = true;
-    host_log("pc-options: System gains %sPC Enhancements, PC Settings, PC Graphics, PC Effects, PC Controls, PC Camera and Key Bindings",
-             host_steam_deck() ? "Steam Deck (a Steam Deck), " : "");
+    g_vk_sections = menu_assets_vk_sections();
+    host_log("pc-options: System gains %sPC Enhancements, PC Settings, PC Graphics, %sPC Effects, PC Controls, PC Camera and Key Bindings",
+             host_steam_deck() ? "Steam Deck (a Steam Deck), " : "",
+             g_vk_sections ? "PC Upscaling, Upscaling Quality, " : "(not PC Upscaling: the movie has no sections for it) ");
 }
 
 bool option_menu_confirm_possible() { return g_installed && gfx_alive(); }
+
+bool option_menu_popup_open() {
+    if (!g_installed) return false;
+    auto open_on = [](std::uint8_t* dialog, std::uint64_t base, bool alive) {
+        if (!dialog || !alive) return false;
+        std::uint64_t depth = 0;
+        std::memcpy(&depth, dialog + 0x40, sizeof(depth));
+        return depth > base;
+    };
+    return open_on(g_gfx_dialog, g_gfx_base_depth, gfx_alive()) || open_on(g_up_dialog, g_up_base_depth, up_alive()) ||
+           open_on(g_upq_dialog, g_upq_base_depth, upq_alive());
+}
 
 void option_menu_confirm_ask(std::uint32_t message) {
     g_confirm_answer.store(0);
@@ -1911,7 +2064,14 @@ int option_menu_confirm_take() { return g_confirm_answer.exchange(0); }
 // runs out it is closed the way a player would close it - the menu's decide
 // button on whichever answer is highlighted - and counted as no either way.
 void option_menu_confirm_close() {
-    if (!g_confirm_open) return;
+    if (!g_confirm_open.load()) {
+        // bbhost-vk: never put up (PC Graphics closed, or a pick list stayed
+        // on its stack, before the question could go up). Its request is
+        // withdrawn here, or it went up later - the next time PC Graphics
+        // opened - as a question nobody was waiting for.
+        if (g_confirm_ask.exchange(0)) host_log("pc-options: the resolution question was never shown; withdrawn");
+        return;
+    }
     g_confirm_timed_out.store(true);
     hle_pad_tap(menu_confirm_button(), 0, 120);
 }

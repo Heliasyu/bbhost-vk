@@ -6,9 +6,19 @@
 #include <ctime>
 #include <mutex>
 
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <string>
+#include <vector>
+
 #if defined(_WIN32)
 #include <windows.h>
 #include <timeapi.h>
+#endif
+#if defined(__linux__)
+#include <sched.h>
+#include <sys/prctl.h>
 #endif
 
 namespace {
@@ -107,6 +117,11 @@ std::uint64_t host_clock_ticks_at(std::uint64_t hz) {
 }
 
 void host_timing_init() {
+#if defined(__linux__)
+    // rc5: the process's own CPU mask and its L3 domains, read before any
+    // thread places itself (host_thread_place).
+    (void)host_cpu_placement_section();
+#endif
 #if defined(_WIN32)
     // 1 ms timer resolution for the whole run. host_sleep_us's waitable
     // timers are high-resolution and do not need it; Sleep, the timed waits
@@ -175,6 +190,249 @@ void host_thread_set_class(HostThreadClass c, const char* who) {
 #else
     (void)on;
     (void)c;
-    (void)who;
+    // rc5: Linux has no priority here (that needs CAP_SYS_NICE); the timer
+    // slack and the placement instead.
+    host_thread_tight_timers(who);
+    host_thread_place(HostPlace::Hot, who);
 #endif
 }
+
+#if defined(__linux__)
+namespace {
+
+std::atomic<int> g_slack_set{0}, g_slack_failed{0};
+std::atomic<bool> g_slack_on{false};
+
+// The placement: the process's own mask, taken at start (host_timing_init)
+// before any thread changed its own, and the hot and cold masks made from it.
+struct Placement {
+    bool on = false;
+    std::string why = "not looked at yet";
+    cpu_set_t any{}, hot{}, cold{};
+    std::string hot_list, cold_list, by;
+    int domains = 0;
+};
+std::atomic<int> g_placed[3] = {}, g_place_failed{0};
+std::mutex g_place_log_mu;
+int g_place_logs = 0;
+
+std::string cpu_list(const cpu_set_t& s) {
+    std::string out;
+    for (int c = 0; c < CPU_SETSIZE; ++c) {
+        if (!CPU_ISSET(c, &s)) continue;
+        int e = c;
+        while (e + 1 < CPU_SETSIZE && CPU_ISSET(e + 1, &s)) ++e;
+        if (!out.empty()) out += ',';
+        out += std::to_string(c);
+        if (e > c) out += '-' + std::to_string(e);
+        c = e;
+    }
+    return out;
+}
+
+bool read_line(const char* path, std::string& out) {
+    FILE* f = std::fopen(path, "r");
+    if (!f) return false;
+    char buf[512];
+    const bool ok = std::fgets(buf, sizeof(buf), f) != nullptr;
+    std::fclose(f);
+    if (!ok) return false;
+    out = buf;
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+    return true;
+}
+
+long long read_number(const char* path) {
+    std::string l;
+    if (!read_line(path, l) || l.empty()) return -1;
+    char* end = nullptr;
+    long long v = std::strtoll(l.c_str(), &end, 10);
+    // "32768K" (cache sizes)
+    if (end && (*end == 'K' || *end == 'k')) v *= 1024;
+    else if (end && (*end == 'M' || *end == 'm')) v *= 1024 * 1024;
+    return v;
+}
+
+bool parse_list(const std::string& l, cpu_set_t& out) {
+    CPU_ZERO(&out);
+    const char* p = l.c_str();
+    bool any = false;
+    while (*p) {
+        char* end = nullptr;
+        const long a = std::strtol(p, &end, 10);
+        if (end == p) return false;
+        long b = a;
+        p = end;
+        if (*p == '-') {
+            b = std::strtol(p + 1, &end, 10);
+            if (end == p + 1) return false;
+            p = end;
+        }
+        for (long c = a; c <= b && c < CPU_SETSIZE; ++c) {
+            if (c >= 0) CPU_SET(static_cast<int>(c), &out);
+            any = true;
+        }
+        if (*p == ',') ++p;
+        else if (*p) return false;
+    }
+    return any;
+}
+
+Placement& placement() {
+    static Placement pl = [] {
+        Placement p;
+        if (env_off("BBHOST_AFFINITY")) {
+            p.why = "BBHOST_AFFINITY=0";
+            return p;
+        }
+        if (sched_getaffinity(0, sizeof(p.any), &p.any) != 0) {
+            p.why = "the process's mask could not be read";
+            return p;
+        }
+        // The L3 domains of the CPUs the process may run on.
+        struct Domain {
+            cpu_set_t cpus;
+            long long l3 = -1, rank = -1;
+            int first = CPU_SETSIZE;
+        };
+        std::vector<Domain> ds;
+        char path[160];
+        bool ranked = false, cppc = false, freq = false;
+        for (int c = 0; c < CPU_SETSIZE; ++c) {
+            if (!CPU_ISSET(c, &p.any)) continue;
+            std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index3/shared_cpu_list", c);
+            std::string l;
+            cpu_set_t set;
+            if (!read_line(path, l) || !parse_list(l, set)) {
+                p.why = "no L3 sharing list in sysfs";
+                return p;
+            }
+            CPU_AND(&set, &set, &p.any);
+            Domain* d = nullptr;
+            for (Domain& x : ds) {
+                if (CPU_EQUAL(&x.cpus, &set)) d = &x;
+            }
+            if (!d) {
+                ds.push_back(Domain{});
+                d = &ds.back();
+                d->cpus = set;
+                std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index3/size", c);
+                d->l3 = read_number(path);
+            }
+            d->first = std::min(d->first, c);
+            // Preferred cores (amd-pstate), else the CPPC highest performance,
+            // else the highest frequency: the domain's best core.
+            long long r = -1;
+            std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/amd_pstate_prefcore_ranking", c);
+            if ((r = read_number(path)) >= 0) {
+                ranked = true;
+            } else {
+                std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/acpi_cppc/highest_perf", c);
+                if ((r = read_number(path)) >= 0) {
+                    cppc = true;
+                } else {
+                    std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+                    if ((r = read_number(path)) >= 0) freq = true;
+                }
+            }
+            d->rank = std::max(d->rank, r);
+        }
+        p.domains = static_cast<int>(ds.size());
+        if (ds.size() < 2) {
+            p.why = ds.empty() ? "no CPUs" : "one L3 domain (nothing to choose)";
+            return p;
+        }
+        for (const Domain& d : ds) {
+            if (CPU_COUNT(&d.cpus) < 6) {
+                p.why = "an L3 domain with fewer than 6 CPUs";
+                return p;
+            }
+        }
+        // The larger L3 first (a 3D V-Cache die), then the best core, then
+        // the lowest-numbered.
+        const Domain* best = &ds[0];
+        for (const Domain& d : ds) {
+            if (d.l3 > best->l3 || (d.l3 == best->l3 && (d.rank > best->rank || (d.rank == best->rank && d.first < best->first)))) best = &d;
+        }
+        p.hot = best->cpus;
+        CPU_ZERO(&p.cold);
+        for (int c = 0; c < CPU_SETSIZE; ++c) {
+            if (CPU_ISSET(c, &p.any) && !CPU_ISSET(c, &p.hot)) CPU_SET(c, &p.cold);
+        }
+        p.hot_list = cpu_list(p.hot);
+        p.cold_list = cpu_list(p.cold);
+        p.by = ranked ? "prefcore ranking" : cppc ? "CPPC highest perf" : freq ? "max frequency" : "lowest CPU";
+        p.on = true;
+        p.why = "on";
+        return p;
+    }();
+    return pl;
+}
+
+}  // namespace
+
+bool host_thread_tight_timers(const char* who) {
+    static const bool on = !env_off("BBHOST_TIMER_SLACK");
+    if (!on) return false;
+    thread_local bool done = false, ok = false;
+    if (done) return ok;
+    done = true;
+    ok = prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL) == 0;
+    (ok ? g_slack_set : g_slack_failed).fetch_add(1, std::memory_order_relaxed);
+    if (ok) g_slack_on.store(true, std::memory_order_relaxed);
+    if (g_slack_set.load() + g_slack_failed.load() <= 16) {
+        host_log("timer slack: %s %s (BBHOST_TIMER_SLACK=0 leaves the default 50 us)", who ? who : "a thread",
+                 ok ? "set to 1 ns" : "could not be set");
+    }
+    return ok;
+}
+
+bool host_tight_timers_on() { return g_slack_on.load(std::memory_order_relaxed); }
+
+void host_thread_place(HostPlace where, const char* who) {
+    Placement& p = placement();
+    if (!p.on) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true)) host_log("placement: off: %s", p.why.c_str());
+        return;
+    }
+    const cpu_set_t& m = where == HostPlace::Hot ? p.hot : where == HostPlace::Cold ? p.cold : p.any;
+    const bool ok = sched_setaffinity(0, sizeof(m), &m) == 0;
+    if (ok) g_placed[static_cast<int>(where)].fetch_add(1, std::memory_order_relaxed);
+    else g_place_failed.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(g_place_log_mu);
+    static bool said_masks = false;
+    if (!said_masks) {
+        said_masks = true;
+        host_log("placement: %d L3 domains; the hot chain on CPUs %s, the shader compilers on %s in game (chosen by %s; "
+                 "BBHOST_AFFINITY=0 turns it off)",
+                 p.domains, p.hot_list.c_str(), p.cold_list.c_str(), p.by.c_str());
+    }
+    static std::vector<std::string> named;
+    const std::string n = who ? who : "a thread";
+    if (where != HostPlace::Any && g_place_logs < 24 && std::find(named.begin(), named.end(), n) == named.end()) {
+        named.push_back(n);
+        ++g_place_logs;
+        host_log("placement: %s on the %s CPUs%s", who ? who : "a thread", where == HostPlace::Hot ? "hot" : "cold",
+                 ok ? "" : " - refused (ignored)");
+    }
+}
+
+std::string host_cpu_placement_section() {
+    const Placement& p = placement();
+    char b[512];
+    std::snprintf(b, sizeof(b),
+                  "placement: on=%d domains=%d hot=%s cold=%s by=%s hot_threads=%d cold_threads=%d reset_threads=%d failed=%d%s%s "
+                  "(rc5: BBHOST_AFFINITY=0 turns it off)\n"
+                  "timer_slack: threads=%d failed=%d (rc5: 1 ns; BBHOST_TIMER_SLACK=0 leaves 50 us)",
+                  p.on ? 1 : 0, p.domains, p.on ? p.hot_list.c_str() : "-", p.on ? p.cold_list.c_str() : "-",
+                  p.on ? p.by.c_str() : "-", g_placed[0].load(), g_placed[1].load(), g_placed[2].load(), g_place_failed.load(),
+                  p.on ? "" : " why=", p.on ? "" : p.why.c_str(), g_slack_set.load(), g_slack_failed.load());
+    return b;
+}
+#else
+bool host_thread_tight_timers(const char*) { return false; }
+bool host_tight_timers_on() { return false; }
+void host_thread_place(HostPlace, const char*) {}
+std::string host_cpu_placement_section() { return "placement: on=0 (not Linux)\ntimer_slack: threads=0 failed=0 (not Linux)"; }
+#endif
