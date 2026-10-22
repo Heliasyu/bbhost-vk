@@ -185,6 +185,14 @@ void bullets_report(const char* after) {
         host_log("world: bullets search:   0x%llx = %d (record %s0x%llx)", static_cast<unsigned long long>(b.where[i]), b.last[i],
                  b.where[i] >= record ? "+" : "-",
                  static_cast<unsigned long long>(b.where[i] >= record ? b.where[i] - record : record - b.where[i]));
+        // The slot's neighbours: an inventory entry's other fields (the item's
+        // id, round 14: the count moved to another slot when Blood Bullets
+        // refilled an emptied one).
+        std::int32_t around[16] = {};
+        for (int k = 0; k < 16; ++k) rd(b.where[i] - 0x20 + static_cast<std::uint64_t>(k) * 4, &around[k]);
+        host_log("world: bullets search:     -0x20..+0x1c: %d %d %d %d %d %d %d %d | %d %d %d %d %d %d %d %d", around[0], around[1],
+                 around[2], around[3], around[4], around[5], around[6], around[7], around[8], around[9], around[10], around[11],
+                 around[12], around[13], around[14], around[15]);
         // A pointer in the game data (or one level below it) to just before
         // the count: the path to keep.
         for (std::uint64_t o = 0; record && o < 0x4000; o += 8) {
