@@ -33,6 +33,8 @@ public sealed class MainWindow : Window
     readonly TransitioningContentControl _page;
     readonly GlidePage _glide = new();
     readonly TextBlock _summary = Ui.Text("", 13, "soft");
+    readonly TextBlock _version = Ui.Text("Launcher 0.1", 12, "muted");
+    string? _releaseUrl;
     readonly Button _play;
     readonly List<Button> _tabs = new();
     readonly Border _bead;
@@ -80,7 +82,7 @@ public sealed class MainWindow : Window
         logo.Children.Add(new Ellipse { Stroke = Brush.Parse("#C9D6EE"), StrokeThickness = 1.5 });
         logo.Children.Add(new Path { Data = Geometry.Parse("M16,5 C22,10 22,22 16,27 C20,21 20,11 16,5 Z"), Fill = Brush.Parse("#C9D6EE"), Width = 32, Height = 32, Stretch = Stretch.None });
         var name = Ui.Col(3, new TextBlock { Text = "Helia's Dream", FontSize = 28, Classes = { "display" }, LetterSpacing = 1.6 },
-                             Ui.Text("Launcher 0.1 · v0.2.18-vk.2", 12, "muted"));
+                             _version);
         var brand = Ui.Row(12, logo, name);
         brand.VerticalAlignment = VerticalAlignment.Center;
 
@@ -150,6 +152,32 @@ public sealed class MainWindow : Window
 
         UpdateSummary();
         GoTo(0);
+        _version.PointerPressed += (_, _) =>
+        {
+            if (_releaseUrl == null) return;
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(OperatingSystem.IsWindows() ? "explorer" : "xdg-open", _releaseUrl) { UseShellExecute = false }); }
+            catch (Exception) { }
+        };
+        _ = CheckVersion();
+    }
+
+    // The header's line: the engine's version, and a newer release when there is one.
+    async Task CheckVersion()
+    {
+        var dir = _gameDir;
+        var engine = await Task.Run(() => Updates.EngineVersion(dir));
+        _version.Text = engine != null ? $"Launcher 0.1 · engine {engine.Split('-')[0]}-{(engine.Split('-').Length > 1 ? engine.Split('-')[1] : "")}" : "Launcher 0.1";
+        var latest = await Updates.Latest();
+        if (latest == null || engine == null) return;
+        if (Updates.Newer(latest.Tag, engine))
+        {
+            _releaseUrl = latest.Url;
+            _version.Text += $" · {latest.Tag} available";
+            _version.Foreground = Brush.Parse("#E8C27A");
+            _version.Cursor = new Cursor(StandardCursorType.Hand);
+            ToolTip.SetTip(_version, "A newer release is out. Click to open its page.");
+        }
+        else _version.Text += " · up to date";
     }
 
     /// The monitors by their connector names (DP-1), the primary first.
