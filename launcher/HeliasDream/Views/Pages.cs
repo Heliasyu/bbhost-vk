@@ -25,6 +25,8 @@ public sealed class Ctx
     public required Action<int> GoTo { get; init; }
     public required Action Changed { get; init; }
     public required Func<string?, System.Threading.Tasks.Task<string?>> PickFolder { get; init; }
+    /// The monitors: connector name and a label; the primary first.
+    public required Func<IReadOnlyList<(string Name, string Label, bool Primary)>> Monitors { get; init; }
 }
 
 public static class Pages
@@ -183,17 +185,28 @@ public static class Pages
     {
         var col = Ui.Col(18, Header(title, sub));
         col.Children[0].Margin = new Thickness(8, 6, 8, 0);
-        var two = new Grid { ColumnDefinitions = new ColumnDefinitions(groups.Length > 1 ? "*,*" : "*"), ColumnSpacing = 18 };
-        for (int i = 0; i < groups.Length; i++)
+        // Two columns, each a stack: the groups go to whichever is shorter so far.
+        var left = Ui.Col(18);
+        var right = Ui.Col(18);
+        int lrows = 0, rrows = 0;
+        foreach (var gr in groups)
         {
-            var g = Ui.Group(groups[i], ctx.Options, ctx.Changed);
-            g.VerticalAlignment = VerticalAlignment.Top;
-            Grid.SetColumn(g, Math.Min(i, 1));
-            if (i >= 2) { two.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); }
-            two.Children.Add(g);
+            var g = Ui.Group(gr, ctx.Options, ctx.Changed);
+            if (groups.Length == 1 || lrows <= rrows) { left.Children.Add(g); lrows += gr.Options.Length + 2; }
+            else { right.Children.Add(g); rrows += gr.Options.Length + 2; }
         }
-        col.Children.Add(two);
+        col.Children.Add(Columns(left, right));
         return col;
+    }
+
+    static Grid Columns(Control left, Control right)
+    {
+        var two = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 18 };
+        left.VerticalAlignment = right.VerticalAlignment = VerticalAlignment.Top;
+        two.Children.Add(left);
+        Grid.SetColumn(right, 1);
+        two.Children.Add(right);
+        return two;
     }
 
     public static readonly (string Value, string Label, string Help)[] PresentModes =
@@ -207,26 +220,66 @@ public static class Pages
 
     static Control Display(Ctx ctx)
     {
-        var page = (StackPanel)Settings("Display", "Screen, frame rate, presentation and camera.", OptionSchema.Display, ctx);
-        var s = ctx.Settings;
-        var current = PresentModes.FirstOrDefault(m => m.Value == s.PresentMode);
+        var o = ctx.Options;
+        var st = ctx.Settings;
+
+        // Screen: the monitor, the resolution and window, and under Advanced the
+        // live resolution change and how frames are delivered.
+        var monitors = ctx.Monitors();
+        var labels = new List<string> { "Primary monitor" };
+        labels.AddRange(monitors.Select(m => m.Label));
+        var monitor = new ComboBox { ItemsSource = labels, MinWidth = 220, VerticalAlignment = VerticalAlignment.Center };
+        int at = monitors.ToList().FindIndex(m => m.Name == st.Monitor);
+        monitor.SelectedIndex = string.IsNullOrEmpty(st.Monitor) || at < 0 ? 0 : at + 1;
+        monitor.SelectionChanged += (_, _) =>
+        {
+            st.Monitor = monitor.SelectedIndex <= 0 ? "" : monitors[monitor.SelectedIndex - 1].Name;
+            st.Save(); ctx.Changed();
+        };
+        var screen = Ui.Col(8, Ui.Eyebrow("Screen"),
+            Ui.Tip(Ui.Row2("Monitor", "The game opens here, fullscreen included.", monitor),
+                "The monitor the game opens on, fullscreen included. Primary is the one your desktop marks as main (KDE: priority 1). Applies when the game starts."));
+        foreach (var d in OptionSchema.Screen) screen.Children.Add(Ui.OptionRow(d, o, ctx.Changed));
+        screen.Children.Add(Ui.OptionRow(OptionSchema.MenuKey, o, ctx.Changed));
+
+        var current = PresentModes.FirstOrDefault(m => m.Value == st.PresentMode);
         if (current.Value == null) current = PresentModes[0];
         var help = Ui.Text(current.Help, 12, "muted");
-        var combo = new ComboBox { ItemsSource = PresentModes.Select(m => m.Label).ToArray(), SelectedItem = current.Label, MinWidth = 200 };
+        var combo = new ComboBox { ItemsSource = PresentModes.Select(m => m.Label).ToArray(), SelectedItem = current.Label, MinWidth = 200, VerticalAlignment = VerticalAlignment.Center };
         combo.SelectionChanged += (_, _) =>
         {
             var m = PresentModes.FirstOrDefault(x => x.Label == (string?)combo.SelectedItem);
             if (m.Value == null) return;
-            s.PresentMode = m.Value; s.Save(); help.Text = m.Help; ctx.Changed();
+            st.PresentMode = m.Value; st.Save(); help.Text = m.Help; ctx.Changed();
         };
-        combo.VerticalAlignment = VerticalAlignment.Center;
-        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
-        g.Children.Add(Ui.Col(2, Ui.Text("Presentation mode", 14, null, FontWeight.Medium), help));
-        Grid.SetColumn(combo, 1); g.Children.Add(combo);
-        var card = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Delivery"), Ui.Tip(Ui.Well(g),
-            "How finished frames reach the screen. Mailbox: never tears, and a newer frame replaces one still waiting, so latency stays low (recommended). FIFO: classic V-Sync, every frame waits its turn. FIFO Relaxed: V-Sync, but a late frame tears instead of stuttering. Immediate: lowest latency, can tear. Auto: Mailbox with V-Sync on, Immediate with it off. Applies when the game starts.")), 18);
-        ((Control)card.Child!).Margin = new Thickness(0);
-        page.Children.Insert(1, card);
+        var pg = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
+        pg.Children.Add(Ui.Col(2, Ui.Text("Presentation mode", 14, null, FontWeight.Medium), help));
+        Grid.SetColumn(combo, 1); pg.Children.Add(combo);
+        screen.Children.Add(Ui.Advanced("Advanced",
+            Ui.OptionRow(OptionSchema.LiveResolution, o, ctx.Changed),
+            Ui.Tip(Ui.Well(pg),
+                "How finished frames reach the screen. Mailbox: never tears, and a newer frame replaces one still waiting, so latency stays low (recommended). FIFO: classic V-Sync, every frame waits its turn. FIFO Relaxed: V-Sync, but a late frame tears instead of stuttering. Immediate: lowest latency, can tear. Auto: Mailbox with V-Sync on, Immediate with it off. Applies when the game starts.")));
+
+        var frame = Ui.Col(8, Ui.Eyebrow("Frame rate"), Ui.OptionRow(OptionSchema.FrameCap, o, ctx.Changed));
+
+        // FPS counter, what it shows folded under Advanced.
+        var fps = Ui.Col(8, Ui.Eyebrow("FPS counter"), Ui.OptionRow(OptionSchema.FpsShow, o, ctx.Changed));
+        foreach (var d in OptionSchema.FpsLook) fps.Children.Add(Ui.OptionRow(d, o, ctx.Changed));
+        fps.Children.Add(Ui.Advanced("What the FPS counter shows", OptionSchema.FpsParts.Select(d => Ui.OptionRow(d, o, ctx.Changed)).ToArray()));
+
+        // HDR, with what the desktop says about the monitor.
+        string? connector = string.IsNullOrEmpty(st.Monitor) ? monitors.FirstOrDefault(m => m.Primary).Name : st.Monitor;
+        var desk = DesktopHdr.IsOn(connector);
+        var hint = Ui.Text(desk == true ? $"HDR is on for {connector} in your desktop's settings: ready."
+                           : desk == false ? $"HDR is off for {connector} in your desktop's settings. Turn it on there (KDE: System Settings > Display Configuration > {connector} > HDR) for HDR output to work."
+                           : "Turn HDR on for your monitor in your desktop's display settings first.", 12, desk == true ? "soft" : "muted");
+        hint.Margin = new Thickness(4, 0, 4, 4);
+        var hdr = Ui.Col(8, Ui.Eyebrow("HDR"), hint);
+        foreach (var d in OptionSchema.Hdr) hdr.Children.Add(Ui.OptionRow(d, o, ctx.Changed));
+
+        var page = Ui.Col(18, Header("Display", "Monitor, resolution, frame rate, the FPS counter and HDR."));
+        page.Children[0].Margin = new Thickness(8, 6, 8, 0);
+        page.Children.Add(Columns(Ui.Col(18, Ui.Glass(screen, 18), Ui.Glass(frame, 18)), Ui.Col(18, Ui.Glass(fps, 18), Ui.Glass(hdr, 18))));
         return page;
     }
 

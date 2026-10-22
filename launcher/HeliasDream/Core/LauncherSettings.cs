@@ -15,6 +15,8 @@ public sealed class LauncherSettings
     public bool CloseOnPlay { get; set; }
     /// How frames reach the screen (BBHOST_PRESENT_MODE): auto follows V-Sync.
     public string PresentMode { get; set; } = "mailbox";
+    /// The monitor the game opens on (a connector name, DP-1); empty: the primary one.
+    public string Monitor { get; set; } = "";
 
     public static LauncherSettings Load()
     {

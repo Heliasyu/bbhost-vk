@@ -63,6 +63,7 @@ public sealed class MainWindow : Window
             GoTo = i => GoTo(i),
             Changed = () => { UpdateSummary(); _scene!.ReduceMotion = _settings.ReduceMotion; _glide.Reduced = _settings.ReduceMotion; },
             PickFolder = PickFolder,
+            Monitors = Monitors,
         };
 
         var cfg = new BbhostToml(Paths.BbhostToml);
@@ -144,6 +145,23 @@ public sealed class MainWindow : Window
 
         UpdateSummary();
         GoTo(0);
+    }
+
+    /// The monitors by their connector names (DP-1), the primary first.
+    IReadOnlyList<(string Name, string Label, bool Primary)> Monitors()
+    {
+        var list = new List<(string, string, bool)>();
+        try
+        {
+            foreach (var sc in Screens.All.OrderByDescending(x => x.IsPrimary))
+            {
+                var name = sc.DisplayName ?? "";
+                if (string.IsNullOrEmpty(name)) continue;
+                list.Add((name, $"{name}  ·  {sc.Bounds.Width}×{sc.Bounds.Height}{(sc.IsPrimary ? "  ·  primary" : "")}", sc.IsPrimary));
+            }
+        }
+        catch (Exception) { }
+        return list;
     }
 
     void CenterOnPrimary()
@@ -271,7 +289,8 @@ public sealed class MainWindow : Window
     {
         _gameDir = Paths.FindGameDir(_settings.GameDir);
         if (_gameDir == null) { GoTo(7); return; }
-        var p = GameRunner.Start(_gameDir, _settings.PresentMode, () => Dispatcher.UIThread.Post(GameEnded));
+        var p = GameRunner.Start(_gameDir, _settings.PresentMode,
+            string.IsNullOrEmpty(_settings.Monitor) ? Monitors().FirstOrDefault(m => m.Primary).Name : _settings.Monitor, () => Dispatcher.UIThread.Post(GameEnded));
         if (p == null) return;
         if (_settings.CloseOnPlay) { Close(); return; }
         _play.IsEnabled = false;

@@ -44,6 +44,28 @@ public static class OptionSchema
     {
         ["resolution"] = "What the game renders at, before any upscaling. 1920x1080 is what it shipped with. Wide (21:9, 32:9) and 16:10 screens are filled, with the HUD kept 16:9. The largest sizes can need a restart, because their memory is set aside when the game starts.",
         ["live_resolution"] = "On: changing Resolution in the game applies right away. To allow that, memory and display buffers for your largest display's size are set aside when the game starts, and cleared every frame. Off sizes everything for the resolution you start at, so it is a little lighter when the game runs below your display's size (no difference when it runs at it); a new resolution then applies at the next start.",
+        ["menu_key"] = "The key that opens the in-game settings menu while you play. F10 always works as well, so you cannot lock yourself out.",
+        ["fps_counter"] = "Shows the FPS counter in the game. Its look and what it shows are set below; F10 in the game has the same settings.",
+        ["fps_position"] = "Which corner of the screen the FPS counter sits in, or the top centre.",
+        ["fps_size"] = "How large the FPS counter's text is, from 75% to twice the default.",
+        ["fps_colour"] = "The colour of the FPS counter's text.",
+        ["fps_opacity"] = "How solid the FPS counter's text is; lower lets the game show through.",
+        ["fps_background"] = "The colour of the rounded box behind the FPS counter.",
+        ["fps_background_opacity"] = "How solid the box behind the FPS counter is. 0% hides the box and leaves only the text.",
+        ["fps_border"] = "A thin outline round the FPS counter's box, in the text colour.",
+        ["fps_show_rate"] = "Frames per second actually shown on screen.",
+        ["fps_show_frame_time"] = "How long a frame takes, in milliseconds (8.3 ms is 120 fps).",
+        ["fps_show_upscaler"] = "The upscaler and quality preset running, for example FSR 4.1.1 Performance.",
+        ["fps_show_cpu"] = "How much of the whole CPU the game uses; 100% would be every core busy.",
+        ["fps_show_gpu"] = "How busy the game keeps the GPU. Near 100% the GPU is the limit; well below, the CPU is.",
+        ["hdr"] = "Shows the game on an HDR screen in HDR10: the picture as it is, with its brightest parts (lamps, fire, the moon) brighter than white can be in SDR. Turn HDR on for that monitor first in your desktop's display settings (KDE: System Settings > Display Configuration). Applies when the game starts.",
+        ["hdr_paper_white"] = "How bright the game's white is on the HDR screen, in nits. Around 200 suits a dim room; raise it in a bright one. Changes live.",
+        ["hdr_peak_auto"] = "On: the brightest the display says it can show (from its EDID), as KDE also reads it. Off: the Peak brightness setting below.",
+        ["hdr_peak"] = "Your display's peak brightness in nits, used when it is not taken from the display. Nothing in the game goes above it.",
+        ["hdr_boost"] = "How far the brightest parts of the picture rise above paper white, towards the peak. Off keeps the SDR picture exactly, only on an HDR screen; Max uses the display's whole range.",
+        ["brightness"] = "The picture's brightness, applied to the game's finished image (menus and the FPS counter are left as they are). 5 is the game's own; each step is about 10% lighter or darker.",
+        ["contrast"] = "The picture's contrast around mid grey. 5 is the game's own; higher deepens shadows and brightens highlights.",
+        ["hue"] = "Turns every colour of the picture round the colour wheel by this many degrees. 0 is the game's own.",
         ["window_mode"] = "Fullscreen is a borderless window over the whole display at the desktop resolution: no mode switch when you alt-tab, and overlays and pop-ups (trophies, the FPS counter, Steam, Discord) show over it. Windowed keeps the title bar.",
         ["vsync"] = "On waits for the display before showing a frame (no tearing). Off shows frames as soon as they are ready, which can tear. With a variable refresh rate (FreeSync, G-Sync) monitor either works well; the Presentation mode setting decides exactly how frames are delivered.",
         ["frame_cap"] = "The game's pace. 30 is how it shipped. 60 and 90 run the game's logic at that fixed rate. 120 and Uncapped step it by the real frame time, so the game keeps real speed if the frame rate dips. 120 never goes above 120 fps; Uncapped follows the display (up to 240 with V-Sync off). Physics and timings are made for these rates; above 120 is less tested.",
@@ -89,25 +111,47 @@ public static class OptionSchema
         ["debug_upscaler_time"] = "Shows the upscaler's and the presenter's GPU time under the FPS counter, and logs it every 10 seconds.",
     };
 
-    public static readonly OptionGroup[] Display =
+    // The Display page (Lantern Engine's, in this launcher's layout): the screen, its
+    // advanced switches, the frame rate, the FPS counter and HDR. The values are the
+    // engine's own (src/host/options.cpp).
+    public static readonly OptionDef[] Screen =
     {
-        new("Screen", new[]
-        {
-            Resolution,
-            new OptionDef("live_resolution", "Live resolution change", OnOff, 0,
-                "On: a new resolution applies in the game. Off: at the next start.", true),
-            new OptionDef("window_mode", "Window mode", new[] { "Windowed", "Fullscreen" }, 0, "Fullscreen is borderless: no mode switch."),
-            new OptionDef("vsync", "V-Sync", OnOff, 0, "Off presents as soon as a frame is ready, and can tear."),
-            FrameCap,
-            new OptionDef("fps_counter", "FPS counter", OffOn, 0, "Frames per second actually presented, top right."),
-        }),
-        new("Camera", new[]
-        {
-            new OptionDef("fov", "Field of view", new[] { "+0%", "+5%", "+10%", "+15%", "+20%", "+25%", "+30%", "+35%", "+40%", "+45%", "+50%" }, 0,
-                "How wide the camera sees. +0% is the game's own."),
-            new OptionDef("camera_distance", "Camera distance", Zero10, 5, "5 is the game's own."),
-            new OptionDef("camera_height", "Camera height", Zero10, 5, "5 is the game's own."),
-        }),
+        Resolution,
+        new("window_mode", "Window mode", new[] { "Windowed", "Fullscreen" }, 0, "Fullscreen is borderless: no mode switch."),
+        new("vsync", "V-Sync", OnOff, 0, "Off presents as soon as a frame is ready, and can tear."),
+    };
+    public static readonly OptionDef LiveResolution = new("live_resolution", "Live resolution change", OnOff, 0,
+        "On: a new resolution applies in the game. Off: at the next start.", true);
+    public static readonly OptionDef MenuKey = new("menu_key", "In-game menu key", new[] { "F10", "Insert", "Home", "F1" }, 0,
+        "What opens the in-game settings menu. F10 always works too.");
+    public static readonly OptionDef FpsShow = new("fps_counter", "Show FPS", OffOn, 0, "Frames per second, in the corner you choose.");
+    public static readonly OptionDef[] FpsLook =
+    {
+        new("fps_position", "Position", new[] { "Top right", "Top left", "Bottom right", "Bottom left", "Top centre" }, 0, "Where the counter sits."),
+        new("fps_size", "Size", new[] { "75%", "100%", "125%", "150%", "175%", "200%" }, 1, "How large its text is."),
+        new("fps_colour", "Text colour", new[] { "White", "Yellow", "Green", "Cyan", "Red", "Orange", "Pink", "Black" }, 0, "The counter's text colour."),
+        new("fps_opacity", "Text opacity", new[] { "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%" }, 9, "How solid the text is."),
+        new("fps_background", "Background", new[] { "Dark grey", "Black", "Dark red", "Dark blue", "White" }, 0, "The box behind the counter."),
+        new("fps_background_opacity", "Background opacity", new[] { "0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%" }, 6, "0% hides the box."),
+        new("fps_border", "Border", OffOn, 0, "A thin outline round the box."),
+    };
+    public static readonly OptionDef[] FpsParts =
+    {
+        new("fps_show_rate", "Frame rate", OnOff, 0, "Frames per second actually shown."),
+        new("fps_show_frame_time", "Frame time", OffOn, 0, "Milliseconds a frame."),
+        new("fps_show_upscaler", "Upscaler", OffOn, 0, "The upscaler and preset running."),
+        new("fps_show_cpu", "CPU usage", OffOn, 0, "How much of the CPU the game uses."),
+        new("fps_show_gpu", "GPU usage", OnOff, 0, "How busy the game keeps the GPU."),
+    };
+    public static readonly OptionDef[] Hdr =
+    {
+        new("hdr", "HDR output", OffOn, 0, "The picture on an HDR screen in HDR10, with brighter highlights.", true),
+        new("hdr_paper_white", "Paper white", new[] { "80", "100", "120", "140", "160", "180", "200", "220", "240", "260", "280", "300", "320", "340", "360", "380", "400", "420", "440", "460", "480", "500" }, 6, "How bright the game's white is, in nits."),
+        new("hdr_peak_auto", "Peak brightness from the display", OnOff, 0, "The peak the display reports. Off: the value below."),
+        new("hdr_peak", "Peak brightness", new[] { "200", "250", "300", "350", "400", "500", "600", "800", "1000", "1500", "2000", "4000" }, 8,
+            "Your display's peak, in nits, when not taken from the display."),
+        new("hdr_boost", "Highlight boost", new[] { "Off", "Low", "Medium", "High", "Max" }, 1,
+            "Off keeps the game's own look; higher makes lamps, fire and the sky brighter."),
     };
 
     public static readonly OptionGroup[] UpscalingExtras =
@@ -129,16 +173,26 @@ public static class OptionSchema
             new OptionDef("depth_of_field", "Depth of field", OnOff, 0, "Blurs distant scenery."),
             new OptionDef("chromatic_aberration", "Chromatic aberration", OnOff, 0, "The colour fringing at the frame's edges."),
             new OptionDef("vignette", "Vignette", OnOff, 0, "Darkened edges, in the few areas that use one."),
-        }),
-        new("Look", new[]
-        {
-            new OptionDef("bloom", "Bloom", Zero10, 10, "The glow around bright light. 10 is the game's own."),
-            new OptionDef("ao_strength", "AO strength", Zero10, 5, "5 is the game's own."),
-            new OptionDef("saturation", "Saturation", Zero10, 5, "5 is the game's own; 0 is black and white."),
-            new OptionDef("fog", "Fog", Zero10, 10, "10 is the game's own; 0 clears it."),
+            new OptionDef("model_detail", "Model detail", new[] { "Full", "Normal", "Low", "Lowest" }, 1, "Normal is the game's own."),
             new OptionDef("shadow_distance", "Shadow distance",
                 new[] { "x1.0", "x1.2", "x1.4", "x1.6", "x1.8", "x2.0", "x2.2", "x2.4", "x2.6", "x2.8", "x3.0" }, 0, "How far shadows reach."),
-            new OptionDef("model_detail", "Model detail", new[] { "Full", "Normal", "Low", "Lowest" }, 1, "Normal is the game's own."),
+        }),
+        new("Picture", new[]
+        {
+            new OptionDef("brightness", "Brightness", Zero10, 5, "5 is the game's own."),
+            new OptionDef("contrast", "Contrast", Zero10, 5, "5 is the game's own."),
+            new OptionDef("saturation", "Saturation", Zero10, 5, "5 is the game's own; 0 is black and white."),
+            new OptionDef("hue", "Hue shift", new[] { "-180", "-165", "-150", "-135", "-120", "-105", "-90", "-75", "-60", "-45", "-30", "-15", "0", "15", "30", "45", "60", "75", "90", "105", "120", "135", "150", "165", "180" }, 12, "Degrees round the colour wheel; 0 is the game's own."),
+            new OptionDef("bloom", "Bloom", Zero10, 10, "The glow around bright light. 10 is the game's own."),
+            new OptionDef("ao_strength", "AO strength", Zero10, 5, "5 is the game's own."),
+            new OptionDef("fog", "Fog", Zero10, 10, "10 is the game's own; 0 clears it."),
+        }),
+        new("Camera", new[]
+        {
+            new OptionDef("fov", "Field of view", new[] { "+0%", "+5%", "+10%", "+15%", "+20%", "+25%", "+30%", "+35%", "+40%", "+45%", "+50%" }, 0,
+                "How wide the camera sees. +0% is the game's own."),
+            new OptionDef("camera_distance", "Camera distance", Zero10, 5, "5 is the game's own."),
+            new OptionDef("camera_height", "Camera height", Zero10, 5, "5 is the game's own."),
         }),
     };
 

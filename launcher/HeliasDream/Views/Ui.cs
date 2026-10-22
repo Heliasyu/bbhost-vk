@@ -159,7 +159,7 @@ public static class Ui
             };
             control = Row(12, slider, readout);
         }
-        else if (def.Values.Length <= 5)
+        else if (def.Values.Length <= 5 && def.Values.Sum(v => v.Length) <= 30)
             control = Segmented(def.Values, value, Set, label: v => def.Key == "window_mode" && v == "Fullscreen" ? "Fullscreen (borderless)" : v);
         else
         {
@@ -186,6 +186,29 @@ public static class Ui
         ToolTip.SetShowDelay(control, 450);
         ToolTip.SetPlacement(control, PlacementMode.Top);
         return control;
+    }
+
+    /// A row with a label, a line of help and a control on the right.
+    public static Control Row2(string label, string help, Control control)
+    {
+        control.VerticalAlignment = VerticalAlignment.Center;
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
+        g.Children.Add(Col(2, Text(label, 14, null, FontWeight.Medium), Text(help, 12, "muted")));
+        Grid.SetColumn(control, 1);
+        g.Children.Add(control);
+        return Well(g);
+    }
+
+    /// Settings folded away under a title, as Lantern Engine's Advanced.
+    public static Control Advanced(string title, params Control[] rows)
+    {
+        var body = Col(8, rows);
+        body.Margin = new Thickness(0, 8, 0, 0);
+        return new Expander
+        {
+            Header = Text(title, 13, "soft", FontWeight.SemiBold), Content = body, Classes = { "advanced" },
+            HorizontalAlignment = HorizontalAlignment.Stretch, IsExpanded = false,
+        };
     }
 
     public static Control Group(OptionGroup group, OptionsFile opts, Action? changed = null)

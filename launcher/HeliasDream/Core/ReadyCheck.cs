@@ -117,16 +117,56 @@ public static class ReadyCheck
     }
 }
 
+/// <summary>KDE's HDR switch for a monitor (kscreen-doctor): true, false, or null when unknown.</summary>
+public static class DesktopHdr
+{
+    public static bool? IsOn(string? connector)
+    {
+        if (!OperatingSystem.IsLinux()) return null;
+        try
+        {
+            var psi = new ProcessStartInfo("kscreen-doctor", "-o") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            using var p = Process.Start(psi);
+            if (p == null) return null;
+            var text = System.Text.RegularExpressions.Regex.Replace(p.StandardOutput.ReadToEnd(), @"\x1b\[[0-9;]*m", "");
+            p.WaitForExit(2000);
+            string? current = null;
+            bool? primaryHdr = null, found = null;
+            bool currentPrimary = false;
+            foreach (var raw in text.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line.StartsWith("Output:"))
+                {
+                    var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    current = parts.Length > 2 ? parts[2] : null;
+                    currentPrimary = false;
+                }
+                else if (line.StartsWith("priority 1")) currentPrimary = true;
+                else if (line.StartsWith("HDR:"))
+                {
+                    var on = line.Contains("enabled");
+                    if (current == connector) found = on;
+                    if (currentPrimary) primaryHdr = on;
+                }
+            }
+            return string.IsNullOrEmpty(connector) ? primaryHdr : found;
+        }
+        catch (Exception) { return null; }
+    }
+}
+
 /// <summary>Starts the game and tells when it ends.</summary>
 public static class GameRunner
 {
-    public static Process? Start(string gameDir, string presentMode, Action onExit)
+    public static Process? Start(string gameDir, string presentMode, string? monitor, Action onExit)
     {
         var engine = Paths.EngineIn(gameDir);
         if (engine == null) return null;
         var psi = new ProcessStartInfo(engine) { WorkingDirectory = gameDir, UseShellExecute = false };
         // The launcher has already shown everything bbhost's own setup window would.
         psi.Environment["BBHOST_SETUP_WINDOW"] = "0";
+        if (!string.IsNullOrEmpty(monitor)) psi.Environment["BBHOST_DISPLAY"] = monitor;
         if (presentMode is "mailbox" or "fifo" or "relaxed" or "immediate" or "latest")
             psi.Environment["BBHOST_PRESENT_MODE"] = presentMode;
         var p = Process.Start(psi);
