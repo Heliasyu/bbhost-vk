@@ -43,6 +43,7 @@ public static class OptionSchema
     public static readonly System.Collections.Generic.Dictionary<string, string> Tips = new()
     {
         ["resolution"] = "What the game renders at, before any upscaling. 1920x1080 is what it shipped with. Wide (21:9, 32:9) and 16:10 screens are filled, with the HUD kept 16:9. The largest sizes can need a restart, because their memory is set aside when the game starts.",
+        ["live_resolution"] = "On: changing Resolution in the game applies right away. To allow that, memory and display buffers for your largest display's size are set aside when the game starts, and cleared every frame. Off sizes everything for the resolution you start at, so it is a little lighter when the game runs below your display's size (no difference when it runs at it); a new resolution then applies at the next start.",
         ["window_mode"] = "Fullscreen is a borderless window over the whole display at the desktop resolution: no mode switch when you alt-tab, and overlays and pop-ups (trophies, the FPS counter, Steam, Discord) show over it. Windowed keeps the title bar.",
         ["vsync"] = "On waits for the display before showing a frame (no tearing). Off shows frames as soon as they are ready, which can tear. With a variable refresh rate (FreeSync, G-Sync) monitor either works well; the Presentation mode setting decides exactly how frames are delivered.",
         ["frame_cap"] = "The game's pace. 30 is how it shipped. 60 and 90 run the game's logic at that fixed rate. 120 and Uncapped step it by the real frame time, so the game keeps real speed if the frame rate dips. 120 never goes above 120 fps; Uncapped follows the display (up to 240 with V-Sync off). Physics and timings are made for these rates; above 120 is less tested.",
@@ -93,6 +94,8 @@ public static class OptionSchema
         new("Screen", new[]
         {
             Resolution,
+            new OptionDef("live_resolution", "Live resolution change", OnOff, 0,
+                "On: a new resolution applies in the game. Off: at the next start.", true),
             new OptionDef("window_mode", "Window mode", new[] { "Windowed", "Fullscreen" }, 0, "Fullscreen is borderless: no mode switch."),
             new OptionDef("vsync", "V-Sync", OnOff, 0, "Off presents as soon as a frame is ready, and can tear."),
             FrameCap,
