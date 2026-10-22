@@ -23,6 +23,23 @@ void world_chr_install(ElfImage* image);
 // False before the world has a player (the title, a load).
 bool world_player_position(float xyz[3], float* yaw);
 bool world_camera(float pos[3], float focus[3]);
+// The animation the main player's SprjChrTimeActModule plays now (its +0x20),
+// as the game numbers them: the motion category times 1,000,000 plus the
+// animation (122032610: category 122, animation 032610 - a heavy attack's
+// charge). Found by BBHOST_CHR_SCAN (round 10): R2 held runs 032600 (the
+// wind-up), 032610 (the charge), then 032630 (the charged swing) or, let go
+// early, 032620; R1 030000; the gun 117051000 / 117054500; standing
+// 200000000..200004000. False before the world has a player.
+bool world_player_anim(std::int32_t* anim);
+// The Quicksilver Bullets the player carries, from the inventory in the
+// local player's game data (GameDataMan +0x08): its entries are 16 bytes -
+// a handle, the item's id tagged 0xB0000000, again tagged 0x40000000 (goods),
+// and the count - and the bullets are goods 901 (BBHOST_FIND_BULLETS, rounds
+// 14-16: an entry whose count hits zero is freed, and the next bullets take
+// another one, so the entry is looked for, not remembered). Read on the main
+// thread every 100 ms; -1 before the world has a player or when no read has
+// been made. Any thread.
+int world_player_bullets();
 // The map block the main player is in, packed as the game keeps it at ChrIns
 // +0x3f8 (m24_01_00_00 = 0x18010000). False before the world has a player.
 bool world_player_block(std::uint32_t* block);

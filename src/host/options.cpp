@@ -97,6 +97,12 @@ enum SettingId {
     kUpscaleJitter,
     kDebugMotionVectors,
     kDebugUpscalerTime,
+    // The controller (host/haptics.h).
+    kHaptics,
+    kHapticsStrength,
+    kAdaptiveTriggers,
+    kTriggerStrength,
+    kMenuHaptics,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -283,6 +289,23 @@ Setting g_set[kSettingCount] = {
     {"debug_upscaler_time", "Show upscaler GPU time", {"Off", "On"}, 0,
      "Debug: the GPU time of FSR 3.1's dispatch and of the presenter's passes (the upscale, the whole present) under the FPS counter, and in the log.",
      false},
+    // The controller (host/haptics.h).
+    {"haptics", "Haptics", {"Off", "Rumble", "HD"}, 2,
+     "HD: a DualSense or DualSense Edge plugged in by USB feels the game's rumble and its sound effects (hits, shots, footsteps, doors) "
+     "through its haptic motors. Over Bluetooth, or with another controller, HD is the classic Rumble.",
+     false},
+    {"haptics_strength", "Haptics strength", {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}, 5,
+     "How strong HD haptics are. 5 is the default, 0 nothing, 10 twice as strong.", false},
+    {"adaptive_triggers", "Adaptive triggers", {"On", "Off"}, 0,
+     "DualSense and DualSense Edge: L2 (your gun) has a trigger break; R2 resists lightly and hums as a heavy attack charges. "
+     "Relaxed in loading screens and menus. With an Edge's trigger stops set short, the break may be past the stop.",
+     false},
+    {"trigger_strength", "Trigger strength", {"Light", "Medium", "Strong"}, 1,
+     "How hard the adaptive triggers push back.", false},
+    {"menu_haptics", "Menu haptics", {"On", "Off"}, 0,
+     "HD: a light tap as the cursor moves through the title menu, the pause menu, the inventory and the System menu, "
+     "and a firmer one for a decide or back.",
+     false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -326,6 +349,12 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kMouseAutoRotation},
     {Row::Option, nullptr, kDrawCursor},
     {Row::Option, nullptr, kButtonPrompts},
+    {Row::Header, "CONTROLLER"},
+    {Row::Option, nullptr, kHaptics},
+    {Row::Option, nullptr, kHapticsStrength},
+    {Row::Option, nullptr, kAdaptiveTriggers},
+    {Row::Option, nullptr, kTriggerStrength},
+    {Row::Option, nullptr, kMenuHaptics},
     {Row::Header, "GAME"},
     {Row::Option, nullptr, kChangeAppearance},
     {Row::Option, nullptr, kRebirth},
@@ -801,6 +830,11 @@ void rebuild_settings() {
     h.mouse_auto_rotation = on_of(kMouseAutoRotation);
     h.draw_cursor = on_of(kDrawCursor);
     h.button_prompts = index_of(kButtonPrompts) < 0 ? 0 : index_of(kButtonPrompts);
+    h.haptics = std::clamp(index_of(kHaptics), 0, 2);
+    h.haptics_strength = static_cast<float>(std::clamp(index_of(kHapticsStrength), 0, 10)) / 5.0f;
+    h.adaptive_triggers = on_of(kAdaptiveTriggers);
+    h.trigger_strength = std::clamp(index_of(kTriggerStrength), 0, 2);
+    h.menu_haptics = on_of(kMenuHaptics);
     h.ssao = on_of(kSsao);
     h.motion_blur = on_of(kMotionBlur);
     h.depth_of_field = on_of(kDepthOfField);

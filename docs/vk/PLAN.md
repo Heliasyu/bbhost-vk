@@ -35,6 +35,7 @@ Online play must work exactly as in upstream bbhost. bbhost uses thehuntersdream
 | 5 Optimization | rc2-rc7: frame pacing, post at render size, motion-blur skip, PGO, async logging, stage memo | Replaced by the new Phase 5 below. |
 | L Launcher overhaul | Mockups only (`docs/vk/mock/launcher-*.png`, ten tabs). The real launcher still has the old tabs. | All of it. |
 | 6 Polish and release | Not started. (`phase-5-test-release` was merged into `main` on 2026-10-21, `15564b9`.) | All of it. |
+| H1 DualSense haptics | Done in vk.2 (2026-10-22): HD haptics over USB (rumble and sound effects, music filtered), menu taps, animation-driven adaptive triggers (R2 charge, L2 break slack at 0 bullets), F10 > CONTROLLER | Other weapons' charge and firearm animations; in-game menu rows for the settings; more trigger effects (L1 transform, rolls). |
 
 **Measured today** (F11 snapshots, Old Yharnam, FSR 4.1.1 Performance, 4K, 120 cap):
 - **Fps:** 114-122 fps average, 1% lows 82-111.
@@ -169,7 +170,7 @@ All reuse the Phase 1-2 inputs, so each is mostly an adapter behind the upscaler
 ## Phase H (MAYBE, decided after vk.2)
 None of these touch rendering or online play; each can slot in any time after Phase 6.
 
-1. **DualSense HD haptics and adaptive triggers.** The PS4 game only has DualShock 4 rumble, so haptics have to be made, not converted:
+1. **DualSense HD haptics and adaptive triggers.** *Done in vk.2 (see the status table and CHANGELOG).* The PS4 game only has DualShock 4 rumble, so haptics have to be made, not converted:
    - better rumble: rumble values translated into DualSense haptic waveforms (quickest);
    - audio-driven haptics: gunshots, parries, impacts, footsteps and rain routed as waveforms (the "HD haptics" feel). Needs USB on Linux; Bluetooth may not be possible;
    - adaptive triggers: resistance for the pistol, charged attacks and similar, through SDL3.
