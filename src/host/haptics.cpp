@@ -370,8 +370,9 @@ void render(const float* in, unsigned count, float gain, const Wanted& w, float*
     // A menu tap: a few cycles of a high tone, gone in 15-25 ms. A move is
     // the lightest; a decide a little firmer and lower; a back in between.
     // Round 7: the moves were a tad light (0.30); the decide was liked.
+    // Round 18: all ten points up (move 0.55, decide 0.65, back 0.60).
     if (const int k = g_tick_asked.exchange(-1); k >= 0 && w.menu) {
-        static constexpr float kAmp[3] = {0.45f, 0.55f, 0.50f}, kFreq[3] = {230.0f, 170.0f, 200.0f}, kMs[3] = {15.0f, 25.0f, 20.0f};
+        static constexpr float kAmp[3] = {0.55f, 0.65f, 0.60f}, kFreq[3] = {230.0f, 170.0f, 200.0f}, kMs[3] = {15.0f, 25.0f, 20.0f};
         g_tick_amp = kAmp[k];
         g_tick_freq = kFreq[k];
         g_tick_phase = 0.0f;
