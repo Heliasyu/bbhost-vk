@@ -57,6 +57,9 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
 // trigger break is on (the shot fires at the snap, not before it); 0 when
 // it is not, and the usual threshold applies. BBHOST_L2_FIRE=0.7 moves it.
 float haptics_l2_fire_point();
+// The same for R2: just into the light wall it has while the character
+// stands, so the wall is felt before the attack goes. BBHOST_R2_FIRE moves it.
+float haptics_r2_fire_point();
 
 // A tap for the game's menus (the title menu, the pause menu, the inventory,
 // the System list - every list the game draws): 0 the cursor moved, 1 a

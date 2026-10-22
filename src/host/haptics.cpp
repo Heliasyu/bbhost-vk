@@ -441,6 +441,15 @@ void haptics_devices_changed(bool dualsense_on_usb) {
     g_rescan = true;
 }
 
+float haptics_r2_fire_point() {
+    static const float fire = [] {
+        const char* e = std::getenv("BBHOST_R2_FIRE");
+        const float v = e && *e ? std::strtof(e, nullptr) : 0.0f;
+        return v > 0.05f && v < 1.0f ? v : 0.55f;  // just into the wall that starts at zone 4 of 10
+    }();
+    return wanted().triggers ? fire : 0.0f;
+}
+
 float haptics_l2_fire_point() {
     static const float fire = [] {
         const char* e = std::getenv("BBHOST_L2_FIRE");
@@ -629,18 +638,28 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
     } else {
         haptics_trigger_weapon(t.left, 3, 6, kBreak[s]);
     }
-    // R2, the heavy attack: light resistance; a hum while the charge is
-    // really under way (032610), growing to full over its half second; and a
-    // kick as the charged swing goes (032630). A quick heavy (032620), or R2
-    // held while nothing happens, stays plain.
-    if (motion == 32610) {
+    // R2, the heavy attack, by what the character does (round 11):
+    //   standing, moving, or an animation over: free travel, then a light wall
+    //     where the attack registers (haptics_r2_fire_point) - felt before
+    //     the attack, since the game moves only once the press is in;
+    //   the wind-up (032600): that resistance;
+    //   the charge (032610): a rumble growing over its half second, then
+    //     full - fully charged;
+    //   the charged swing (032630): one strong kick, then nothing;
+    //   any other attack, and the rest of a swing: nothing at all.
+    const bool standing = category == 200 || (motion >= 0 && motion < 10000) || anim < 0;
+    if (motion == 32600) {
+        haptics_trigger_feedback(t.right, 4, kResist[s] + 1);
+    } else if (motion == 32610) {
         const float grow = std::clamp(in_ms / 450.0f, 0.0f, 1.0f);
         const int amp = 1 + static_cast<int>(std::lround(grow * static_cast<float>(kHum[s] - 1)));
         haptics_trigger_vibration(t.right, 0, amp, 30 + static_cast<int>(grow * 20.0f));
-    } else if (motion == 32630 && in_ms < 150.0f) {
-        haptics_trigger_vibration(t.right, 0, kHum[s], 70);
+    } else if (motion == 32630 && in_ms < 120.0f) {
+        haptics_trigger_vibration(t.right, 0, 8, 90);
+    } else if (standing) {
+        haptics_trigger_feedback(t.right, 4, kResist[s]);
     } else {
-        haptics_trigger_feedback(t.right, 3, kResist[s]);
+        haptics_trigger_off(t.right);
     }
     return t;
 }
