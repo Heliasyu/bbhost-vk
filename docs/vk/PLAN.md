@@ -1,191 +1,209 @@
-# bbhost-vk: development plan (FSR 4.1.1 + launcher overhaul)
+# bbhost-vk: development plan (revision 2, 2026-10-21)
 
-Target: **bbhost-vk**, a GPLv3 fork of droogie's bbhost (based on v0.2.18 + the 120 fps patch) with temporal FSR 4.1.1 (FP8 on RDNA4, INT8 fallback) and FSR 3.1 fallback, a sharp native-resolution UI, and quality and performance matching or beating bbport on an RX 9070 XT at 4K.
+**bbhost-vk** is a GPLv3 fork of droogie's bbhost (v0.2.18 + the 120 fps patch) with temporal FSR 3.1 and FSR 4.1.1, a sharp native-resolution UI, and a better launcher, for an RX 9070 XT + Ryzen 9 5950X at 4K.
 
-**End goal:** the game rendering at 1920x1080 and upscaled to 3840x2160 with FSR 4.1.1 Performance (50% scale), holding a steady 120 fps on a 165 Hz VRR monitor.
+**End goal:** 1920x1080 render → 3840x2160 output with FSR 4.1.1 Performance, a **locked 120 fps** on the 165 Hz VRR monitor, including the heavy areas (Old Yharnam smoke, Forbidden Woods, Yahar'gul). Quality or Balanced at 120 is a stretch goal, not a requirement.
 
-Mockup of the new Upscaling page: [mock/upscaling-tabs.png](mock/upscaling-tabs.png).
+This revision replaces the 2026-10-18 plan. What changed and why:
+- Phases 0-4 are done, so they are reduced to a status table.
+- Phase 5 targeted the wrong bottleneck. The rc2-rc7 data shows the limit is the single command-processor thread (`bb-cp0`), not FSR or motion vectors. Phase 5 is rewritten around that, with an exit rule so it can't run forever.
+- The launcher overhaul (L) and the release (6) were skipped while Phase 5 looped. They now have fixed slots.
+- A short "release hygiene" phase comes first: until 2026-10-21 nothing had been merged to `main`, and there are no GitHub Releases yet.
+- The testing section now describes how sessions actually run.
 
-References: Supermedo's Windows bbport launcher (visual style only), bbport (deadinside28, GPL-2.0+), IFreemz shadPS4 fork (GPL-2.0+), FireBurn/FSR-Vulkan (MIT). Their methods carry over; their code has to be adapted, because bbhost has its own renderer.
+---
 
 ## Hard rule: online play (paramount)
 Online play must work exactly as in upstream bbhost. bbhost uses thehuntersdream.com (partnered with bbhost), and bbhost-vk uses the same servers, the same auth server, the same account/sign-in flow (Discord, recovery code, website code) and the same networking code, unchanged.
 - No phase may modify `src/net/`, the HLE network/HTTP/NP code, the account flow, or the server defaults (`online.host`, `auth_server`, STUN), except by merging upstream bbhost changes.
 - The client keeps upstream's user agent format (`bbhost/<version>`); bbhost-vk versions keep the upstream base version first (e.g. `v0.2.18-vk.N`) so any server-side version handling sees the same bbhost release.
-- When upstream bbhost updates its online code or server requirements, bbhost-vk merges that before anything else (see Git project and maintenance).
+- When upstream bbhost updates its online code or server requirements, bbhost-vk merges that before anything else.
 - Every test session checks sign-in and an online action (messages/bloodstains visible, summon sign or bell) before the session passes.
 - All rendering, upscaling, launcher and extras work is client-side only.
 
-## Work order (quickest first, within dependencies)
-1. Phase 0: Groundwork (1-2 days)
-2. Phase 1: Scene/UI split (3-5 days)
-3. Phase 2: Motion vectors and jitter (4-7 days)
-4. Phase 3: FSR 3.1 (3-5 days), which ends with an early playable FSR 3.1 build
-5. Phase L: Launcher overhaul (5-8 days)
-6. Phase 4: FSR 4.1.1 (5-8 days)
-7. Phase 5: Optimization (4-7 days)
-8. Phase 6: Polish and release (3-5 days), the first working release
-9. Phase 7: More upscalers for non-RDNA4 GPUs (after the first working release)
-10. Phase 8: Windows release (only once Phase 7 is working)
-11. Phase H (MAYBE, not committed; decide after the first working release): DualSense HD haptics and adaptive triggers, DualSense lightbar, Discord Rich Presence, trophies, ReShade
+---
 
-Phases 1-3 have to go in this order because each one needs the one before it. The launcher could start any time, but it goes after FSR 3.1 so its Upscaling tab controls a working upscaler.
+## Where things stand (build `v0.2.18-vk.1-18-gb369d66`, rc7)
+
+| Phase | Status | Left over |
+|---|---|---|
+| 0 Groundwork | Done | - |
+| 1 Scene/UI split | Done | A start at one resolution followed by a live change to another leaves the display buffers at 5120x2160, so the split refuses and the game renders at native 4K (log: `scene-split: not split at 3840x2160 - the display buffers are 5120x2160`). Fixed in R2. |
+| 2 Motion vectors, jitter | Done | - |
+| 3 FSR 3.1 | Done | - |
+| 4 FSR 4.1.1 | Done: FP8 replay on RDNA4 (`FP8 t2160_m0`), INT8 and emulated-FP8 variants in the code, a build button in the current launcher, fallback to FSR 3.1 | The plan's "output matches the DLL" check was never recorded. Done in R3. |
+| 5 Optimization | rc2-rc7: frame pacing, post at render size, motion-blur skip, PGO, async logging, stage memo | Replaced by the new Phase 5 below. |
+| L Launcher overhaul | Mockups only (`docs/vk/mock/launcher-*.png`, ten tabs). The real launcher still has the old tabs. | All of it. |
+| 6 Polish and release | Not started. (`phase-5-test-release` was merged into `main` on 2026-10-21, `15564b9`.) | All of it. |
+
+**Measured today** (F11 snapshots, Old Yharnam, FSR 4.1.1 Performance, 4K, 120 cap):
+- **Fps:** 114-122 fps average, 1% lows 82-111.
+- **CPU:** `bb-cp0` is busy 880-970 ms out of every second. At about 5 µs per draw and ~1,450 draws a frame, that's ~7.2 ms of an 8.33 ms frame.
+- **GPU:** busy 81-93%:
+  - the game's passes take ~5.0 ms, of which ~1.1 ms is post-processing that still runs at full 4K;
+  - FSR 4.1.1 takes ~2.0 ms;
+  - the sharpen pass takes ~0.3 ms.
+- **Idle:** the GPU sits idle ~0.4-0.5 ms a frame while work is already queued.
+- **Conclusion:** the CPU and GPU are both near their ceiling. Smoke adds draws (CPU) and overdraw (GPU), and either one alone tips the frame over 8.33 ms.
 
 ---
 
-## How your test sessions work
+## Work order
+1. **R: Release hygiene** (1-2 days), first because it's quick and unblocks the updater
+2. **Phase 5: Performance, retargeted** (2-3 weeks, with an exit rule)
+3. **Phase L: Launcher overhaul** (5-8 days; can start alongside 5 once R is done)
+4. **Phase 6: Polish and release `v0.2.18-vk.2`** (3-5 days), the first "finished" release
+5. **Phase 7: More upscalers for non-RDNA4 GPUs** (after vk.2)
+6. **Phase 8: Windows** (after 7)
+7. **Phase H: maybes**, decided after vk.2
 
-Every phase ends with a short test you play on your PC while I monitor it from my end. I'll set up a small `bbtest` command for this:
-
-- `bbtest start <phase>` launches bbhost as you normally play it and starts logging: the bbhost log, MangoHud frame times to a CSV, and a screenshot every few seconds of the game monitor only. Add `--record` to keep a rolling recording of the game monitor (via `gpu-screen-recorder`, at low overhead) so clips can be saved on demand.
-- `bbtest mark` (bound to a hotkey) flags "something looked wrong here": it saves a screenshot, the last 30 seconds of video if recording, and a timestamp in the log.
-- `bbtest clip` saves the last 30 seconds of video.
-- `bbtest stop` closes everything and bundles the session into one folder for me.
-
-While you play, I read the logs and screenshots live and message you if I see a crash, an error, or a frame-time problem. Afterwards I go through the clips and marks and send you a short pass/fail summary with what to fix next. You don't need to send me anything by hand. I can also use the virtual controller and F10 menu to change settings between runs myself, so you only need to be present for the gameplay parts.
-
----
-
-## Git project and maintenance
-Repository: [Heliasyu/bbhost-vk](https://github.com/Heliasyu/bbhost-vk) (private for now; GPLv3 requires publishing the source if builds are ever shared).
-- **History:** keeps droogie's full bbhost history so upstream changes merge cleanly. The `upstream` remote points at `droogie/bbhost`.
-- **Branches:** `main` is the stable, playable build. Each phase gets a branch (`phase-0-groundwork`, `phase-1-res-split`, ...) that merges into `main` once its test session passes. `upstream-sync` is where new bbhost releases are merged and tested first.
-- **Versioning:** `<upstream version>-vk.<n>`, for example `v0.2.18-vk.1`, with a git tag and a GitHub release per playable build (Linux binary plus the wrapper script; never game files or FSR 4.1.1 assets).
-- **Commits:** one logical change per commit, with messages that say what changed in the game. Each phase's test result goes in its pull request.
-- **Upstream updates:** when bbhost puts out a release, I merge it into `upstream-sync`, rebuild, run a short test session, and then merge it into `main`. Conflicts in the renderer and launcher are the main ongoing cost.
-- **Docs in the repo:** `README.md` (what bbhost-vk adds and credits), `docs/vk/PLAN.md` (this plan), `docs/vk/TESTING.md` (the `bbtest` sessions), `CHANGELOG.md`.
-- **Safety:** `.gitignore` keeps out game dumps, saves, the FSR 4.1.1 assets built from your DLL, logs, and account files such as recovery codes.
+Rules that apply to every phase:
+- **One logical change per commit.** No more "rc6 (4/7)" bundles; a bisect has to land on one change.
+- **Every playable build is merged to `main` and published.** It gets a tag and a GitHub Release (Linux binary + wrapper + SHA256SUMS, never game files or FSR 4.1.1 assets), so `main` really is the playable build and the updater works.
+- **Every optimization reports its measured gain.** If an F11 A/B on the user's PC shows no gain, the change is reverted or left off by default. Estimates don't count.
 
 ---
 
-## Phase 0: Groundwork (1-2 days)
-- Commit the 120 fps patch on `main` of the bbhost-vk repo (on top of upstream `v0.2.18`) and tag it `v0.2.18-vk.0`.
-- Add FSR-Vulkan as a submodule and build it into bbhost (CMake, shader tables).
-- Add the Upscaler setting (Off / FSR 1 / FSR 3.1 / FSR 4.1.1), Quality presets (Native AA, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%), a sharpness slider and debug toggles, in the setup window, the F10 menu and the toml.
-- Add debug tooling: a motion-vector view overlay, per-pass GPU timestamps, and a frame-capture option for side-by-side comparisons.
-- **Milestone:** builds and launches with the new menu; nothing changes in-game yet.
-- **Your test (5 min):** launch with `bbtest start p0`, open the setup window and the F10 menu, flip each new upscaler option, load your save, quit.
-- **What I watch:** the log for errors and the toml for saved values. I take screenshots of both menus. Pass if every option saves and the game looks identical to stock.
-
-## Phase 1: Split scene and UI resolution (3-5 days, the riskiest piece)
-- Find the game's scene-to-UI scale pass (IFreemz's "decoupled UI" finding: the game scales its HDR scene up to UI size in one pass before post).
-- Teach `live_resolution` to size scene targets (G-buffer, depth, HDR lighting) at render size while post-processing, Scaleform UI and display buffers stay at output size.
-- In this first step, replace the game's own scale pass with a plain bilinear copy.
-- **Milestone:** 4K output with the scene at, say, 1440p; the UI is pixel-sharp; no corruption in menus, cutscenes, the Hunter's Dream or online messages.
-- **Your test (15 min):** `bbtest start p1`. Set the render scale to 67%, then visit the Hunter's Dream, a lamp menu, the inventory, a cutscene, and an area with messages and bloodstains. Toggle Native/67% once in each spot with F10. Drop a `bbtest mark` whenever something looks wrong.
-- **What I watch:** paired screenshots at each mark (UI sharpness, corruption), the log for heap and YEBIS restart errors, and the MangoHud frame-time log. Pass if the UI is sharp and nothing is corrupt or crashes.
-
-## Phase 2: Inputs for temporal upscaling (4-7 days)
-1. **Scene matrices:** identify the per-frame scene constants (the 864-byte block bbport documents), keep the previous frame's view/projection, and detect camera cuts.
-2. **Jitter:** a Halton(2,3) sub-pixel viewport offset only on draws into the main scene depth, removed before motion vectors are computed.
-3. **Camera motion vectors:** a compute pass from depth plus the current and previous matrices, in double precision on the CPU side.
-4. **Object motion:** start with re-drawing the game's own velocity draws (IFreemz approach). Then add previous-frame vertex positions for skinned meshes, cloth and weapons (bbport approach), gated so static map pieces are skipped.
-5. **Depth/reactive:** pass the depth buffer, a reactive mask for particles, fog and transparent effects, and auto-exposure.
-- **Milestone:** the motion-vector overlay looks correct while walking, turning, rolling and in boss fights.
-- **Your test (20 min):** `bbtest start p2 --record`. Turn on the motion-vector overlay, then walk, spin the camera, roll, use a lantern and a Beast Blood pellet, and fight a few enemies and one boss. Each recording is a short clip (about 30 s, triggered by `bbtest clip`).
-- **What I watch:** I analyze the clips for wrong or missing motion colors (objects that read as static while moving), and check the log for jitter and camera-cut events. Pass if camera and object motion look right everywhere you tested.
-
-## Phase 3: FSR 3.1 temporal (3-5 days)
-- Wire the FSR-Vulkan upscaler at the scene-to-UI point: inputs (color, depth, motion, jitter, reactive), history reset on cuts, loading screens and resolution changes.
-- Turn off or adjust effects that fight temporal AA (the game's post AA, film grain ordering).
-- Tune: ghosting on hair and cloth, Beast Blood and particles, lantern light, fog shimmer.
-- **Milestone:** FSR 3.1 Quality at 4K looks clean in motion, with a known performance gain over native.
-- **Your test (20-30 min):** `bbtest start p3 --record`. Run a set route (for example, from the Cathedral Ward lamp to Old Yharnam's entrance) once each at Native, FSR 3.1 Quality and FSR 3.1 Performance, with clips of hair and cloth, fog and particles. Then do one online session (a summon or co-op) to confirm nothing breaks.
-- **What I watch:** MangoHud CSVs for fps and frame-time spikes per run, clips for ghosting and shimmer, and the log for history resets. I send you a comparison table. Pass if Quality looks at least as clean as native with a measured fps gain.
-
-## Phase 4: FSR 4.1.1 (5-8 days)
-- Port bbport's `tools/fsr4cap`: run the user's `amd_fidelityfx_upscaler_dx12.dll` once under GE-Proton/vkd3d-proton, record its passes (INT8 and FP8), and translate them to SPIR-V into `~/.local/share/bbhost/fsr4_411/`.
-- **Build from your own DLL (as in bbport):** FSR 4.1.1 can't be shipped, so bbhost builds it once from a DLL you already have (yours is OptiScaler's `amd_fidelityfx_upscaler_dx12.dll`). On the Upscaling tab:
-  - A file picker for the DLL, which also searches common places (`~/Downloads`, OptiScaler folders in your Steam games) and offers what it finds.
-  - A check that reads the DLL's version and hash before building, and warns if it isn't 4.1.x.
-  - A "Build" button that runs the capture under GE-Proton with live progress, and a status card showing "Ready", which DLL it was built from, and which variant (FP8 or INT8). A Rebuild button handles newer DLLs later.
-  - If the assets are missing or broken, the upscaler drops to FSR 3.1 and the tab says why.
-- Port the replay provider (`vk_fsr4.cpp` equivalent). Pick FP8 on RDNA4 (`VK_EXT_shader_float8`) and INT8 elsewhere, and fall back to FSR 3.1 if the assets are missing or the GPU lacks features.
-- Verify output against the DLL is bit-exact on your 9070 XT. This would be the first real RDNA4 test of the FP8 path.
-- **Milestone:** FSR 4.1.1 runs in-game, falls back cleanly, and the log says which variant is active.
-- **Your test (15 min + 1 one-time step):** click "Build FSR 4.1.1 from my DLL..." once (I watch the build output live). Then `bbtest start p4 --record` and repeat the Phase 3 route with FSR 4.1.1 Quality and Performance. Also rename the asset folder once to confirm it falls back to FSR 3.1.
-- **What I watch:** the capture and build output, the log line naming the active variant (FP8), the fallback behavior, and FSR 3.1 vs 4.1.1 clips and frame times side by side. Pass if 4.1.1 runs, looks better than 3.1, and the fallback works.
-
-## Phase 5: Optimization (4-7 days)
-- Rewrite the final FSR4 passes to store through workgroup memory (bbport got 2.3-3.5x on those passes), verified bit-exact.
-- Async compute for motion vectors; avoid extra copies (write FSR output straight into the post-processing input).
-- Cut CPU-side cost: bbport hit a CPU limit from guest memory copies, so profile bbhost's equivalent.
-- Measure GPU time per pass and whole-frame time at 4K Quality/Balanced/Performance with the 120 cap; target under 3 ms for FSR4 at 4K on the 9070 XT.
-- **Milestone:** a steady 120 fps at 4K output from a 1080p render (FSR 4.1.1 Performance), with Quality/Balanced as stretch goals, in the heaviest areas you pick (e.g. Yahar'gul, Forbidden Woods).
-- **Your test (20 min, repeated after each optimization pass):** `bbtest start p5`. Run the same route in Yahar'gul and the Forbidden Woods at 4K with FSR 4.1.1 Quality and Balanced, capped at 120.
-- **What I watch:** MangoHud frame times (average, 1% lows, spikes), bbhost's per-pass GPU timestamps, and CPU use per thread, compared against the previous build. Pass if both areas hold 120 fps with no new stutter.
-
-## Phase L: Launcher overhaul (5-8 days, can run alongside Phases 2-5)
-Redesign bbhost's setup window so it's streamlined and easy to use. The look follows Supermedo's Windows bbport launcher (clear tabs across the top as in bbhost today, section headings, dropdowns instead of rows of buttons, a status line and a big PLAY button), but the options stay bbhost's own. It doesn't copy their feature set.
-- **Tabs (across the top):** Play, Display & frame rate, **Upscaling (new)**, Graphics & effects, Camera & input, PC enhancements, Patches & plugins, Online & account, Game files, Advanced.
-- **What moves where:** today's Game / PC enhancements / Patches / Plugins tabs and the Game files, Online, Account, Start-up and display and Updates sections each get a page. The in-game F10 options (V-Sync, FOV, camera, mouse, effects) also show up on matching pages, so both places edit the same settings.
-- **Upscaling page:** upscaler dropdown (Off / FSR 1 / FSR 3.1 / FSR 4.1.1), quality preset with the render resolution shown, output resolution, a sharpness slider, the FSR 4.1.1 DLL build card (Phase 4), fine-tuning toggles (fallback, reactive mask, history reset, game's own AA) and debug toggles.
-- **Play page:** a ready check (game files found, game version 1.09, account signed in, server reachable, upscaler ready) and a status line summarizing the active settings.
-- **Style:** a shared ImGui theme in bbhost's own "Paleblood" palette (moonlit slate `#0a0c11`, `#10131a`, `#161a23`, pale-blue accent `#a9bfe3`, blood-red `#8e1b2a` for PLAY), a serif heading font, consistent spacing, and correct sizing on both of your monitors (keeps the scaling wrapper).
-- Built in ImGui inside bbhost, as today, so there's no new Python or toolkit dependency, and settings stay in the same toml files.
-- **Milestone:** every current option is reachable from the new launcher, saves correctly, and the old launcher can be removed.
-- **Your test (10 min):** `bbtest start pL`. Open each page on both monitors, change a few options per page, launch, and check that F10 shows the same values.
-- **What I watch:** screenshots of every page at both scales, the toml before and after, and the log. Pass if nothing is missing, cut off, or mis-saved.
-
-## Phase 6: Polish and hardening (3-5 days)
-- Edge cases: photo mode/debug camera, cutscenes, loading screens, alt-tab, resolution changes mid-game, multiplayer summons, Chalice Dungeons.
-- Leaving the upscaler off has to behave exactly like stock bbhost.
-- Keep the scaling wrapper, write docs, and package the patches so they can be reapplied on each new bbhost release.
-- **Milestone:** a release-ready build plus a patch set.
-- **Your test (one normal play session):** play the way you usually do for an hour or so with `bbtest start p6` running quietly in the background: online, summons, a Chalice Dungeon, alt-tab, a resolution change. Use `bbtest mark` for anything odd.
-- **What I watch:** the full session log, any crash dumps, and screenshots at your marks. Pass if a normal session has no crashes or visual bugs, and upscaler-off matches stock bbhost.
-
-## Phase 7: More upscalers for non-RDNA4 GPUs (after the first working release)
-Goal: anyone without an RDNA4 card gets a good temporal upscaler too. All of these reuse the Phase 1-2 inputs (scene/UI split, motion vectors, jitter, depth, reactive mask), so each one is mostly an adapter behind the existing upscaler interface.
-- **FSR 4 INT8 (Steam Deck / RDNA2-3 compatible):** the INT8 path of FSR 4, built from the user's own DLL like Phase 4, for GPUs without FP8 (Steam Deck, RX 6000/7000). Needs its own performance presets, since INT8 costs more per frame on older cards.
-- **DLSS (NVIDIA RTX):** through NVIDIA's Vulkan DLSS SDK. The SDK's license terms decide whether the runtime can ship with the project or has to be supplied by the user; checked before any code is written.
-- **XeSS (Intel Arc, plus a fallback path for other GPUs):** through Intel's XeSS SDK, which has a Vulkan backend.
-- If a license forbids shipping a runtime, it is user-provided instead: the Upscaling tab gets a "locate file" field for it, just like the FSR 4.1.1 DLL builder, and nothing proprietary is ever committed.
-- The Upscaling tab and F10 list only what the current GPU supports, with FSR 3.1 always available as the fallback.
-- **Milestone:** each upscaler matches FSR 3.1's image stability with no new ghosting, and switching between them in F10 works without a restart or crash.
-- **Testing:** the user's RX 9070 XT covers FSR 4 INT8 and XeSS. DLSS and the Steam Deck need testers with that hardware (community testers, or a Steam Deck if one is available).
-
-## Phase 8: Windows release (only once Phase 7 is working)
-- Correction (2026-10-18): upstream bbhost already ships a Windows build (cross-compiled in CI, `tools/ci_windows.sh`, `.github/workflows/release.yml`), so this is not a port. The work is making bbhost-vk's own additions (upscalers, FSR 4.1.1 builder, launcher, bbtest equivalents) build and work on Windows.
-- Native Windows builds of the same Vulkan renderer and upscalers; FSR 4 there can use the user's DLL directly instead of the captured-shader path.
-- A Windows CI build and a Windows test pass.
-- **Milestone:** the Windows build matches the Linux build in features, image quality and performance.
-- **Testing:** the user, or community testers, on a Windows install.
-
-## Phase H (MAYBE): DualSense HD haptics, adaptive triggers, lightbar and Discord Rich Presence
-**Status: maybe.** Not part of the committed plan; the user decides after the first working release whether to do it.
-The PS4 game only has DualShock 4 rumble, so haptic data has to be made, not converted 1:1. Can slot in any time after Phase 6; it doesn't touch rendering.
-1. **Better rumble:** translate the game's rumble motor values into DualSense haptic waveforms (quickest).
-2. **Audio-driven haptics:** pick game sound events (gunshots, parries, weapon impacts, footsteps, rain) and route them as haptic waveforms, the way PC ports like FF7 Rebirth do. Closest to the "HD haptics" feel.
-3. **Adaptive triggers:** trigger resistance for the pistol, charged attacks and similar, through SDL3's DualSense support.
-- Settings for each on a launcher page and in F10, all off for other controllers.
-- **Platform note:** HD haptics need the DualSense's USB audio channels on Linux; Bluetooth haptics are much harder and may not be possible. Rumble and triggers work on both.
-- **Milestone:** haptics and triggers feel right on a DualSense over USB, with no input lag and no effect on other controllers.
-- **Your test:** a short play session on a DualSense over USB with `bbtest start ph`.
-
-### Also maybe: light extras (decide after the first working release)
-- **DualSense lightbar:** the lightbar follows the hunter's HP, from pale blue (#a9bfe3) at full to blood red (#8e1b2a) when low, with short flashes on Insight gained and visceral/parry hits. Uses SDL3's controller LED support; off by default and ignored for other controllers. Works over USB and Bluetooth.
-- **Discord Rich Presence:** shows "Playing Bloodborne (bbhost-vk)" with the current area or boss, playtime, and online/offline, via the Discord local IPC socket (no account data, nothing sent to any server bbhost talks to). Off by default; a toggle in the launcher and F10. Does nothing if Discord isn't running.
-- **Trophies:** upstream bbhost already records unlocks (sceNpTrophyUnlockTrophy -> `/data/trophies.txt`) with no UI. Add an in-game unlock popup (name, icon, grade), a Trophies page in the launcher (all trophies, earned/missing, dates, platinum progress), and platinum awarding (not done upstream). Names/icons come from the game's encrypted trophy file, decrypted with a user-provided key (like shadPS4; never shipped); without it, fall back to names and descriptions only. Steam achievements are not possible for a non-Steam shortcut.
-- **ReShade compatibility:** (a) works today as a Vulkan layer (vkBasalt, or the native Linux ReShade port), but effects also hit the HUD/menus, depth is unreliable, and MangoHud ordering needs one layer implicit and one explicit; a short docs page can cover this. (b) Recommended if pursued: a built-in ReShade .fx pass (ReShade's BSD-3 effect compiler, vkBasalt's zlib runtime ideas) after FSR and YEBIS, before the Scaleform HUD, with real scene depth and a launcher page (shader folder, picker/order, sliders, toggle key). About 8-15 dev-days. Shader packs user-provided (mixed licences). Off by default (GPU cost at 4K/120). Client-side only; online untouched.
+## R: Release hygiene (1-2 days)
+1. ~~Merge `phase-5-test-release` into `main`~~ (done 2026-10-21, `15564b9`; the stacked phase PRs #1-#6 are merged or closed). Publish the `v0.2.18-vk.1` tag (`3ef28ff`) as a GitHub Release with its package and a SHA256SUMS, so the in-game updater has something to find. rc7 is newer than that tag; it ships as `vk.2` from Phase 6, not under the `vk.1` name.
+2. **Fix the 5120x2160 display-buffer bug.** Reproduce it by starting the game at the size in `bbhost.toml` (`width = 1920`, `height = 1080`, fullscreen on the 4K monitor, which uses 150% scaling) and then switching to 3840x2160. Find where the display buffers get 5120 wide; the suspect is the logical width of both monitors combined (2560 + 2560). Make the fullscreen start size follow `bbhost-options.toml`'s `resolution`, not the old `[window]` width and height.
+3. **Make the frame cap come from one place.** `bbhost.toml` has `fps_cap = 30` and `bbhost-options.toml` has `frame_cap = "90"`. Log which one wins, and have the launcher write only one of them.
+4. Bring the README's "`main` is the playable build" in line with reality. Keep `upstream-sync` (droogie is still at v0.2.18; nothing to merge yet).
+- **Done when:** a fresh start at 4K Performance logs `scene-split: ... split` (not refused), the updater finds `vk.1`, and `main` = the published build.
+- **User test (5 min):** start, check the log line, open F10 > Upscaling, quit.
 
 ---
 
-## Totals
-- Roughly 5-7 weeks of work, spread over many sessions (the launcher overhaul adds about a week, partly in parallel).
-- The pace depends on testing turnaround with you: about 8 test sessions in total (one per phase), plus short re-runs when something fails.
+## Phase 5: Performance, retargeted (2-3 weeks)
 
-## Testing split
-- **Me (no testing needed from you):** writing and porting the code, builds, compile and shader checks, unit tests, setup-window and F10 checks, and static-scene screenshots on your PC.
-- **You (one session per phase, 5-30 min each):** the gameplay parts of each test above. I monitor every session live and send you the results.
-- **Turnaround:** a phase only closes once its test passes. If it fails, I fix it from the logs and clips and ask for a quick re-run of just the failed part.
+### Exit rule
+Phase 5 ends at the **first** of these:
+- **Target met:** at FSR 4.1.1 Performance, 4K, 120 cap, along fixed routes in Old Yharnam (smoke), the Forbidden Woods and Yahar'gul, the 1% low is at least **115** and under **2%** of frames are over 8.5 ms.
+- **Diminishing returns:** two builds in a row each gain less than 0.3 ms a frame on those routes. Ship what's there.
+- **Out of time:** 3 weeks have passed. Ship what's there and record what's left.
+
+### Step 5.0: Diagnose the smoke drops (1 session)
+- **What to capture:** with `bbtest start p5`, stand in Old Yharnam's smoke and press F11 *during* a drop at Performance, then again at Ultra Performance.
+- **How to read it:**
+  - **CPU-bound:** fps barely moves at Ultra Performance and `bb-cp0` is ≥ 950 ms/s. Steps 5.2-5.3 matter most.
+  - **GPU-bound:** fps goes up at Ultra Performance. Step 5.1 and 5.4 matter most.
+- **Record the result here.** It decides the order of the steps below.
+
+### Step 5.1: Cheap GPU tests (2-3 days, no new code, environment switches only)
+1. **Lazy pass barriers on RDNA4** (`BBHOST_PASS_BARRIERS=lazy`).
+   - **Today:** every render-pass end (~37 a frame) inserts a full ALL_GRAPHICS → ALL_COMMANDS memory barrier (`render.cpp` `record_pass_barrier`). The lazy mode was turned off only because of corruption on a Steam Deck with compressed targets, and was never tested on RDNA4.
+   - **Test:** A/B it.
+   - **If you see white blocks:** retry with `BBHOST_RT_DCC=0` as well. If it's clean and faster, turn it on by default for RDNA4 only.
+2. **Glare pass `8747a367+d92266b9`:** 186-286 µs per draw for 2-71 µs of work, which means the GPU is waiting, not shading. Find which barrier or layout change between its draws causes it, with an RGP capture (`bbtest profile`).
+3. **FSR 4.1.1's 29 dispatches** each end with a compute→compute barrier, including the small `*_post` border clears. Leave out the barriers between passes that don't depend on each other (from the replay's resource names), then check the output is unchanged against the current one with `BBHOST_FSR_DUMP`.
+
+### Step 5.2: A draw-path replay harness (4-6 days)
+The prerequisite for touching `bb-cp0` safely; the rc6/rc7 DEVLOG already calls for it.
+- **Record:** the GX/PM4 streams of a few hundred frames (the Old Yharnam smoke, a boss fight, the Dream).
+- **Replay:** run them through `draw_impl` off-line.
+- **Compare:** the recorded Vulkan packets, byte for byte, between builds.
+- **Result:** CPU-side changes can be proven identical on the build box without the game.
+
+### Step 5.3: Split `bb-cp0` (1-2 weeks), the main lever
+- **Goal:** `bb-cp0` under ~5 ms a frame (≤ 600 ms/s at 120), leaving room for smoke.
+- **Today's per-draw cost** (`cp split`, ns): buffers ~450-770, prefetch ~500-620, programs ~360-480, targets ~300, key ~290, sets ~200, update ~170-200.
+- **The plan:** keep the guest-ordered part (registers, targets, programs, key) on `bb-cp0`, and hand the resolved draw to a second thread, `bb-bind`, which builds the descriptor sets, updates the buffer shadows and records the packet. Use a lock-free queue with order kept by sequence number.
+- **Check:** byte-identical output in the 5.2 harness, then F11 A/B on the user's PC.
+- **Smaller wins to take on the way:**
+  - The small GPU memory writes are recorded as one `vkCmdFillBuffer` per 4 bytes (`gpu.cpp` around 6859). Merge neighbouring dwords into one `vkCmdUpdateBuffer`.
+  - The pass-hazard bookkeeping uses `std::unordered_set`. Replace it with a small fixed array, since a pass has at most 8 targets.
+
+### Step 5.4: The GPU frame (if 5.0 says GPU-bound)
+- **GPU idle between submissions:** ~0.4-0.5 ms a frame, mostly after occlusion-query resolves and presents. Measure whether the resolve can move to the end of the frame's last submission (the game reads the result a frame later).
+- **Already ruled out:** batching submissions (t9), moving chromatic aberration and the glare before FSR (it changes the picture), and async compute for FSR or motion vectors (no overlap possible; motion vectors cost 0.02 ms). Don't redo these.
+
+### Testing
+- **Session:** `bbtest start p5` on the three routes, with F11 at fixed points on each route. Same settings every time.
+- **Comparison:** the snapshot summaries (`bbtest snap --show`) against the previous build, in a table: avg fps, 1% low, frames over 8.5 ms, `bb-cp0` ms/s, GPU busy %.
+
+---
+
+## Phase L: Launcher overhaul (5-8 days)
+Build the mockups in `docs/vk/mock/` in ImGui, in the existing `launcher.cpp`, after the user has looked through them once and signed off (or marked what to change).
+- **Tabs across the top:** Play, Display & frame rate, Upscaling, Graphics & effects, Camera & input, PC enhancements, Patches & plugins, Online & account, Game files, Advanced.
+- **Upscaling page:**
+  - upscaler and quality dropdowns, with the render resolution shown;
+  - sharpness;
+  - the FSR 4.1.1 DLL card: pick or find the DLL, show its version and hash, Build/Rebuild with live progress, Ready/variant (FP8/INT8) and which DLL it was built from;
+  - the fine-tuning and debug toggles.
+- **Play page:** a ready check (game files, 1.09, signed in, server reachable, upscaler ready, *scene split will apply at this resolution*) and a summary line of the active settings.
+- **Settings in one place:** one source for each setting. This removes the `fps_cap` / `frame_cap` and `width/height` / `resolution` duplicates from R.
+- **Style:** the "Paleblood" theme (`#0a0c11`, `#10131a`, `#161a23`, accent `#a9bfe3`, PLAY `#8e1b2a`), a serif heading font, and correct sizing on both monitors (100% and 150%; keep the wrapper).
+- **Done when:** every current option is reachable, saves correctly, and F10 shows the same values. The old launcher code is removed.
+- **User test (10 min):** `bbtest start pL`. Open every page on both monitors, change a few options, launch, compare with F10.
+
+---
+
+## Phase 6: Polish and release `v0.2.18-vk.2` (3-5 days)
+- **FSR 4.1.1 check (Phase 4's open item):** compare the replay's output with the DLL's on the same captured inputs (tools/fsr4cap already records the D3D12 frames) for a few frames, and record the largest difference per channel. "Close enough to be invisible" is acceptable if it's measured and written down.
+- **Edge cases:** debug camera, cutscenes, loading screens, alt-tab, resolution changes in game (KNOWN_ISSUES' Settings-menu bug, fixed on the branch but not yet confirmed in game), summons and invasions, Chalice Dungeons.
+- **Upscaler off** behaves exactly like stock bbhost.
+- **Docs:** README, CHANGELOG, KNOWN_ISSUES, release notes; DEVLOG trimmed to decisions and measurements.
+- **Package:** a patch set that can be reapplied to a new bbhost release, and the Release on GitHub.
+- **Done when:** a normal one-hour session (online, a summon, a Chalice Dungeon, alt-tab, a resolution change) has no crash or visual bug.
+- **User test:** play normally with `bbtest start p6` running; F11 or `bbtest mark` at anything odd.
+
+---
+
+## Phase 7: More upscalers for non-RDNA4 GPUs (after vk.2)
+All reuse the Phase 1-2 inputs, so each is mostly an adapter behind the upscaler interface. The Upscaling tab and F10 list only what the GPU supports; FSR 3.1 is always the fallback.
+- **FSR 4 INT8 (RDNA2/3, Steam Deck):** the code already selects INT8 and emulated-FP8 variants. What's left is presets and performance work for slower cards, and testers. AMD's FSR SDK 2.3 officially supports FSR 4.1 on RDNA3 now, with RDNA2 support due in early 2027, so check whether newer DLLs change the capture.
+- **DLSS (NVIDIA RTX):** NVIDIA's Vulkan DLSS SDK. Check the licence first; if the runtime can't ship, the user supplies it.
+- **XeSS (Intel Arc and others):** Intel's XeSS SDK, Vulkan backend.
+- **Never committed:** proprietary runtimes, AMD DLLs, built FSR 4 assets.
+- **Done when:** each upscaler is as stable as FSR 3.1 with no new ghosting, and switching in F10 works without a restart.
+- **Testing:** the 9070 XT covers INT8 and XeSS; DLSS and the Deck need community testers.
+
+## Phase 8: Windows (after 7)
+- **Scope:** upstream bbhost already builds for Windows (`tools/ci_windows.sh`, `.github/workflows/release.yml`). The work is making bbhost-vk's additions build and run there: the upscalers, the FSR 4.1.1 builder (the capture needs vkd3d-proton on Linux; on Windows it may run the DLL's D3D12 passes natively), the launcher, and a Windows equivalent of `bbtest`.
+- **CI:** a Windows build in CI and a Windows test pass.
+- **Done when:** the Windows build matches Linux in features, image quality and performance.
+
+---
+
+## Phase H (MAYBE, decided after vk.2)
+None of these touch rendering or online play; each can slot in any time after Phase 6.
+
+1. **DualSense HD haptics and adaptive triggers.** The PS4 game only has DualShock 4 rumble, so haptics have to be made, not converted:
+   - better rumble: rumble values translated into DualSense haptic waveforms (quickest);
+   - audio-driven haptics: gunshots, parries, impacts, footsteps and rain routed as waveforms (the "HD haptics" feel). Needs USB on Linux; Bluetooth may not be possible;
+   - adaptive triggers: resistance for the pistol, charged attacks and similar, through SDL3.
+2. **DualSense lightbar:** follows HP from pale blue `#a9bfe3` to blood red `#8e1b2a`, with flashes on Insight gained and visceral/parry hits. USB and Bluetooth.
+3. **Discord Rich Presence:** "Playing Bloodborne (bbhost-vk)", area or boss, playtime, online/offline, through Discord's local IPC. Nothing is sent to bbhost's servers.
+4. **Trophies:** an in-game unlock popup, a Trophies page in the launcher (earned/missing, dates, platinum progress) and platinum awarding. Upstream already records unlocks in `/data/trophies.txt`. Names and icons need a user-provided trophy key, with names only otherwise.
+5. **ReShade compatibility:**
+   - (a) document the vkBasalt / native ReShade layer route as it works today;
+   - or (b) recommended if pursued: a built-in ReShade .fx pass after FSR and YEBIS but before the HUD, with real scene depth and a launcher page. About 8-15 dev-days.
+
+All are off by default and are ignored for other controllers or when Discord isn't running.
+
+**New candidate (not yet on the list, the user decides):**
+6. **FSR Frame Generation 4.0.1** (FSR SDK 2.3). It would turn a locked 120 into ~240 on the 165 Hz monitor, or ease the 120 target. It would need its own capture/replay like FSR 4.1.1, plus pacing work with the present pacer. It adds latency. Only worth considering after Phase 5 shows where the limit ends up.
+
+---
+
+## Testing: how it actually works
+- **Sessions:** the user runs `bbtest start <phase>` (it logs the bbhost log, MangoHud CSV, screenshots, optional recording) and `bbtest stop` bundles the session in `~/.local/share/bbtest/sessions/`. The user hands the bundle over; it is analysed afterwards. Nothing is watched live.
+- **F11 snapshots:** F11 in the game (or `bbtest snap`) saves the last 30 s: frame times, GPU time per pass, CPU per thread, compiles, settings and the log tail. **These are the main performance evidence.** Take them *during* a drop, not after. `bbtest snap --show` prints their summaries.
+- **Other tools:** `bbtest profile` adds an RGP capture of the next frame per F11 and shader statistics.
+- **Per phase:** one session per phase, plus short re-runs of just what failed. A phase closes only when its test passes.
+- **Keep:** one current `bbtest` in the game folder; old copies (`bbtest.test*`, `bbtest.rc*`) can go.
 
 ## Risks
-- **Phase 1 resolution split:** the game's memory heaps and YEBIS restarts are fragile.
-- **Object motion coverage:** some objects will ghost until handled.
-- **FP8 path:** unproven on RDNA4.
-- **Upstream updates:** each new bbhost release needs the patch set reapplied.
-- **Legal:** FSR 4.1.1 assets have to be built from your own DLL and can't be shared.
-- **Online play:** unaffected, since all of this is display-only.
-- **DLSS/XeSS licensing:** NVIDIA's and Intel's SDK terms may limit what can ship in a GPLv3 project; checked first in Phase 7. Fallback (user-approved): the runtime files (DLL or .so) are user-provided, like the FSR 4.1.1 DLL, loaded at runtime and never bundled or committed.
-- **Windows build:** upstream already builds for Windows; the risk is only in bbhost-vk's own additions (Linux-only paths, the FSR 4 capture tool, bbtest).
+- **The `bb-cp0` split** is the most invasive change since Phase 1. Draw order and resource lifetimes must stay exact; that's why the replay harness comes first.
+- **Lazy barriers / DCC:** a missed read shows as corruption (white blocks). It needs a long visual test, not just a frame-time A/B.
+- **FSR 4.1.1 assets** must be built from the user's own DLL and are never shared. A newer DLL may need fsr4cap changes.
+- **Upstream updates:** each new bbhost release needs the patch set reapplied; online-code changes are merged first.
+- **DLSS/XeSS licensing:** checked before any code; the fallback is user-provided runtimes.
+- **Windows:** the risk is only in bbhost-vk's own Linux-only parts.
+- **Online play:** unaffected (hard rule above).
+
+## Repo housekeeping
+- **History:** keeps droogie's full history; the `upstream` remote points at `droogie/bbhost`; `upstream-sync` takes new bbhost releases first.
+- **Versions:** `<upstream version>-vk.<n>`, a tag and a GitHub Release per playable build.
+- **`.gitignore`:** keeps out game dumps, saves, built FSR 4.1.1 assets, logs and account files such as recovery codes.
