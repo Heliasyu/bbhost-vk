@@ -36,7 +36,7 @@ public static class Pages
     public static Control Build(int index, Ctx ctx) => index switch
     {
         0 => Play(ctx),
-        1 => Settings("Display", "Screen, frame rate and camera.", OptionSchema.Display, ctx),
+        1 => Display(ctx),
         2 => Upscaling(ctx),
         3 => Settings("Graphics", "Effects and the look of the world. All apply live in the game too.", OptionSchema.Graphics, ctx),
         4 => Settings("Controller", "DualSense haptics and adaptive triggers, mouse and keyboard.", OptionSchema.Controller, ctx),
@@ -194,6 +194,39 @@ public static class Pages
         }
         col.Children.Add(two);
         return col;
+    }
+
+    public static readonly (string Value, string Label, string Help)[] PresentModes =
+    {
+        ("mailbox", "Mailbox", "No tearing, low latency: a finished frame replaces the waiting one. Recommended."),
+        ("fifo", "FIFO (V-Sync)", "Classic vertical sync: every frame waits for the display. No tearing, a little more latency."),
+        ("relaxed", "FIFO Relaxed", "V-Sync that tears instead of stuttering when a frame is late."),
+        ("immediate", "Immediate", "Lowest latency; frames are shown at once and can tear."),
+        ("auto", "Auto", "Follows the V-Sync setting: Mailbox with it on, Immediate with it off."),
+    };
+
+    static Control Display(Ctx ctx)
+    {
+        var page = (StackPanel)Settings("Display", "Screen, frame rate, presentation and camera.", OptionSchema.Display, ctx);
+        var s = ctx.Settings;
+        var current = PresentModes.FirstOrDefault(m => m.Value == s.PresentMode);
+        if (current.Value == null) current = PresentModes[0];
+        var help = Ui.Text(current.Help, 12, "muted");
+        var combo = new ComboBox { ItemsSource = PresentModes.Select(m => m.Label).ToArray(), SelectedItem = current.Label, MinWidth = 200 };
+        combo.SelectionChanged += (_, _) =>
+        {
+            var m = PresentModes.FirstOrDefault(x => x.Label == (string?)combo.SelectedItem);
+            if (m.Value == null) return;
+            s.PresentMode = m.Value; s.Save(); help.Text = m.Help; ctx.Changed();
+        };
+        combo.VerticalAlignment = VerticalAlignment.Center;
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
+        g.Children.Add(Ui.Col(2, Ui.Text("Presentation mode", 14, null, FontWeight.Medium), help));
+        Grid.SetColumn(combo, 1); g.Children.Add(combo);
+        var card = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Delivery"), Ui.Well(g)), 18);
+        ((Control)card.Child!).Margin = new Thickness(0);
+        page.Children.Insert(1, card);
+        return page;
     }
 
     static Control Upscaling(Ctx ctx)

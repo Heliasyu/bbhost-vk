@@ -13,6 +13,8 @@ public sealed class LauncherSettings
     /// Blur the game's own key art (sce_sys/pic1.png in the player's dump) behind the glass.
     public bool GameArtBackground { get; set; } = true;
     public bool CloseOnPlay { get; set; }
+    /// How frames reach the screen (BBHOST_PRESENT_MODE): auto follows V-Sync.
+    public string PresentMode { get; set; } = "mailbox";
 
     public static LauncherSettings Load()
     {

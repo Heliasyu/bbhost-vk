@@ -258,7 +258,7 @@ public sealed class MainWindow : Window
     {
         _gameDir = Paths.FindGameDir(_settings.GameDir);
         if (_gameDir == null) { GoTo(7); return; }
-        var p = GameRunner.Start(_gameDir, () => Dispatcher.UIThread.Post(GameEnded));
+        var p = GameRunner.Start(_gameDir, _settings.PresentMode, () => Dispatcher.UIThread.Post(GameEnded));
         if (p == null) return;
         if (_settings.CloseOnPlay) { Close(); return; }
         _play.IsEnabled = false;

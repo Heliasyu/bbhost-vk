@@ -120,13 +120,15 @@ public static class ReadyCheck
 /// <summary>Starts the game and tells when it ends.</summary>
 public static class GameRunner
 {
-    public static Process? Start(string gameDir, Action onExit)
+    public static Process? Start(string gameDir, string presentMode, Action onExit)
     {
         var engine = Paths.EngineIn(gameDir);
         if (engine == null) return null;
         var psi = new ProcessStartInfo(engine) { WorkingDirectory = gameDir, UseShellExecute = false };
         // The launcher has already shown everything bbhost's own setup window would.
         psi.Environment["BBHOST_SETUP_WINDOW"] = "0";
+        if (presentMode is "mailbox" or "fifo" or "relaxed" or "immediate" or "latest")
+            psi.Environment["BBHOST_PRESENT_MODE"] = presentMode;
         var p = Process.Start(psi);
         if (p == null) return null;
         p.EnableRaisingEvents = true;
