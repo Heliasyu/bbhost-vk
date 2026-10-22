@@ -89,6 +89,25 @@ Phase 5 ends at the **first** of these:
   - **CPU-bound:** fps barely moves at Ultra Performance and `bb-cp0` is ≥ 950 ms/s. Steps 5.2-5.3 matter most.
   - **GPU-bound:** fps goes up at Ultra Performance. Step 5.1 and 5.4 matter most.
 - **Record the result here.** It decides the order of the steps below.
+- **Result (2026-10-22, vk.2 b28, session `p5-diag`):** neither one is at its ceiling, and
+  the cap hides the answer. All four snapshots hold 120 fps average; the drops are single
+  slow frames, not a lower average.
+
+  | Snapshot | 1% low | over 9 ms | GPU busy | `bb-cp0` ms/s |
+  |---|---|---|---|---|
+  | Performance, open street | 110.3 | 44 | 80.9% | 469 |
+  | Performance, in the smoke | 104.0 | 112 | 86.9% | 640 |
+  | Ultra Performance, same spot | 108.4 | 72 | 81.7% | 608 |
+  | Performance, the walk | 110.9 | 36 | 80.1% | 379 |
+
+  - `bb-cp0` is at 380-640 ms/s, far below the 880-970 measured before rc7: the CPU is no
+    longer near its limit on average.
+  - Ultra Performance takes ~5 points off GPU busy and a third of the slow frames, and
+    `bb-cp0` stays put. So the smoke frames that go slow are mostly GPU frames, but the GPU
+    still has ~13% slack on average: the spikes are uneven frames, not a full GPU.
+  - **Next:** the same spot with the cap off (the plan's reading needs fps free to move),
+    and `BBHOST_GPU_SAMPLE_SLOW=1` to time the slow frames themselves. Until then, 5.1/5.4
+    (the GPU) go before 5.2/5.3.
 
 ### Step 5.1: Cheap GPU tests (2-3 days, no new code, environment switches only)
 1. **Lazy pass barriers on RDNA4** (`BBHOST_PASS_BARRIERS=lazy`).
