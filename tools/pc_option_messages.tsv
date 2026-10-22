@@ -60,7 +60,7 @@
 117008	Fog	How thick the haze over distant streets is. 10 is the game's own.
 120020	PC Effects	
 120000	Bloom	The glow around bright light. 10 is the game's own.
-120001	Vignette	The darkened frame edges some areas use.
+120001	Vignette	The darkened frame edges an area may use. Most areas have none, so Off often changes nothing; where there is one it is usually faint.
 120002	Saturation	Colour. 5 is the game's own; 0 is black and white.
 121020	PC Camera	
 121000	Camera Distance	How far behind the character the camera sits. 5 is the game's own.

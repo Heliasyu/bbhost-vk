@@ -197,7 +197,7 @@ Setting g_set[kSettingCount] = {
     {"bloom", "Bloom", {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}, 10,
      "The glow around bright light. 10 is the game's own; lower dims it.", false},
     {"vignette", "Vignette", {"On", "Off"}, 0,
-     "The darkened frame edges some areas use.", false},
+     "The darkened frame edges an area may use. Most areas have none, so Off often changes nothing; where there is one it is usually faint.", false},
     // The area's shadow cascades, stretched past the first split: 1 + 0.2 a
     // step, so the game's slider row (0..10) is the same setting.
     {"shadow_distance", "Shadow distance",
