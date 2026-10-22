@@ -456,6 +456,12 @@ float haptics_r2_fire_point() {
 // loading screen - where bullets are taken from storage or restocked at a
 // lamp. The pump thread only.
 bool g_gun_empty = false;
+// Empty: no Quicksilver Bullets carried (engine/world_chr.h, read from the
+// inventory - round 16), or, when that cannot be read, the animations' guess.
+bool gun_empty() {
+    const int bullets = world_player_bullets();
+    return bullets >= 0 ? bullets == 0 : g_gun_empty;
+}
 
 float haptics_l2_fire_point() {
     static const float fire = [] {
@@ -464,7 +470,7 @@ float haptics_l2_fire_point() {
         return v > 0.05f && v < 1.0f ? v : 0.65f;  // the break (zone 6 of 10) gives way just before
     }();
     // Empty, L2 is slack: no break to wait for, the usual light pull.
-    return wanted().triggers && !g_gun_empty ? fire : 0.0f;
+    return wanted().triggers && !gun_empty() ? fire : 0.0f;
 }
 
 void haptics_menu_tick(int kind) {
@@ -652,7 +658,7 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
     // is the empty gun's, which fires nothing). Empty: slack, no kick.
     if (category == 117 && motion >= 50000 && motion < 60000 && motion != 54500 && in_ms < 120.0f) {
         haptics_trigger_vibration(t.left, 0, kHum[s], 60);
-    } else if (g_gun_empty) {
+    } else if (gun_empty()) {
         haptics_trigger_off(t.left);
     } else {
         haptics_trigger_weapon(t.left, 3, 6, kBreak[s]);

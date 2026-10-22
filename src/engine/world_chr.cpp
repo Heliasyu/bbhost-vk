@@ -14,7 +14,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <string>
 #include <vector>
 
 namespace {
@@ -293,6 +296,55 @@ void bullets_tick() {
 
 }  // namespace
 
+namespace {
+
+std::atomic<int> g_bullets_now{-1};
+
+// The carried Quicksilver Bullets (world_player_bullets): every entry in the
+// game data's first 0x20000 bytes whose two item ids are goods 901, summed.
+// The entries found go to the log whenever the list of them changes, so a
+// second one (the item box's, if it were there) would show.
+void bullets_read() {
+    static auto next = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next) return;
+    next = now + std::chrono::milliseconds(100);
+    const std::uint64_t record = game_record();
+    std::int32_t anim = 0;
+    if (!record || !world_player_anim(&anim)) {
+        g_bullets_now = -1;
+        return;
+    }
+    constexpr std::uint64_t kSpan = 0x20000;
+    constexpr std::uint32_t kTagged = 0xb0000385, kGoods = 0x40000385;
+    static std::vector<std::uint32_t> words(kSpan / 4);
+    for (std::uint64_t o = 0; o < kSpan; o += 0x1000) {
+        if (!host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(record + o)), words.data() + o / 4, 0x1000)) {
+            std::fill(words.begin() + static_cast<std::ptrdiff_t>(o / 4), words.begin() + static_cast<std::ptrdiff_t>((o + 0x1000) / 4), 0u);
+        }
+    }
+    int total = 0;
+    std::string where;
+    for (std::size_t i = 1; i + 1 < words.size(); ++i) {
+        if (words[i] != kGoods || words[i - 1] != kTagged) continue;
+        const auto count = static_cast<std::int32_t>(words[i + 1]);
+        if (count > 0) total += count;
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), " +0x%zx=%d", (i + 1) * 4, count);
+        where += buf;
+    }
+    static std::string said = "?";
+    if (where != said) {
+        said = where;
+        host_log("world: Quicksilver Bullets entries:%s (%d carried)", where.empty() ? " none" : where.c_str(), total);
+    }
+    g_bullets_now = total;
+}
+
+}  // namespace
+
+int world_player_bullets() { return g_bullets_now.load(std::memory_order_relaxed); }
+
 void world_chr_install(ElfImage* image) {
     g_slide = image->mem.slide;
     g_ok = image->sha256 == kEboot109Sha256;
@@ -448,6 +500,7 @@ bool world_lamp_warp_queue(std::int32_t return_point) {
 void world_chr_tick() {
     chr_scan();
     bullets_tick();
+    if (g_ok) bullets_read();
     if (g_unlock) {
         std::uint32_t b = 0;
         if (world_player_block(&b) && b != g_unlock_block) {
