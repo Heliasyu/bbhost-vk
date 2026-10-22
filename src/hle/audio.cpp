@@ -3,6 +3,7 @@
 #include "hle/platform.h"
 #include "hle/hle.h"
 #include "host/audio.h"
+#include "host/haptics.h"
 
 #include <atomic>
 #include <cctype>
@@ -36,6 +37,8 @@ struct AudioPort {
     std::uint32_t freq = 48000;
     std::uint32_t channels = 2;
     bool is_float = false;
+    int port_type = 0;   // 0 main (effects, voices), 1 BGM (music)
+    float gain = 1.0f;   // sceAudioOutSetVolume's, for the haptics (host/haptics.h)
     int host = 0;  // host audio handle, 0 = pacing only
     std::uint64_t next_us = 0;
 };
@@ -87,6 +90,7 @@ GUEST_ABI int hle_audio_open(int, int port_type, int, unsigned len, unsigned fre
     static const bool kFloat[8] = {false, false, false, true, true, true, false, true};
     p.channels = kChannels[fmt < 8 ? fmt : 1];
     p.is_float = kFloat[fmt < 8 ? fmt : 1];
+    p.port_type = port_type;
     p.host = host_audio_open(p.freq, p.channels, p.is_float, p.len);
     std::lock_guard<std::mutex> lock(g_audio_mu);
     int h = g_audio_next++;
@@ -134,6 +138,8 @@ GUEST_ABI int hle_audio_volume(int h, int flags, const int* vol) {
         }
         if (n) {
             host_audio_set_gain(host, sum / static_cast<float>(n));
+            std::lock_guard<std::mutex> lock(g_audio_mu);
+            if (auto it = g_audio.find(h); it != g_audio.end()) it->second.gain = sum / static_cast<float>(n);
         }
     }
     return 0;
@@ -154,6 +160,11 @@ GUEST_ABI int hle_audio_output(int handle, const void* data) {
     if (data) {
         std::lock_guard<std::mutex> lock(g_audio_stats_mu);
         ++g_audio_writes[handle];
+    }
+    // The main port's 7.1 mix (sound effects and voices; music is the BGM
+    // port's) is what HD haptics feel (host/haptics.h).
+    if (data && p.port_type == 0 && p.is_float && p.channels == 8 && p.freq == 48000) {
+        haptics_game_audio(static_cast<const float*>(data), p.len, p.gain);
     }
     if (p.host && data) {
         host_audio_write(p.host, data, p.len);  // blocks to real-time

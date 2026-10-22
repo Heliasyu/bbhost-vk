@@ -19,6 +19,7 @@
 #include "host/present_pass.h"
 #include "host/ingame_menu.h"
 #include "host/audio.h"
+#include "host/haptics.h"
 #include "host/foreign_hooks.h"
 #include "host/fsr3_pass.h"
 #include "host/gpu.h"
@@ -33,6 +34,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -44,6 +46,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #if defined(BBHOST_HAVE_SDL3)
@@ -1472,7 +1475,45 @@ std::uint8_t axis_to_u8(std::int16_t v) {
     return static_cast<std::uint8_t>(a < 0 ? 0 : (a > 255 ? 255 : a));
 }
 
+// The adaptive triggers of every DualSense and DualSense Edge (host/haptics.h),
+// sent only when they change. Relaxed in loading screens and bbhost's menus.
+void update_triggers() {
+    std::lock_guard<std::mutex> lock(g_pads_mu);
+    static std::unordered_map<SDL_JoystickID, std::array<std::uint8_t, 22>> sent;
+    const bool relaxed = host_options_open() || ingame_menu_open() || hle_video_loading();
+    for (SDL_Gamepad* g : g_pads) {
+        if (!haptics_is_dualsense(SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g))) continue;
+        const SDL_JoystickID id = SDL_GetGamepadID(g);
+        const float l2 = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)) / 32767.0f;
+        const float r2 = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / 32767.0f;
+        const TriggerEffects t = haptics_triggers(static_cast<std::uint32_t>(id), l2, r2, relaxed);
+        std::array<std::uint8_t, 22> now{};
+        std::memcpy(now.data(), t.right, 11);
+        std::memcpy(now.data() + 11, t.left, 11);
+        auto it = sent.find(id);
+        if (it != sent.end() && it->second == now) continue;
+        // SDL's DualSense effect report (SDL_hidapi_ps5.c, DS5EffectsState_t):
+        // its first byte's 0x04 and 0x08 say the right and left trigger
+        // blocks, at 10 and 21, are to be used; nothing else is touched.
+        std::uint8_t report[47]{};
+        report[0] = 0x04 | 0x08;
+        std::memcpy(report + 10, t.right, 11);
+        std::memcpy(report + 21, t.left, 11);
+        if (SDL_SendGamepadEffect(g, report, sizeof(report))) {
+            sent[id] = now;
+        } else {
+            static bool said = false;
+            if (!said) {
+                said = true;
+                host_log("haptics: %s took no trigger effect (%s)", SDL_GetGamepadName(g), SDL_GetError());
+            }
+            sent[id] = now;  // not again until it changes
+        }
+    }
+}
+
 void update_pad() {
+    update_triggers();
     PadState p;
     p.timestamp = SDL_GetTicksNS() / 1000;
     // Once, from 20 s in: no window of ours has the keyboard focus, so the
@@ -2082,6 +2123,7 @@ bool host_window_pump() {
             }
             case SDL_EVENT_GAMEPAD_ADDED:
                 pad_open(e.gdevice.which);
+                haptics_devices_changed();
                 break;
             case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
                 note_input(InputDevice::Pad);
@@ -2116,6 +2158,7 @@ bool host_window_pump() {
             }
             case SDL_EVENT_GAMEPAD_REMOVED:
                 pad_close(e.gdevice.which);
+                haptics_devices_changed();
                 break;
             default:
                 break;
@@ -2562,6 +2605,7 @@ void host_window_stop() {
     }
     // The guest's audio threads are still running: SDL_Quit would destroy the
     // streams under their writes.
+    haptics_shutdown();
     host_audio_shutdown();
     SDL_DestroyWindow(g_window);
     SDL_Quit();
@@ -2682,6 +2726,10 @@ bool host_pad_present() {
 
 void host_pad_rumble(std::uint8_t small, std::uint8_t large) {
 #if defined(BBHOST_HAVE_SDL3)
+    // Haptics (host/haptics.h): Off feels nothing; HD on a wired DualSense
+    // plays the rumble on its haptic motors instead - the controller's own
+    // rumble report would turn those off.
+    if (haptics_mode() == 0 || haptics_rumble(small, large)) return;
     std::lock_guard<std::mutex> lock(g_pads_mu);
     for (SDL_Gamepad* g : g_pads) {
         SDL_RumbleGamepad(g, static_cast<Uint16>(small) * 257, static_cast<Uint16>(large) * 257, 100);
