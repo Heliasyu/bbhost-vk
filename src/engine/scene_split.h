@@ -54,4 +54,7 @@ bool scene_split_apply(std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std
 // The render size the sites hold now (the output's when not split), and
 // whether they hold a split. Any thread.
 bool scene_split_active();
+// Whether the settings ask for the split at the output's own size (Native
+// TAA), as scene_split_wanted last found it. Any thread.
+bool scene_split_forced();
 void scene_split_render_size(std::uint32_t* w, std::uint32_t* h);

@@ -534,7 +534,7 @@ bool fsr3_target_storage_wanted(int format, std::uint32_t w, std::uint32_t h, st
     live_resolution_display(&dw, &dh);
     const int kind = host_settings().upscaler;
     const bool want = temporal::direct_target_wanted(format, w, h, layers, dw, dh, scene_split_available(),
-                                                     kind == upscaler::kFsr31 || kind == upscaler::kFsr411, off);
+                                                     upscaler::is_temporal(kind), off);
     if (want) {
         static bool said = false;
         if (!said) {

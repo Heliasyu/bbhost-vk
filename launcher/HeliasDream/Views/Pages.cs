@@ -115,7 +115,7 @@ public static class Pages
         var quick = Ui.Col(10,
             Ui.Tip(QuickRow("Frame rate", Ui.Segmented(OptionSchema.FrameCap.Values, ctx.Options.Get("frame_cap", "30"), v => { ctx.Options.Set("frame_cap", v); ctx.Changed(); })), OptionSchema.Tips["frame_cap"]),
             Ui.Tip(QuickRow("Upscaler", Ui.Segmented(OptionSchema.Upscaler.Values, upscaler, v => { ctx.Options.Set("upscaler", v); ctx.Changed(); },
-                label: v => v == "Off" ? "Native" : v, fontSize: 12)), OptionSchema.Tips["upscaler"]),
+                label: v => v switch { "Off" => "Native", "Native TAA" => "TAA", _ => v }, fontSize: 12)), OptionSchema.Tips["upscaler"]),
             Ui.Tip(QuickRow("Quality", Ui.Segmented(OptionSchema.Quality.Values, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); },
                 label: v => v switch { "Native AA" => "Native", "Performance" => "Perf.", "Ultra Performance" => "Ultra", _ => v }, fontSize: 12)), OptionSchema.Tips["upscale_quality"]));
         if (upscaler == "FSR 4.1.1") quick.Children.Add(Fsr4Note(ctx, compact: true));
@@ -212,7 +212,7 @@ public static class Pages
     {
         var p = res.Split('x');
         if (p.Length != 2 || !int.TryParse(p[0], out var w) || !int.TryParse(p[1], out var h)) return res;
-        var s = upscaler is "FSR 3.1" or "FSR 4.1.1" ? OptionSchema.ScaleOf(quality) : 1.0;
+        var s = upscaler is "FSR 3.1" or "FSR 4.1.1" ? OptionSchema.ScaleOf(quality) : 1.0;  // Native TAA: the full size
         return $"{(int)Math.Round(w / s)}×{(int)Math.Round(h / s)}";
     }
 

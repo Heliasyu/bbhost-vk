@@ -337,7 +337,7 @@ void temporal_frame_locked(std::uint64_t flip) {
     }
     g_cfg.split = scene_split_active();
     g_cfg.upscaler = hs.upscaler;
-    g_cfg.temporal = hs.upscaler == upscaler::kFsr31 || hs.upscaler == upscaler::kFsr411;
+    g_cfg.temporal = upscaler::is_temporal(hs.upscaler);
     g_cfg.debug_view = hs.debug_motion_vectors;
     g_cfg.watching = g_cfg.split && (g_cfg.temporal || g_cfg.debug_view) && !no_motion;
     g_cfg.jitter = g_cfg.watching && g_cfg.temporal && !no_jitter && hs.upscale_jitter;

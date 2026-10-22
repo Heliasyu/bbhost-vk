@@ -150,31 +150,42 @@ bool scene_split_install(ElfImage* image) {
 bool scene_split_available() { return g_available; }
 
 namespace {
+// Native TAA (upscaler::kTaa): the split at the output's own size, so the
+// scale pass is FSR 3.1's, an anti-aliasing pass with nothing to upscale.
+// Set by scene_split_wanted when the split can be made, read by _apply: the
+// sizes alone cannot say a split is wanted when they are equal.
+std::atomic<bool> g_force_wanted{false};
+bool settings_force() { return host_settings().upscaler == upscaler::kTaa; }
+
 // The render size the settings ask for, whether the split can be made or not.
 void settings_render_size(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw, std::uint32_t* rh) {
     *rw = ow;
     *rh = oh;
     const HostSettings s = host_settings();
-    if (s.upscaler == upscaler::kOff || s.upscale_quality == upscaler::kNativeAa) return;
+    if (s.upscaler == upscaler::kOff || s.upscaler == upscaler::kTaa || s.upscale_quality == upscaler::kNativeAa) return;
     scene_split::render_size(upscaler::preset_ratio(s.upscale_quality), ow, oh, rw, rh);
 }
 }  // namespace
+
+bool scene_split_forced() { return g_force_wanted.load(std::memory_order_relaxed); }
 
 bool scene_split_planned(const ElfImage* image, std::uint32_t ow, std::uint32_t oh) {
     if (const char* e = std::getenv("BBHOST_SCENE_SPLIT"); e && e[0] == '0') return false;
     if (!image || image->sha256 != kEboot109Sha256) return false;
     std::uint32_t rw = 0, rh = 0;
     settings_render_size(ow, oh, &rw, &rh);
-    return rw != ow || rh != oh;
+    return rw != ow || rh != oh || settings_force();
 }
 
 void scene_split_wanted(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw, std::uint32_t* rh) {
     *rw = ow;
     *rh = oh;
+    g_force_wanted.store(false);
     if (!g_available) return;
     std::uint32_t w = ow, h = oh;
     settings_render_size(ow, oh, &w, &h);
-    if (w == ow && h == oh) return;
+    const bool force = settings_force();
+    if (w == ow && h == oh && !force) return;
     // test3: only into display buffers of the output's size
     // (scene_split::display_fits_split - test2's dark, stretched picture).
     unsigned dw = 0, dh = 0;
@@ -193,11 +204,12 @@ void scene_split_wanted(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw, s
     }
     *rw = w;
     *rh = h;
+    g_force_wanted.store(force && w == ow && h == oh);
 }
 
 bool scene_split_apply(std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_t oh) {
     if (!g_available) return rw == ow && rh == oh;
-    const bool split = rw != ow || rh != oh;
+    const bool split = rw != ow || rh != oh || g_force_wanted.load();
     const auto& sites = scene_split::sites();
     if (split) write_listener_stub(rw, rh);
     bool ok = true;
@@ -221,8 +233,8 @@ bool scene_split_apply(std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std
         return false;
     }
     const std::uint64_t was = g_render.exchange(split ? static_cast<std::uint64_t>(rw) << 32 | rh : 0);
-    g_active.store(split);
-    if (was != g_render.load())
+    const bool active_was = g_active.exchange(split);
+    if (was != g_render.load() || active_was != split)
         host_log("scene-split: render size %ux%u for an output of %ux%u (%s)", rw, rh, ow, oh,
                  split ? "scene targets at the render size; post-processing, UI and display at the output; the scale pass bilinear"
                        : "not split - the game's own bytes at every site");

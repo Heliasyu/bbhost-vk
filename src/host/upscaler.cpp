@@ -83,7 +83,7 @@ ScenePass upscaler_scene_pass() {
     if (!scene_split_active()) return ScenePass::Game;
 #if defined(BBHOST_HAVE_FSR_VULKAN)
     const int k = g_kind.load(std::memory_order_relaxed);
-    if (k == upscaler::kFsr31 || k == upscaler::kFsr411) return ScenePass::Fsr31;
+    if (upscaler::is_temporal(k)) return ScenePass::Fsr31;
 #endif
     return ScenePass::Bilinear;
 }

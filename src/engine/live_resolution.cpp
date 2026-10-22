@@ -1023,7 +1023,9 @@ GUEST_ABI std::int64_t present_frame_end_hook(std::uint64_t, const std::uint64_t
     const auto w = static_cast<std::uint32_t>(req >> 32), h = static_cast<std::uint32_t>(req);
     std::uint32_t rw = w, rh = h;
     scene_split_wanted(w, h, &rw, &rh);
-    if (req == g_current.load() && pack(rw, rh) == g_scene.load()) {
+    // Native TAA on or off at the same size: the sites change with no size moving.
+    const bool split_wanted = rw != w || rh != h || scene_split_forced();
+    if (req == g_current.load() && pack(rw, rh) == g_scene.load() && split_wanted == scene_split_active()) {
         g_request_confirm.store(false);
         return 1;
     }

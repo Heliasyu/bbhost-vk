@@ -27,7 +27,7 @@ public static class OptionSchema
         "What the game renders at. The largest sizes can need a restart.", true);
     public static readonly OptionDef FrameCap = new("frame_cap", "Frame rate", new[] { "30", "60", "90", "120", "Uncapped" }, 0,
         "30 is the game's own pace. 60 and 90 run its logic at that rate; 120 steps it by the frame time.", true);
-    public static readonly OptionDef Upscaler = new("upscaler", "Upscaler", new[] { "Off", "FSR 1", "FSR 3.1", "FSR 4.1.1" }, 1,
+    public static readonly OptionDef Upscaler = new("upscaler", "Upscaler", new[] { "Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA" }, 1,
         "FSR 4.1.1 replays AMD's upscaler from assets built once from your own DLL; without them it is FSR 3.1.", true);
     public static readonly OptionDef Quality = new("upscale_quality", "Quality",
         new[] { "Native AA", "Quality", "Balanced", "Performance", "Ultra Performance" }, 0,
@@ -77,7 +77,7 @@ public static class OptionSchema
         ["fov"] = "How wide the camera sees. +0% is the game's own (about 43 degrees up and down); each step widens it 5%. +50% is about 97 degrees across.",
         ["camera_distance"] = "How far behind your character the camera sits. 5 is the game's own; each step is 10% nearer or farther.",
         ["camera_height"] = "How high above your character the camera looks. 5 is the game's own.",
-        ["upscaler"] = "FSR 4.1.1: AMD's newest upscaler, the sharpest; it needs assets built once from your own copy of AMD's DLL, and falls back to FSR 3.1 without them. FSR 3.1: temporal, uses motion vectors, works on any GPU. FSR 1: simple and light, no motion vectors. Off renders at the full resolution.",
+        ["upscaler"] = "Native TAA: temporal anti-aliasing at the full resolution (FSR 3.1's Native AA mode), smoother edges and less shimmer than the game's own AA, nothing upscaled; Quality does not apply. FSR 4.1.1: AMD's newest upscaler, the sharpest; it needs assets built once from your own copy of AMD's DLL, and falls back to FSR 3.1 without them. FSR 3.1: temporal, uses motion vectors, works on any GPU. FSR 1: simple and light, no motion vectors. Off renders at the full resolution.",
         ["upscale_quality"] = "How much smaller the 3D scene renders before it is upscaled: Native AA 100% (just anti-aliasing), Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Lower is faster. Menus, text and the HUD always stay at the full resolution. Changes apply live.",
         ["upscale_sharpness"] = "How much FSR 3.1 and FSR 4.1.1 sharpen the upscaled picture. 0 turns sharpening off; 0.8 matches FSR 1's default. FSR 1 keeps its own sharpening.",
         ["upscale_reactive"] = "Marks particles, fog, Blood Echoes, the lantern's glow and other transparent effects for the upscaler, so they do not smear or leave ghost trails. Leave on; off is for comparison.",

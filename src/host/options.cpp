@@ -1,6 +1,7 @@
 #include "host/options.h"
 #include "host/updater.h"
 #include "host/settings.h"
+#include "host/upscaler_presets.h"
 
 #include "host/bindings.h"
 #include "host/overlay.h"
@@ -303,7 +304,7 @@ Setting g_set[kSettingCount] = {
     // the presenter's EASU + RCAS when the game renders smaller than the
     // window (host/fsr.cpp). Phase 1: with an upscaler on, the quality renders the
     // scene smaller than the output (engine/scene_split.h).
-    {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"}, 1,
+    {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA"}, 1,
      "FSR 1 is bbhost's own. FSR 3.1 is temporal: it upscales the 3D scene from Upscaling quality's size using motion vectors (falls back to a bilinear copy if it cannot start). FSR 4.1.1 replays AMD's 4.1.1 upscaler from assets built once from your own DLL (tools/fsr4cap); without them it is FSR 3.1.",
      true},
     // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
@@ -1095,13 +1096,13 @@ void rebuild_settings() {
     h.change_appearance = on_of(kChangeAppearance);
     h.rebirth = on_of(kRebirth);
     h.five_players = on_of(kFivePlayers);
-    h.upscaler = std::clamp(index_of(kUpscaler), 0, 3);
+    h.upscaler = std::clamp(index_of(kUpscaler), 0, upscaler::kKindCount - 1);
     h.upscale_quality = std::clamp(index_of(kUpscaleQuality), 0, 4);
     {
         const int i = index_of(kMipBias);
         if (i == 0) {
             static constexpr float kScale[] = {1.0f, 1.5f, 1.7f, 2.0f, 3.0f};
-            const bool temporal = h.upscaler >= 2;
+            const bool temporal = upscaler::is_temporal(h.upscaler) && h.upscaler != upscaler::kTaa;  // TAA renders at the output's size
             h.mip_bias = temporal ? -std::log2(kScale[std::clamp(h.upscale_quality, 0, 4)]) : 0.0f;
         } else {
             h.mip_bias = std::strtof(g_set[kMipBias].values[static_cast<std::size_t>(i)], nullptr);
@@ -1113,7 +1114,9 @@ void rebuild_settings() {
     // split and no FSR pass (DEVLOG Phase 1, decision 2), so Auto keeps the
     // game's AA there - it turned it off before, and Native AA had none at all.
     h.anti_alias_auto = index_of(kAntiAlias) == 2;
-    h.anti_alias = h.anti_alias_auto ? !(h.upscaler == 3 && h.upscale_quality > 0 && !g_fsr4_unavailable.load()) : on_of(kAntiAlias);
+    // Native TAA is FSR 3.1's own anti-aliasing: Auto leaves the game's pass off under it too.
+    h.anti_alias = h.anti_alias_auto ? !((h.upscaler == 3 && h.upscale_quality > 0 && !g_fsr4_unavailable.load()) || h.upscaler == upscaler::kTaa)
+                                     : on_of(kAntiAlias);
     h.upscale_sharpness = static_cast<float>(std::clamp(index_of(kUpscaleSharpness), 0, 10)) / 10.0f;
     h.upscale_reactive = on_of(kUpscaleReactive);
     h.upscale_jitter = on_of(kUpscaleJitter);

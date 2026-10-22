@@ -193,7 +193,7 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
     // bbhost-vk's upscaler and its quality (host/upscaler_presets.h). Phase 1:
     // the quality sets the scene's render size (engine/scene_split.h); the
     // presenter is still FSR 1 at the render resolution.
-    int upscaler = std::clamp(host_opt_index("upscaler"), 0, 3);
+    int upscaler = std::clamp(host_opt_index("upscaler"), 0, 4);
     int upscale_quality = std::clamp(host_opt_index("upscale_quality"), 0, 4);
     int upscale_sharpness = std::clamp(host_opt_index("upscale_sharpness"), 0, 10);  // tenths
     // test7: the game's AA - On, Off, or Auto (off while FSR 4.1.1 upscales).
@@ -646,8 +646,8 @@ LauncherResult launcher_run(const HostConfig& cfg, const std::string& reason, bo
         ImGui::SetNextItemWidth(200 * scale);
         ImGui::Combo("Render resolution", &resolution, kResolutions, static_cast<int>(sizeof(kResolutions) / sizeof(kResolutions[0])));
         ImGui::SetNextItemWidth(200 * scale);
-        static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
-        ImGui::Combo("Upscaler", &upscaler, kUpscalers, 4);
+        static const char* const kUpscalers[] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA"};
+        ImGui::Combo("Upscaler", &upscaler, kUpscalers, 5);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Off keeps the whole game at the render resolution, as stock bbhost. Any other choice lets Upscaling quality render the 3D scene smaller (FSR 3.1 is temporal; FSR 4.1.1 needs assets built once from your own DLL, tools/fsr4cap, and is FSR 3.1 without them).");
         ImGui::SetNextItemWidth(200 * scale);
