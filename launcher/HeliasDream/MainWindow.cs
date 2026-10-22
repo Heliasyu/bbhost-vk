@@ -35,6 +35,9 @@ public sealed class MainWindow : Window
     readonly TextBlock _summary = Ui.Text("", 13, "soft");
     readonly TextBlock _version = Ui.Text("Launcher 0.1", 12, "muted");
     string? _releaseUrl;
+    // A binding being set (the Controller page): the next key, or mouse press / wheel.
+    Action<string?, int>? _capture;
+    bool _captureMouse;
     readonly Button _play;
     readonly List<Button> _tabs = new();
     readonly Border _bead;
@@ -66,6 +69,7 @@ public sealed class MainWindow : Window
             Changed = () => { UpdateSummary(); _scene!.ReduceMotion = _settings.ReduceMotion; _glide.Reduced = _settings.ReduceMotion; },
             PickFolder = PickFolder,
             Monitors = Monitors,
+            Capture = (mouse, done) => { _captureMouse = mouse; _capture = done; },
             ScreenSize = () =>
             {
                 var sc = Screens.Primary ?? Screens.All.FirstOrDefault();
@@ -144,6 +148,38 @@ public sealed class MainWindow : Window
         root.Children.Add(Handles());
         Content = new Border { CornerRadius = new CornerRadius(22), ClipToBounds = true, Child = root, Background = Brush.Parse("#07080C") };
 
+        AddHandler(KeyDownEvent, (_, e) =>
+        {
+            if (_capture == null) return;
+            var done = _capture;
+            if (e.Key == Key.Escape) { _capture = null; done(null, 0); e.Handled = true; return; }
+            if (_captureMouse) { e.Handled = true; return; }
+            var name = Bindings.SdlName(e.PhysicalKey);
+            if (name == null) { e.Handled = true; return; }
+            _capture = null;
+            done(name, 0);
+            e.Handled = true;
+        }, Avalonia.Interactivity.RoutingStrategies.Tunnel);
+        AddHandler(PointerPressedEvent, (_, e) =>
+        {
+            if (_capture == null || !_captureMouse) return;
+            var p = e.GetCurrentPoint(this).Properties;
+            int m = p.IsLeftButtonPressed ? 1 : p.IsRightButtonPressed ? 2 : p.IsMiddleButtonPressed ? 3 : p.IsXButton1Pressed ? 4 : p.IsXButton2Pressed ? 5 : 0;
+            if (m == 0) return;
+            var done = _capture;
+            _capture = null;
+            e.Handled = true;
+            // After this click is over, so the button it lands on does not take it.
+            Dispatcher.UIThread.Post(() => done(null, m));
+        }, Avalonia.Interactivity.RoutingStrategies.Tunnel);
+        AddHandler(PointerWheelChangedEvent, (_, e) =>
+        {
+            if (_capture == null || !_captureMouse || e.Delta.Y == 0) return;
+            var done = _capture;
+            _capture = null;
+            e.Handled = true;
+            done(null, e.Delta.Y > 0 ? 6 : 7);
+        }, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter && _play.IsEnabled) Play();

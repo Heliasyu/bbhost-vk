@@ -23,24 +23,28 @@ public sealed class OptionsFile
         if (File.Exists(_path)) _lines.AddRange(File.ReadAllLines(_path));
     }
 
-    public string? Get(string key)
+    public string? Get(string key) => GetIn("options", key);
+
+    public string? GetIn(string section, string key)
     {
-        var (i, _) = Find(key);
+        var (i, _) = Find(section, key);
         return i < 0 ? null : ValueOf(_lines[i]);
     }
 
     public string Get(string key, string fallback) => Get(key) ?? fallback;
 
-    public void Set(string key, string value)
+    public void Set(string key, string value) => SetIn("options", key, value);
+
+    public void SetIn(string section, string key, string value)
     {
         var line = $"{key} = \"{value.Replace("\"", "")}\"";
-        var (i, end) = Find(key);
+        var (i, end) = Find(section, key);
         if (i >= 0) _lines[i] = line;
         else if (end >= 0) _lines.Insert(end, line);
         else
         {
             if (_lines.Count == 0) _lines.Add("# bbhost PC port options. Written by the options screen (F10).");
-            _lines.Add("[options]");
+            _lines.Add($"[{section}]");
             _lines.Add(line);
         }
         Save();
@@ -79,13 +83,13 @@ public sealed class OptionsFile
 
     /// The line of `key` in [options] (or -1), and where a new one would go (the end of the
     /// section's lines, before its trailing blank lines), or -1 without the section.
-    (int line, int end) Find(string key)
+    (int line, int end) Find(string section, string key)
     {
         int start = -1;
         for (int i = 0; i < _lines.Count; i++)
         {
             var t = _lines[i].Trim();
-            if (t == "[options]") { start = i; continue; }
+            if (t == $"[{section}]") { start = i; continue; }
             if (start < 0) continue;
             if (t.StartsWith('['))
             {

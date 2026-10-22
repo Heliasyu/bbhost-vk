@@ -29,6 +29,9 @@ public sealed class Ctx
     public required Func<IReadOnlyList<(string Name, string Label, bool Primary)>> Monitors { get; init; }
     /// The primary monitor's size in pixels.
     public required Func<(int W, int H)> ScreenSize { get; init; }
+    /// The next key (mouse false) or mouse button / wheel (mouse true) pressed: its SDL name or
+    /// mouse index to `done`; Escape cancels (null, 0).
+    public required Action<bool, Action<string?, int>> Capture { get; init; }
 }
 
 public static class Pages
@@ -43,7 +46,7 @@ public static class Pages
         1 => Display(ctx),
         2 => Upscaling(ctx),
         3 => Settings("Graphics", "Effects and the look of the world. All apply live in the game too.", OptionSchema.Graphics, ctx),
-        4 => Settings("Controller", "DualSense haptics and adaptive triggers, mouse and keyboard.", OptionSchema.Controller, ctx),
+        4 => Controller(ctx),
         5 => Online(ctx),
         6 => TrophiesPage(ctx),
         _ => More(ctx),
@@ -418,6 +421,83 @@ public static class Pages
         Grid.SetColumn(right, 1); g2.Children.Add(right);
         col.Children.Add(g2);
         return col;
+    }
+
+    static Control Controller(Ctx ctx)
+    {
+        var page = (StackPanel)Settings("Controller", "DualSense haptics and adaptive triggers, mouse and keyboard.", OptionSchema.Controller, ctx);
+        page.Children.Add(BindingsCard(ctx));
+        return page;
+    }
+
+    // Keyboard and mouse bindings (Core/Bindings.cs): per action a key and a mouse input.
+    static Control BindingsCard(Ctx ctx)
+    {
+        var o = ctx.Options;
+        var rowsLeft = Ui.Col(6);
+        var rowsRight = Ui.Col(6);
+        var all = Bindings.All;
+        var rebuild = new List<Action>();
+        Button Pill(string text, bool empty)
+        {
+            var b = new Button
+            {
+                Content = text, Classes = { "flat", "ghost" }, Height = 34, MinWidth = 110, Padding = new Thickness(12, 0), FontSize = 13,
+                Opacity = empty ? 0.55 : 1.0,
+            };
+            return b;
+        }
+        for (int i = 0; i < all.Length; i++)
+        {
+            var a = all[i];
+            var keyBtn = Pill("", true);
+            var mouseBtn = Pill("", true);
+            void Show()
+            {
+                var (k, m) = Bindings.Read(o, a);
+                keyBtn.Content = string.IsNullOrEmpty(k) ? "No key" : k;
+                keyBtn.Opacity = string.IsNullOrEmpty(k) ? 0.55 : 1.0;
+                mouseBtn.Content = m > 0 ? Bindings.MouseLabels[m] : "No mouse";
+                mouseBtn.Opacity = m > 0 ? 1.0 : 0.55;
+            }
+            Show();
+            rebuild.Add(Show);
+            keyBtn.Click += (_, _) =>
+            {
+                keyBtn.Content = "Press a key…";
+                ctx.Capture(false, (name, _) =>
+                {
+                    if (name != null) { var (_, m) = Bindings.Read(o, a); Bindings.Write(o, a, name, m); }
+                    Show();
+                });
+            };
+            mouseBtn.Click += (_, _) =>
+            {
+                mouseBtn.Content = "Click a button…";
+                ctx.Capture(true, (_, mouse) =>
+                {
+                    if (mouse > 0) { var (k, _) = Bindings.Read(o, a); Bindings.Write(o, a, k, mouse); }
+                    Show();
+                });
+            };
+            // Right-click clears that half.
+            keyBtn.PointerReleased += (_, e) => { if (e.InitialPressMouseButton == Avalonia.Input.MouseButton.Right) { var (_, m) = Bindings.Read(o, a); Bindings.Write(o, a, null, m); Show(); } };
+            mouseBtn.PointerReleased += (_, e) => { if (e.InitialPressMouseButton == Avalonia.Input.MouseButton.Right) { var (k, _) = Bindings.Read(o, a); Bindings.Write(o, a, k, 0); Show(); } };
+            var controls = Ui.Row(6, keyBtn, mouseBtn);
+            var row = Ui.Tip(Ui.Row2(a.Label, a.Help, controls),
+                "Click the key, then press the one you want; click the mouse half, then click a mouse button or turn the wheel. Esc cancels; right-click clears.");
+            (i < (all.Length + 1) / 2 ? rowsLeft : rowsRight).Children.Add(row);
+        }
+        var reset = Ui.Ghost("Reset all", () =>
+        {
+            foreach (var a in all) Bindings.Write(o, a, a.DefaultKey, a.DefaultMouse);
+            foreach (var r in rebuild) r();
+        });
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        head.Children.Add(Ui.Col(2, Ui.Eyebrow("Keyboard and mouse"), Ui.Text("Each action takes a key and a mouse input. The game reads them when it starts.", 12, "muted")));
+        reset.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(reset, 1); head.Children.Add(reset);
+        return Ui.Glass(Ui.Col(12, head, Columns(rowsLeft, rowsRight)), 18);
     }
 
     // The save and its backups (Core/Saves.cs): the engine's automatic copies, one made on
