@@ -1480,7 +1480,7 @@ std::uint8_t axis_to_u8(std::int16_t v) {
 void update_triggers() {
     std::lock_guard<std::mutex> lock(g_pads_mu);
     static std::unordered_map<SDL_JoystickID, std::array<std::uint8_t, 22>> sent;
-    const bool relaxed = host_options_open() || ingame_menu_open() || hle_video_loading();
+    const bool relaxed = host_options_open() || ingame_menu_open() || hle_video_loading() || menu_pointer_in_menu();
     for (SDL_Gamepad* g : g_pads) {
         if (!haptics_is_dualsense(SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g))) continue;
         const SDL_JoystickID id = SDL_GetGamepadID(g);
@@ -2128,6 +2128,14 @@ bool host_window_pump() {
             case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
                 note_input(InputDevice::Pad);
                 g_last_pad_press = std::chrono::steady_clock::now();
+                // A decide or a back in one of the game's menus: a tap (host/haptics.h).
+                if (menu_pointer_in_menu() && !host_options_open()) {
+                    const std::uint32_t pressed = e.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH  ? kCross
+                                                  : e.gbutton.button == SDL_GAMEPAD_BUTTON_EAST ? kCircle
+                                                                                                 : 0u;
+                    if (pressed && pressed == menu_confirm_button()) haptics_menu_tick(1);
+                    else if (pressed && pressed == menu_back_button()) haptics_menu_tick(2);
+                }
                 // A text box takes a controller's confirm as Enter and its
                 // back as Escape (Options accepts too), the game's region
                 // deciding which button is which: a player with only a

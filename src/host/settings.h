@@ -48,6 +48,7 @@ struct HostSettings {
     float haptics_strength = 1.0f;  // 0..2, 1 the default
     bool adaptive_triggers = true;
     int trigger_strength = 1;       // 0 Light, 1 Medium, 2 Strong
+    bool menu_haptics = true;       // a light tap for each move, decide and back in the game's menus
 
     // Graphics (the CSGraphicsConfig-shaped part; engine/graphics_patch.cpp,
     // host/shader_patch.cpp apply them)

@@ -51,6 +51,11 @@ struct TriggerEffects {
 };
 TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relaxed);
 
+// A tap for the game's menus (the title menu, the pause menu, the inventory,
+// the System list - every list the game draws): 0 the cursor moved, 1 a
+// decide, 2 a back. Light and short; felt only with HD haptics live.
+void haptics_menu_tick(int kind);
+
 // Before the audio subsystem shuts down: closes the haptics output.
 void haptics_shutdown();
 

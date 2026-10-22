@@ -158,6 +158,12 @@ std::atomic<std::uint32_t> g_rumble{0};  // small << 8 | large
 std::atomic<std::int64_t> g_rumble_until_us{0};
 std::atomic<bool> g_hd_live{false};  // an HD output is open and fed
 
+// Menu taps (haptics_menu_tick): the next one asked for, and the one playing.
+std::atomic<int> g_tick_asked{-1};
+std::atomic<std::int64_t> g_tick_last_us{0};  // moves closer than 35 ms are one tap
+float g_tick_amp = 0.0f, g_tick_phase = 0.0f, g_tick_freq = 0.0f;
+int g_tick_left = 0;  // samples still to play
+
 std::int64_t now_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -169,6 +175,7 @@ struct Wanted {
     float strength = 1.0f;
     bool triggers = true;
     int trigger_strength = 1;
+    bool menu = true;
 };
 std::mutex g_wanted_mu;
 Wanted g_wanted;
@@ -182,6 +189,7 @@ Wanted wanted() {
         g_wanted.strength = h.haptics_strength;
         g_wanted.triggers = h.adaptive_triggers;
         g_wanted.trigger_strength = h.trigger_strength;
+        g_wanted.menu = h.menu_haptics;
         g_rescan = true;
     }
     return g_wanted;
@@ -279,6 +287,16 @@ void render(const float* in, unsigned count, float gain, const Wanted& w, float*
     const float smooth = follow(4.0f);
     const float strength = w.strength;
     const Tuning& t = g_tune;
+    // A menu tap: a few cycles of a high tone, gone in 15-25 ms. A move is
+    // the lightest; a decide a little firmer and lower; a back in between.
+    if (const int k = g_tick_asked.exchange(-1); k >= 0 && w.menu) {
+        static constexpr float kAmp[3] = {0.30f, 0.45f, 0.38f}, kFreq[3] = {230.0f, 170.0f, 200.0f}, kMs[3] = {15.0f, 25.0f, 20.0f};
+        g_tick_amp = kAmp[k];
+        g_tick_freq = kFreq[k];
+        g_tick_phase = 0.0f;
+        g_tick_left = static_cast<int>(kMs[k] * 0.001f * kRate);
+    }
+    const float tick_decay = std::exp(-1.0f / (0.006f * kRate));
     for (unsigned i = 0; i < count; ++i) {
         const float* f = in ? in + i * 8 : nullptr;
         float sides[2] = {0.0f, 0.0f}, levels[2] = {0.0f, 0.0f};
@@ -302,10 +320,18 @@ void render(const float* in, unsigned count, float gain, const Wanted& w, float*
         if (g_large_phase > kTwoPi) g_large_phase -= kTwoPi;
         if (g_small_phase > kTwoPi) g_small_phase -= kTwoPi;
         const float rumble = t.rumble * (0.65f * g_large * std::sin(g_large_phase) + 0.35f * g_small * std::sin(g_small_phase));
+        float tick = 0.0f;
+        if (g_tick_left > 0) {
+            --g_tick_left;
+            g_tick_phase += kTwoPi * g_tick_freq / kRate;
+            tick = g_tick_amp * std::sin(g_tick_phase);
+            g_tick_amp *= tick_decay;
+        }
         float motor[2];
         for (int s = 0; s < 2; ++s) {
             const float fx = (1.0f - t.carrier) * sides[s] + t.carrier * 2.0f * levels[s] * tone;
-            motor[s] = std::tanh((fx * t.gain + rumble) * strength) * 0.95f;
+            // The tap keeps its own level: the strength setting is for the game.
+            motor[s] = std::tanh((fx * t.gain + rumble) * strength + tick) * 0.95f;
         }
         float* o = out + i * 4;
         o[0] = o[1] = o[2] = o[3] = 0.0f;
@@ -323,6 +349,14 @@ bool haptics_is_dualsense(std::uint16_t vendor, std::uint16_t product) {
 }
 
 void haptics_devices_changed() { g_rescan = true; }
+
+void haptics_menu_tick(int kind) {
+    if (kind < 0 || kind > 2 || !g_hd_live.load(std::memory_order_relaxed)) return;
+    const std::int64_t now = now_us();
+    if (kind == 0 && now - g_tick_last_us.load(std::memory_order_relaxed) < 35000) return;  // a held direction scrolling: not a buzz
+    g_tick_last_us.store(now, std::memory_order_relaxed);
+    g_tick_asked.store(kind, std::memory_order_relaxed);
+}
 
 bool haptics_rumble(std::uint8_t small, std::uint8_t large) {
     if (!g_hd_live.load(std::memory_order_relaxed) || wanted().mode != 2) return false;

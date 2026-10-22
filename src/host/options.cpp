@@ -102,6 +102,7 @@ enum SettingId {
     kHapticsStrength,
     kAdaptiveTriggers,
     kTriggerStrength,
+    kMenuHaptics,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -301,6 +302,10 @@ Setting g_set[kSettingCount] = {
      false},
     {"trigger_strength", "Trigger strength", {"Light", "Medium", "Strong"}, 1,
      "How hard the adaptive triggers push back.", false},
+    {"menu_haptics", "Menu haptics", {"On", "Off"}, 0,
+     "HD: a light tap as the cursor moves through the title menu, the pause menu, the inventory and the System menu, "
+     "and a firmer one for a decide or back.",
+     false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -349,6 +354,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kHapticsStrength},
     {Row::Option, nullptr, kAdaptiveTriggers},
     {Row::Option, nullptr, kTriggerStrength},
+    {Row::Option, nullptr, kMenuHaptics},
     {Row::Header, "GAME"},
     {Row::Option, nullptr, kChangeAppearance},
     {Row::Option, nullptr, kRebirth},
@@ -828,6 +834,7 @@ void rebuild_settings() {
     h.haptics_strength = static_cast<float>(std::clamp(index_of(kHapticsStrength), 0, 10)) / 5.0f;
     h.adaptive_triggers = on_of(kAdaptiveTriggers);
     h.trigger_strength = std::clamp(index_of(kTriggerStrength), 0, 2);
+    h.menu_haptics = on_of(kMenuHaptics);
     h.ssao = on_of(kSsao);
     h.motion_blur = on_of(kMotionBlur);
     h.depth_of_field = on_of(kDepthOfField);

@@ -11,6 +11,7 @@
 #include "engine/addr.h"
 #include "guest_abi.h"
 #include "hle/hle.h"
+#include "host/haptics.h"
 #include "host/ingame_menu.h"
 #include "host/options.h"
 #include "host/settings.h"
@@ -751,6 +752,9 @@ GUEST_ABI void pc_list_update(std::uint8_t* comp, std::uint8_t* input) {
     option_menu_list_update(comp, input && *input);
     const int before = cursor_of(comp);
     hle_call_guest(guest_fn(kListUpdate), comp, input);
+    // A cursor the game's update moved (the pad or a key, not the pointer,
+    // which moved it above): a light tap (host/haptics.h).
+    if (cursor_of(comp) != before) haptics_menu_tick(0);
     // BBHOST_POINTER_LOG=1: a cursor the game's own update moved (the pad,
     // the wheel's Down, a key), so a scripted run can count rows per press.
     if (g_log) {
