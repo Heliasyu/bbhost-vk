@@ -23,6 +23,14 @@ void world_chr_install(ElfImage* image);
 // False before the world has a player (the title, a load).
 bool world_player_position(float xyz[3], float* yaw);
 bool world_camera(float pos[3], float focus[3]);
+// The animation the main player's SprjChrTimeActModule plays now (its +0x20),
+// as the game numbers them: the motion category times 1,000,000 plus the
+// animation (122032610: category 122, animation 032610 - a heavy attack's
+// charge). Found by BBHOST_CHR_SCAN (round 10): R2 held runs 032600 (the
+// wind-up), 032610 (the charge), then 032630 (the charged swing) or, let go
+// early, 032620; R1 030000; the gun 117051000 / 117054500; standing
+// 200000000..200004000. False before the world has a player.
+bool world_player_anim(std::int32_t* anim);
 // The map block the main player is in, packed as the game keeps it at ChrIns
 // +0x3f8 (m24_01_00_00 = 0x18010000). False before the world has a player.
 bool world_player_block(std::uint32_t* block);

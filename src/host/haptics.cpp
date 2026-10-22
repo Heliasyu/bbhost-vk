@@ -1,7 +1,7 @@
 // bbhost-vk: DualSense / DualSense Edge HD haptics and adaptive triggers
 // (host/haptics.h).
 #include "host/haptics.h"
-#include "engine/player_data.h"
+#include "engine/world_chr.h"
 #include "host/options.h"
 #include "host/settings.h"
 #include "log.h"
@@ -593,48 +593,52 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
     // Light, Medium, Strong.
     static constexpr int kResist[3] = {2, 3, 5}, kBreak[3] = {3, 5, 8}, kHum[3] = {4, 6, 8};
     const int s = std::clamp(w.trigger_strength, 0, 2);
-    // L2, the gun: a break two-fifths of the way down.
-    haptics_trigger_weapon(t.left, 3, 6, kBreak[s]);
-    // R2, the heavy attack: light resistance; and a hum that grows over a
-    // second while a charge is really under way - R2 held, and the character's
-    // stamina gone down since the press (the attack started: a press while
-    // the character cannot act costs nothing, and gets no hum). Round 9: on
-    // the time held alone, a second hold hummed with nothing happening.
-    struct Charge {
-        bool down = false;
-        bool started = false;  // the stamina went down: the attack is real
-        std::int64_t stamina_at_press = -1;
-        std::chrono::steady_clock::time_point since{}, started_at{};
+    (void)l2;  // what the triggers do follows the character, not how far they are pulled
+    (void)r2;
+    // What the character is doing (engine/world_chr.h): its animation, the
+    // category's part off. Round 10: the hum followed R2 held, then stamina
+    // spent - which the game spends at the swing, so the hum came after it.
+    std::int32_t anim = -1;
+    if (!world_player_anim(&anim)) anim = -1;
+    const int motion = anim >= 0 ? anim % 1000000 : -1;
+    const int category = anim >= 0 ? anim / 1000000 : -1;
+    struct State {
+        int motion = -1, category = -1;
+        std::chrono::steady_clock::time_point since{};
     };
-    static int logged = 0;  // the first presses, so a log shows the stamina is live
-    static std::unordered_map<std::uint32_t, Charge> charges;  // the pump thread only
-    Charge& c = charges[id];
+    static std::unordered_map<std::uint32_t, State> states;  // the pump thread only
+    State& st = states[id];
     const auto now = std::chrono::steady_clock::now();
-    std::int64_t stamina = -1;
-    if (!player_stat_get("stamina", &stamina)) stamina = -1;
-    if (r2 > 0.6f && !c.down) {
-        c.down = true;
-        c.started = false;
-        c.since = now;
-        c.stamina_at_press = stamina;
-    } else if (r2 < 0.3f && c.down) {
-        c.down = false;
-        if (logged < 12) {
-            ++logged;
-            host_log("haptics: R2 held %.0f ms, stamina %lld at the press, %lld at the release - %s",
-                     std::chrono::duration<double, std::milli>(now - c.since).count(), static_cast<long long>(c.stamina_at_press),
-                     static_cast<long long>(stamina), c.started ? "an attack (hummed past 350 ms)" : "no attack seen");
-        }
+    if (motion != st.motion || category != st.category) {
+        static const bool log_anims = [] {
+            const char* e = std::getenv("BBHOST_HAPTICS_ANIM_LOG");
+            return e && e[0] == '1';
+        }();
+        if (log_anims) host_log("haptics: animation %d (category %d, %06d)", anim, category, motion);
+        st.motion = motion;
+        st.category = category;
+        st.since = now;
     }
-    if (c.down && !c.started && stamina >= 0 && c.stamina_at_press >= 0 && stamina < c.stamina_at_press - 5) {
-        c.started = true;
-        c.started_at = now;
+    const float in_ms = std::chrono::duration<float, std::milli>(now - st.since).count();
+
+    // L2, the gun: a break two-fifths of the way down; and a recoil kick as
+    // a shot's animation starts (category 117, the left hand's firearm), so a
+    // pull that fires nothing gets none.
+    if (category == 117 && motion >= 50000 && motion < 60000 && in_ms < 120.0f) {
+        haptics_trigger_vibration(t.left, 0, kHum[s], 60);
+    } else {
+        haptics_trigger_weapon(t.left, 3, 6, kBreak[s]);
     }
-    const float held_ms = c.down && c.started ? std::chrono::duration<float, std::milli>(now - c.since).count() : 0.0f;
-    if (held_ms > 350.0f) {
-        const float grow = std::clamp((held_ms - 350.0f) / 1000.0f, 0.0f, 1.0f);
+    // R2, the heavy attack: light resistance; a hum while the charge is
+    // really under way (032610), growing to full over its half second; and a
+    // kick as the charged swing goes (032630). A quick heavy (032620), or R2
+    // held while nothing happens, stays plain.
+    if (motion == 32610) {
+        const float grow = std::clamp(in_ms / 450.0f, 0.0f, 1.0f);
         const int amp = 1 + static_cast<int>(std::lround(grow * static_cast<float>(kHum[s] - 1)));
-        haptics_trigger_vibration(t.right, 0, amp, 40);
+        haptics_trigger_vibration(t.right, 0, amp, 30 + static_cast<int>(grow * 20.0f));
+    } else if (motion == 32630 && in_ms < 150.0f) {
+        haptics_trigger_vibration(t.right, 0, kHum[s], 70);
     } else {
         haptics_trigger_feedback(t.right, 3, kResist[s]);
     }

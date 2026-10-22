@@ -109,6 +109,31 @@ void chr_scan() {
 
 }  // namespace
 
+bool world_player_anim(std::int32_t* anim) {
+    // The module is looked up in the container by its vtable once per
+    // character, then only its vtable checked again on each read.
+    constexpr std::uint64_t kTimeActVtable = 0x5735190;
+    static std::uint64_t cached_chr = 0, cached_module = 0;
+    const std::uint64_t man = ptr(slot(kWorldChrMan));
+    const std::uint64_t chr = man ? ptr(man + 0x60) : 0;
+    if (!chr) return false;
+    const std::uint64_t want = slot(kTimeActVtable);
+    if (chr != cached_chr || !cached_module || ptr(cached_module) != want) {
+        cached_chr = chr;
+        cached_module = 0;
+        const std::uint64_t modules = ptr(chr + 0x3b0);
+        for (std::uint64_t s = 0; modules && s < 0x200 && !cached_module; s += 8) {
+            const std::uint64_t m = ptr(modules + s);
+            if (m && ptr(m) == want) cached_module = m;
+        }
+        if (!cached_module) return false;
+    }
+    std::int32_t v = 0;
+    if (!rd(cached_module + 0x20, &v)) return false;
+    if (anim) *anim = v;
+    return true;
+}
+
 void world_chr_install(ElfImage* image) {
     g_slide = image->mem.slide;
     g_ok = image->sha256 == kEboot109Sha256;
