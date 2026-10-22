@@ -142,6 +142,7 @@ enum SettingId {
     kMipBias,
     kPadIcons,
     kCompileNote,
+    kGameLanguage,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -407,6 +408,10 @@ Setting g_set[kSettingCount] = {
      "The button icons a controller's prompts show. Auto: PlayStation's with a PlayStation controller, the Xbox buttons by name with any other.", false},
     // host/window.cpp's pump: a small note under the FPS counter's corner while
     // pipelines are built in play (host_pipelines_building).
+    // hle/system.cpp's SCE_SYSTEM_SERVICE_PARAM_ID_LANG: the game's text and
+    // voices in that language (the disc carries their message bundles).
+    {"game_language", "Game language", {"English", "French", "Spanish", "German", "Italian", "Russian", "Japanese"}, 0,
+     "The game's own text and voices. Takes effect at the next start.", true},
     {"compile_note", "Building shaders note", {"On", "Off"}, 0,
      "\"Building shaders\" in a corner while the game builds shaders for something it shows for the first time (a brief stutter is normal then).", false},
 };
@@ -492,6 +497,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kFivePlayers},
     {Row::Option, nullptr, kSkipLogos},
     {Row::Option, nullptr, kTrophyPopups},
+    {Row::Option, nullptr, kGameLanguage},
     // The private server's account. No passwords: link this PC to
     // the account signed into on the website with Discord, or make one held
     // by this PC with a recovery code. The token is kept in the options file.
@@ -893,6 +899,7 @@ void apply(int id) {
         case kButtonPrompts:
         case kPadIcons:
         case kCompileNote:
+        case kGameLanguage:
             break;  // the settings object carries them (host/settings.h)
         case kSsao:
         case kMotionBlur:
@@ -1057,6 +1064,11 @@ void rebuild_settings() {
     h.button_prompts = index_of(kButtonPrompts) < 0 ? 0 : index_of(kButtonPrompts);
     h.pad_icons = std::clamp(index_of(kPadIcons), 0, 2);
     h.compile_note = on_of(kCompileNote);
+    {
+        // The PS4's language codes, in the setting's order.
+        static constexpr int kLang[] = {1, 2, 3, 4, 5, 8, 0};
+        h.game_language = kLang[std::clamp(index_of(kGameLanguage), 0, 6)];
+    }
     h.haptics = std::clamp(index_of(kHaptics), 0, 2);
     h.haptics_strength = static_cast<float>(std::clamp(index_of(kHapticsStrength), 0, 10)) / 5.0f;
     h.adaptive_triggers = on_of(kAdaptiveTriggers);

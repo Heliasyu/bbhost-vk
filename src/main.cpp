@@ -851,6 +851,11 @@ int main(int argc, char** argv) {
         std::printf("%s %s\n", BBHOST_VERSION, BBHOST_GIT_REV);
         return 0;
     }
+#if !defined(_WIN32)
+    // The launcher reads the log from a pipe (its Console page); closed while
+    // the game runs, a write to it must fail quietly rather than end the game.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 #if defined(_WIN32)
     hle_kernel_reserve_guest_windows();  // before anything else can take those addresses
     write_watch_install();               // the vectored handler for write-protected texture memory
