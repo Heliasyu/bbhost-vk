@@ -391,6 +391,7 @@ struct Gpu {
     // feature on: the presenter may ask for FIFO_LATEST_READY (window.cpp).
     // The extension's name, or null.
     const char* fifo_latest_ready_ext = nullptr;
+    bool hdr_metadata = false;  // VK_EXT_hdr_metadata on (HDR output tells the display its levels)
     // Stage parameter ring: one block per queued dispatch/draw stage.
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory ubo_mem = VK_NULL_HANDLE;

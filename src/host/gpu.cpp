@@ -2038,6 +2038,20 @@ bool init_locked() {
                  app.pApplicationName, app.pEngineName ? app.pEngineName : "");
     std::vector<const char*> iext;
     for (const std::string& e : g_instance_exts) iext.push_back(e.c_str());
+    // HDR output (window.cpp): the swapchain's HDR10 colour space needs the
+    // instance's VK_EXT_swapchain_colorspace where the loader offers it.
+    if (g_want_present) {
+        std::uint32_t n = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> have(n);
+        if (n) vkEnumerateInstanceExtensionProperties(nullptr, &n, have.data());
+        for (const VkExtensionProperties& x : have)
+            if (std::strcmp(x.extensionName, "VK_EXT_swapchain_colorspace") == 0) {
+                bool listed = false;
+                for (const char* e : iext) listed = listed || std::strcmp(e, "VK_EXT_swapchain_colorspace") == 0;
+                if (!listed) iext.push_back("VK_EXT_swapchain_colorspace");
+            }
+    }
     std::vector<const char*> layers;
     if (g_validate) {
         layers.push_back("VK_LAYER_KHRONOS_validation");
@@ -2299,6 +2313,7 @@ bool init_locked() {
                                     : "gpu: BBHOST_SHADER_STATS=%s: the device lacks VK_KHR_pipeline_executable_properties; no shader statistics",
                      e);
         }
+        g.hdr_metadata = g_want_present && has("VK_EXT_hdr_metadata");
 #if defined(VK_KHR_present_mode_fifo_latest_ready)
         // The present mode FIFO_LATEST_READY (window.cpp, vk_create_swapchain):
         // V-Sync with no queue of frames behind the display - at each refresh
@@ -2364,8 +2379,10 @@ bool init_locked() {
         dext.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
         g.present_capable = true;
         if (g.fifo_latest_ready_ext) dext.push_back(g.fifo_latest_ready_ext);
+        if (g.hdr_metadata) dext.push_back("VK_EXT_hdr_metadata");
     } else {
         g.fifo_latest_ready_ext = nullptr;
+        g.hdr_metadata = false;
     }
     VkPhysicalDeviceFaultFeaturesEXT ffault{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     ffault.deviceFault = VK_TRUE;
@@ -5746,6 +5763,7 @@ GpuHandles host_gpu_handles() {
     h.present_queue = g.present_queue;
     h.family = g.family;
     h.fifo_latest_ready = g.fifo_latest_ready_ext != nullptr;
+    h.hdr_metadata = g.hdr_metadata;
     return h;
 }
 

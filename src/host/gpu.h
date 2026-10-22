@@ -391,6 +391,7 @@ struct GpuHandles {
     void* present_queue = nullptr;   // VkQueue for presents only (the same family), or null
     std::uint32_t family = 0;
     bool fifo_latest_ready = false;  // the device may present in VK_PRESENT_MODE_FIFO_LATEST_READY_KHR
+    bool hdr_metadata = false;       // VK_EXT_hdr_metadata is on
 };
 GpuHandles host_gpu_handles();
 // The command processor wrote guest memory on the CPU (DMA, WRITE_DATA):

@@ -7,6 +7,8 @@
 #include "host/present_spv.h"
 #include "host/shaders/motion_view_frag.spv.h"
 #include "host/shaders/frosted_frag.spv.h"
+#include "host/shaders/present_grade_frag.spv.h"
+#include "host/shaders/hdr_encode_frag.spv.h"
 #include "host/overlay.h"
 #include "log.h"
 
@@ -14,6 +16,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 namespace {
@@ -47,6 +50,26 @@ VkImageView g_motion_view = VK_NULL_HANDLE;
 // blended over the picture, sampling it through g_set.
 VkPipeline g_glass_pipeline = VK_NULL_HANDLE;
 bool g_source_bound = false;  // g_set holds this frame's picture
+// Helia's Dream: the player's grade (present_grade.frag) for the picture, set
+// each frame; the plain copy while it is the game's own.
+VkPipeline g_grade_pipeline = VK_NULL_HANDLE;
+std::atomic<float> g_grade_b{1.0f}, g_grade_c{1.0f}, g_grade_h{0.0f};
+// HDR output: the pass renders into g_hdr_image (the swapchain's format, SDR
+// values), and present_pass_end encodes it into the swapchain image
+// (hdr_encode.frag). Levels set each frame.
+VkPipeline g_hdr_pipeline = VK_NULL_HANDLE;
+std::atomic<bool> g_hdr_on{false};
+std::atomic<float> g_hdr_paper{200.0f}, g_hdr_peak{1000.0f}, g_hdr_boost{0.25f};
+VkImage g_hdr_image = VK_NULL_HANDLE;
+VkDeviceMemory g_hdr_mem = VK_NULL_HANDLE;
+VkImageView g_hdr_view = VK_NULL_HANDLE;
+VkExtent2D g_hdr_extent{0, 0};
+VkDescriptorPool g_hdr_pool = VK_NULL_HANDLE;
+VkDescriptorSet g_hdr_set = VK_NULL_HANDLE;
+bool g_encoding = false;  // this frame's pass draws into g_hdr_image
+VkImage g_dst_image = VK_NULL_HANDLE;
+VkImageView g_dst_view = VK_NULL_HANDLE;
+VkExtent2D g_dst_extent{0, 0};
 // The last source format asked about, and whether it filters linearly.
 VkFormat g_checked = VK_FORMAT_UNDEFINED;
 bool g_checked_ok = false;
@@ -152,6 +175,25 @@ bool build(VkDevice device) {
     gp.pDynamicState = &ds;
     gp.layout = g_layout;
     const VkResult r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_pipeline);
+    if (r == VK_SUCCESS) {  // The grade and the HDR encode: the same fixed-function state, unblended.
+        if (VkShaderModule m = make_module(device, k_present_grade_frag_spv, sizeof(k_present_grade_frag_spv) / 4)) {
+            stages[1].module = m;
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_grade_pipeline) != VK_SUCCESS) g_grade_pipeline = VK_NULL_HANDLE;
+            vkDestroyShaderModule(device, m, nullptr);
+        }
+        if (VkShaderModule m = make_module(device, k_hdr_encode_frag_spv, sizeof(k_hdr_encode_frag_spv) / 4)) {
+            stages[1].module = m;
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &g_hdr_pipeline) != VK_SUCCESS) g_hdr_pipeline = VK_NULL_HANDLE;
+            vkDestroyShaderModule(device, m, nullptr);
+        }
+        stages[1].module = fs;
+        VkDescriptorPoolCreateInfo hp = dpci;
+        if (vkCreateDescriptorPool(device, &hp, nullptr, &g_hdr_pool) == VK_SUCCESS) {
+            dsai.descriptorPool = g_hdr_pool;
+            if (vkAllocateDescriptorSets(device, &dsai, &g_hdr_set) != VK_SUCCESS) g_hdr_set = VK_NULL_HANDLE;
+            dsai.descriptorPool = g_pool;
+        }
+    }
     if (r == VK_SUCCESS) {  // rc2: its sharpening variant; its failure costs only that
         if (VkShaderModule sfs = make_module(device, present_spv::kFragSharpen, sizeof(present_spv::kFragSharpen) / 4)) {
             stages[1].module = sfs;
@@ -242,6 +284,19 @@ void present_pass_shutdown(VkDevice device) {
     if (g_motion_pipeline) vkDestroyPipeline(device, g_motion_pipeline, nullptr);
     if (g_glass_pipeline) vkDestroyPipeline(device, g_glass_pipeline, nullptr);
     g_glass_pipeline = VK_NULL_HANDLE;
+    if (g_grade_pipeline) vkDestroyPipeline(device, g_grade_pipeline, nullptr);
+    if (g_hdr_pipeline) vkDestroyPipeline(device, g_hdr_pipeline, nullptr);
+    if (g_hdr_view) vkDestroyImageView(device, g_hdr_view, nullptr);
+    if (g_hdr_image) vkDestroyImage(device, g_hdr_image, nullptr);
+    if (g_hdr_mem) vkFreeMemory(device, g_hdr_mem, nullptr);
+    if (g_hdr_pool) vkDestroyDescriptorPool(device, g_hdr_pool, nullptr);
+    g_grade_pipeline = g_hdr_pipeline = VK_NULL_HANDLE;
+    g_hdr_view = VK_NULL_HANDLE;
+    g_hdr_image = VK_NULL_HANDLE;
+    g_hdr_mem = VK_NULL_HANDLE;
+    g_hdr_pool = VK_NULL_HANDLE;
+    g_hdr_set = VK_NULL_HANDLE;
+    g_hdr_extent = {0, 0};
     if (g_motion_pool) vkDestroyDescriptorPool(device, g_motion_pool, nullptr);
     if (g_point) vkDestroySampler(device, g_point, nullptr);
     g_motion_view = VK_NULL_HANDLE;
@@ -288,6 +343,88 @@ bool present_pass_set_sharpen(float sharpness) {
     return true;
 }
 
+void present_pass_set_grade(float brightness, float contrast, float hue_degrees) {
+    g_grade_b.store(brightness);
+    g_grade_c.store(contrast);
+    g_grade_h.store(hue_degrees);
+}
+
+void present_pass_set_hdr(bool on, float paper_white, float peak, float boost) {
+    g_hdr_on.store(on);
+    g_hdr_paper.store(paper_white);
+    g_hdr_peak.store(peak);
+    g_hdr_boost.store(boost);
+}
+
+namespace {
+// The SDR layer HDR output composes into: the swapchain's size and format, so
+// every pipeline of the pass (the overlay's, the menu's) draws into it as into
+// the swapchain image. Made again when the size changes.
+bool hdr_target(VkExtent2D extent) {
+    if (!g_hdr_pipeline || !g_hdr_set) return false;
+    if (g_hdr_image && g_hdr_extent.width == extent.width && g_hdr_extent.height == extent.height) return true;
+    if (g_hdr_view) vkDestroyImageView(g_device, g_hdr_view, nullptr);
+    if (g_hdr_image) vkDestroyImage(g_device, g_hdr_image, nullptr);
+    if (g_hdr_mem) vkFreeMemory(g_device, g_hdr_mem, nullptr);
+    g_hdr_view = VK_NULL_HANDLE;
+    g_hdr_image = VK_NULL_HANDLE;
+    g_hdr_mem = VK_NULL_HANDLE;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = g_format;
+    ici.extent = {extent.width, extent.height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(g_device, &ici, nullptr, &g_hdr_image) != VK_SUCCESS) {
+        g_hdr_image = VK_NULL_HANDLE;
+        return false;
+    }
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(g_device, g_hdr_image, &req);
+    VkPhysicalDeviceMemoryProperties mp{};
+    vkGetPhysicalDeviceMemoryProperties(g_phys, &mp);
+    std::uint32_t type = UINT32_MAX;
+    for (std::uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if ((req.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            type = i;
+            break;
+        }
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = type;
+    if (type == UINT32_MAX || vkAllocateMemory(g_device, &mai, nullptr, &g_hdr_mem) != VK_SUCCESS) {
+        vkDestroyImage(g_device, g_hdr_image, nullptr);
+        g_hdr_image = VK_NULL_HANDLE;
+        g_hdr_mem = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindImageMemory(g_device, g_hdr_image, g_hdr_mem, 0);
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = g_hdr_image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = g_format;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(g_device, &vci, nullptr, &g_hdr_view) != VK_SUCCESS) {
+        g_hdr_view = VK_NULL_HANDLE;
+        return false;
+    }
+    VkDescriptorImageInfo dii{g_sampler, g_hdr_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = g_hdr_set;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(g_device, 1, &w, 0, nullptr);
+    g_hdr_extent = extent;
+    host_log("present: HDR output composes into a %ux%u layer and encodes it as HDR10", extent.width, extent.height);
+    return true;
+}
+}  // namespace
+
 bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, VkExtent2D extent, VkRect2D shown,
                         const PresentSource* src, const float clear[4]) {
     if (!g_pipeline || !dst_view) return false;
@@ -329,7 +466,11 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
     to_colour.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     to_colour.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     to_colour.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_colour.image = dst;
+    g_encoding = g_hdr_on.load() && hdr_target(extent);
+    g_dst_image = dst;
+    g_dst_view = dst_view;
+    g_dst_extent = extent;
+    to_colour.image = g_encoding ? g_hdr_image : dst;
     to_colour.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     to_colour.srcAccessMask = 0;
     to_colour.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
@@ -342,7 +483,7 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
                         static_cast<std::int64_t>(shown.offset.x) + shown.extent.width >= extent.width &&
                         static_cast<std::int64_t>(shown.offset.y) + shown.extent.height >= extent.height;
     VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = dst_view;
+    att.imageView = g_encoding ? g_hdr_view : dst_view;
     att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     att.loadOp = covers ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
     att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -358,10 +499,16 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
         // A request older than 100 ms: FSR has stopped upscaling (a menu, a load) - plain.
         const float con = g_sharpen_con.load();
         const bool sharpen = con > 0.0f && steady_now_ns() - g_sharpen_at.load() < 100000000 && g_sharpen_pipeline && shown.extent.width == src->w && shown.extent.height == src->h;
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sharpen ? g_sharpen_pipeline : g_pipeline);
+        const float gb = g_grade_b.load(), gc = g_grade_c.load(), gh = g_grade_h.load();
+        const bool grade = !sharpen && g_grade_pipeline && (gb != 1.0f || gc != 1.0f || gh != 0.0f);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sharpen ? g_sharpen_pipeline : grade ? g_grade_pipeline : g_pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_set, 0, nullptr);
         if (sharpen) {
             const float pc[4] = {con, 0.0f, 0.0f, 0.0f};
+            vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
+        } else if (grade) {
+            const float rad = gh * 0.017453293f;
+            const float pc[4] = {gb, gc, std::cos(rad), std::sin(rad)};
             vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
         }
         const VkViewport vp{static_cast<float>(shown.offset.x), static_cast<float>(shown.offset.y), static_cast<float>(shown.extent.width),
@@ -379,6 +526,50 @@ bool present_pass_begin(VkCommandBuffer cmd, VkImage dst, VkImageView dst_view, 
 
 void present_pass_end(VkCommandBuffer cmd, VkImage dst) {
     vkCmdEndRendering(cmd);
+    if (g_encoding && dst == g_dst_image) {
+        // HDR output: the SDR layer, finished, encoded into the swapchain image.
+        VkImageMemoryBarrier b[2]{};
+        b[0].sType = b[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b[0].srcQueueFamilyIndex = b[0].dstQueueFamilyIndex = b[1].srcQueueFamilyIndex = b[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[0].image = g_hdr_image;
+        b[0].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b[1].image = dst;
+        b[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b[1].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        b[1].srcAccessMask = 0;
+        b[1].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+        VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        att.imageView = g_dst_view;
+        att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, g_dst_extent};
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &att;
+        vkCmdBeginRendering(cmd, &ri);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_hdr_pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 0, 1, &g_hdr_set, 0, nullptr);
+        const VkViewport vp{0.0f, 0.0f, static_cast<float>(g_dst_extent.width), static_cast<float>(g_dst_extent.height), 0.0f, 1.0f};
+        const VkRect2D sc{{0, 0}, g_dst_extent};
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        const float uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+        vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uv), uv);
+        const float pc[4] = {g_hdr_paper.load(), g_hdr_peak.load(), g_hdr_boost.load(), 0.8f};
+        vkCmdPushConstants(cmd, g_layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 4, sizeof(pc), pc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+        g_encoding = false;
+    }
     VkImageMemoryBarrier to_present{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     to_present.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;

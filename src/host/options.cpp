@@ -106,6 +106,28 @@ enum SettingId {
     kMenuHaptics,
     // engine/live_resolution.h: read once at the start.
     kLiveResolution,
+    // Helia's Dream: the FPS counter's look, the picture's grade, HDR, the menu's key.
+    kFpsPosition,
+    kFpsSize,
+    kFpsColour,
+    kFpsOpacity,
+    kFpsBackground,
+    kFpsBackgroundOpacity,
+    kFpsBorder,
+    kFpsShowRate,
+    kFpsShowFrameTime,
+    kFpsShowUpscaler,
+    kFpsShowCpu,
+    kFpsShowGpu,
+    kBrightness,
+    kContrast,
+    kHue,
+    kHdr,
+    kHdrPaperWhite,
+    kHdrPeakAuto,
+    kHdrPeak,
+    kHdrBoost,
+    kMenuKey,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -318,6 +340,44 @@ Setting g_set[kSettingCount] = {
      "On: a new Resolution applies in the game. Off: it applies at the next start, and the memory and buffers kept "
      "ready for larger sizes are not set aside (a little faster when the game runs below your display's size).",
      true},
+    // The FPS counter (host/window.cpp): where, how large, its colours, and what it shows.
+    {"fps_position", "Position", {"Top right", "Top left", "Bottom right", "Bottom left", "Top centre"}, 0,
+     "Where the FPS counter sits on the screen.", false},
+    {"fps_size", "Size", {"75%", "100%", "125%", "150%", "175%", "200%"}, 1, "How large the FPS counter's text is.", false},
+    {"fps_colour", "Text colour", {"White", "Yellow", "Green", "Cyan", "Red", "Orange", "Pink", "Black"}, 0,
+     "The FPS counter's text colour.", false},
+    {"fps_opacity", "Text opacity", {"10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"}, 9, "How solid the FPS counter's text is.", false},
+    {"fps_background", "Background", {"Dark grey", "Black", "Dark red", "Dark blue", "White"}, 0,
+     "The colour of the box behind the FPS counter.", false},
+    {"fps_background_opacity", "Background opacity", {"0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"}, 6, "How solid the box behind the FPS counter is; 0% hides it.", false},
+    {"fps_border", "Border", {"Off", "On"}, 0, "A thin outline round the FPS counter's box.", false},
+    {"fps_show_rate", "Show frame rate", {"On", "Off"}, 0, "Frames per second actually shown.", false},
+    {"fps_show_frame_time", "Show frame time", {"Off", "On"}, 0, "Milliseconds a frame, averaged like the rate.", false},
+    {"fps_show_upscaler", "Show upscaler", {"Off", "On"}, 0, "The upscaler and quality preset running.", false},
+    {"fps_show_cpu", "Show CPU usage", {"Off", "On"}, 0, "How much of the CPU the game uses (100% is every core).", false},
+    {"fps_show_gpu", "Show GPU usage", {"On", "Off"}, 0, "How busy the game keeps the GPU.", false},
+    // The picture's grade, at the presenter (host/present_pass.cpp): the game's
+    // picture only, the menus and counter as they are.
+    {"brightness", "Brightness", {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}, 5,
+     "The picture's brightness. 5 is the game's own; each step is about 10% lighter or darker.", false},
+    {"contrast", "Contrast", {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}, 5,
+     "The picture's contrast around mid grey. 5 is the game's own.", false},
+    {"hue", "Hue shift", {"-180", "-165", "-150", "-135", "-120", "-105", "-90", "-75", "-60", "-45", "-30", "-15", "0", "15", "30", "45", "60", "75", "90", "105", "120", "135", "150", "165", "180"}, 12, "Turns every colour round the colour wheel, in degrees. 0 is the game's own.", false},
+    // HDR output (host/window.cpp's swapchain, host/present_pass.cpp's encode):
+    // the game's SDR frame on an HDR10 display, its highlights expanded.
+    {"hdr", "HDR output", {"Off", "On"}, 0,
+     "The picture on an HDR screen in HDR10, with brighter highlights. Needs HDR turned on for the display in your "
+     "desktop's settings (KDE: Display Configuration).",
+     true},
+    {"hdr_paper_white", "Paper white", {"80", "100", "120", "140", "160", "180", "200", "220", "240", "260", "280", "300", "320", "340", "360", "380", "400", "420", "440", "460", "480", "500"}, 6, "How bright the game's white is on an HDR screen, in nits.", false},
+    {"hdr_peak_auto", "Peak from the display", {"On", "Off"}, 0,
+     "On: the peak brightness the display reports (its EDID). Off: Peak brightness below.", false},
+    {"hdr_peak", "Peak brightness", {"200", "250", "300", "350", "400", "500", "600", "800", "1000", "1500", "2000", "4000"}, 8,
+     "Your display's peak brightness, in nits, when it is not taken from the display.", false},
+    {"hdr_boost", "Highlight boost", {"Off", "Low", "Medium", "High", "Max"}, 1,
+     "How far the brightest parts of the picture (lamps, fire, the moon) rise above paper white. Off keeps the SDR look.", false},
+    // The key that opens this menu (host/window.cpp reads it).
+    {"menu_key", "Menu key", {"F10", "Insert", "Home", "F1"}, 0, "The key that opens this menu. F10 always works too.", false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -327,33 +387,58 @@ Setting g_set[kSettingCount] = {
 const Row g_rows[] = {
     {Row::Header, "DISPLAY"},
     {Row::Option, nullptr, kResolution},
-    {Row::Option, nullptr, kLiveResolution},
     {Row::Option, nullptr, kWindowMode},
     {Row::Option, nullptr, kVsync},
     {Row::Option, nullptr, kFrameCap},
+    {Row::Option, nullptr, kLiveResolution},
+    {Row::Option, nullptr, kMenuKey},
+    {Row::Header, "FPS COUNTER"},
+    {Row::Option, nullptr, kFpsCounter},
+    {Row::Option, nullptr, kFpsPosition},
+    {Row::Option, nullptr, kFpsSize},
+    {Row::Option, nullptr, kFpsColour},
+    {Row::Option, nullptr, kFpsOpacity},
+    {Row::Option, nullptr, kFpsBackground},
+    {Row::Option, nullptr, kFpsBackgroundOpacity},
+    {Row::Option, nullptr, kFpsBorder},
+    {Row::Option, nullptr, kFpsShowRate},
+    {Row::Option, nullptr, kFpsShowFrameTime},
+    {Row::Option, nullptr, kFpsShowUpscaler},
+    {Row::Option, nullptr, kFpsShowCpu},
+    {Row::Option, nullptr, kFpsShowGpu},
+    {Row::Header, "HDR"},
+    {Row::Option, nullptr, kHdr},
+    {Row::Option, nullptr, kHdrPaperWhite},
+    {Row::Option, nullptr, kHdrPeakAuto},
+    {Row::Option, nullptr, kHdrPeak},
+    {Row::Option, nullptr, kHdrBoost},
+    {Row::Header, "UPSCALING"},
     {Row::Option, nullptr, kUpscaler},
     {Row::Option, nullptr, kUpscaleQuality},
     {Row::Option, nullptr, kUpscaleSharpness},
     {Row::Option, nullptr, kUpscaleReactive},
     {Row::Option, nullptr, kUpscaleJitter},
-    {Row::Option, nullptr, kFpsCounter},
-    {Row::Header, "GRAPHICS & EFFECTS"},
+    {Row::Option, nullptr, kAntiAlias},
+    {Row::Header, "GRAPHICS"},
+    {Row::Option, nullptr, kSsao},
     {Row::Option, nullptr, kMotionBlur},
     {Row::Option, nullptr, kDepthOfField},
     {Row::Option, nullptr, kChromaticAberration},
+    {Row::Option, nullptr, kVignette},
     {Row::Option, nullptr, kBloom},
     {Row::Option, nullptr, kFog},
-    {Row::Option, nullptr, kAntiAlias},
-    {Row::Option, nullptr, kSsao},
     {Row::Option, nullptr, kAoStrength},
-    {Row::Option, nullptr, kVignette},
     {Row::Option, nullptr, kSaturation},
+    {Row::Option, nullptr, kBrightness},
+    {Row::Option, nullptr, kContrast},
+    {Row::Option, nullptr, kHue},
     {Row::Option, nullptr, kShadowDistance},
     {Row::Option, nullptr, kModelDetail},
-    {Row::Header, "CAMERA & CONTROLS"},
+    {Row::Header, "CAMERA"},
     {Row::Option, nullptr, kFov},
     {Row::Option, nullptr, kCameraDistance},
     {Row::Option, nullptr, kCameraHeight},
+    {Row::Header, "CONTROLS"},
     {Row::Option, nullptr, kMouseMenu},
     {Row::Option, nullptr, kMouseCamera},
     {Row::Option, nullptr, kMouseSens},
@@ -376,7 +461,7 @@ const Row g_rows[] = {
     // The private server's account. No passwords: link this PC to
     // the account signed into on the website with Discord, or make one held
     // by this PC with a recovery code. The token is kept in the options file.
-    {Row::Header, "ONLINE & ACCOUNT"},
+    {Row::Header, "ONLINE"},
     {Row::Info, nullptr, -1, 0},
     {Row::Info, nullptr, -1, 1},
     {Row::Action, "Link with Discord", -1, 0},
@@ -462,9 +547,8 @@ const char* section_name(int s) {
             n += start ? ch : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             start = ch == ' ';
         }
-        if (n == "Camera & controls") n = "Camera & Controls";
-        if (n == "Online & account") n = "Online";
-        if (n == "Graphics & effects") n = "Graphics";
+        if (n == "Fps counter") n = "FPS Counter";
+        if (n == "Hdr") n = "HDR";
     }
     return n.c_str();
 }
@@ -872,6 +956,31 @@ void rebuild_settings() {
     h.vsync = index_of(kVsync) == 0;
     h.frame_cap = fps_from_label(g_set[kFrameCap].values[static_cast<std::size_t>(index_of(kFrameCap))]);
     h.fps_counter = on_of(kFpsCounter);
+    h.fps_position = index_of(kFpsPosition);
+    h.fps_scale = 0.75f + 0.25f * static_cast<float>(index_of(kFpsSize));
+    {
+        static constexpr std::uint32_t kColours[] = {0xffffffu, 0xffd54au, 0x7cfc8au, 0x6fe3ffu, 0xff5a5au, 0xffa040u, 0xff8ad8u, 0x000000u};
+        static constexpr std::uint32_t kBacks[] = {0x0f0f0fu, 0x000000u, 0x3a0a0au, 0x0a1a3au, 0xffffffu};
+        h.fps_colour = kColours[std::clamp(index_of(kFpsColour), 0, 7)];
+        h.fps_background = kBacks[std::clamp(index_of(kFpsBackground), 0, 4)];
+    }
+    h.fps_opacity = 0.1f * static_cast<float>(index_of(kFpsOpacity) + 1);
+    h.fps_background_opacity = 0.1f * static_cast<float>(index_of(kFpsBackgroundOpacity));
+    h.fps_border = on_of(kFpsBorder);
+    h.fps_show_rate = on_of(kFpsShowRate);
+    h.fps_show_frame_time = on_of(kFpsShowFrameTime);
+    h.fps_show_upscaler = on_of(kFpsShowUpscaler);
+    h.fps_show_cpu = on_of(kFpsShowCpu);
+    h.fps_show_gpu = on_of(kFpsShowGpu);
+    h.brightness = 1.0f + 0.1f * static_cast<float>(index_of(kBrightness) - 5);
+    h.contrast = 1.0f + 0.08f * static_cast<float>(index_of(kContrast) - 5);
+    h.hue_degrees = static_cast<float>(-180 + 15 * index_of(kHue));
+    h.hdr = on_of(kHdr);
+    h.hdr_paper_white = static_cast<float>(80 + 20 * index_of(kHdrPaperWhite));
+    h.hdr_peak_auto = on_of(kHdrPeakAuto);
+    h.hdr_peak = std::strtof(g_set[kHdrPeak].values[static_cast<std::size_t>(index_of(kHdrPeak))], nullptr);
+    h.hdr_boost = 0.25f * static_cast<float>(index_of(kHdrBoost));
+    h.menu_key = index_of(kMenuKey);
     {
         // BBHOST_RES=WxH still wins, so an A/B run started with one behaves
         // the way its command line says.
@@ -1222,7 +1331,10 @@ void host_options_set_open(bool open) {
 
 bool host_options_key(int scancode, bool repeat) {
 #if defined(BBHOST_HAVE_SDL3)
-    if (scancode == SDL_SCANCODE_F10) {
+    // F10 always; the Menu key setting adds Insert, Home or F1.
+    static constexpr int kMenuKeys[] = {SDL_SCANCODE_F10, SDL_SCANCODE_INSERT, SDL_SCANCODE_HOME, SDL_SCANCODE_F1};
+    const int extra = kMenuKeys[std::clamp(g_set[kMenuKey].index, 0, 3)];
+    if (scancode == SDL_SCANCODE_F10 || (scancode == extra && g_edit_field < 0)) {
         if (!repeat) {
             host_options_set_open(!host_options_open());
         }

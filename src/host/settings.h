@@ -22,6 +22,21 @@ struct HostSettings {
     bool vsync = true;
     int frame_cap = 30;   // the game's frame rate (engine/frame_rate.h): 30, 60, 90, 120; 0 is uncapped
     bool fps_counter = false;
+    int fps_position = 0;            // 0 top right, 1 top left, 2 bottom right, 3 bottom left, 4 top centre
+    float fps_scale = 1.0f;          // 0.75 .. 2.0
+    std::uint32_t fps_colour = 0xffffffu, fps_background = 0x0f0f0fu;  // 0xRRGGBB
+    float fps_opacity = 1.0f, fps_background_opacity = 0.6f;
+    bool fps_border = false;
+    bool fps_show_rate = true, fps_show_frame_time = false, fps_show_upscaler = false, fps_show_cpu = false, fps_show_gpu = true;
+    // The picture's grade at the presenter: 1, 1, 0 are the game's own.
+    float brightness = 1.0f, contrast = 1.0f, hue_degrees = 0.0f;
+    // HDR output (read at the start; the levels live).
+    bool hdr = false;
+    float hdr_paper_white = 200.0f;  // nits
+    bool hdr_peak_auto = true;
+    float hdr_peak = 1000.0f;        // nits, when not from the display
+    float hdr_boost = 0.25f;         // 0..1: the share of the room above paper white the highlights use
+    int menu_key = 0;                // 0 F10, 1 Insert, 2 Home, 3 F1 (F10 always works)
     int res_width = 1920, res_height = 1080;  // the render resolution (BBHOST_RES wins)
 
     // Camera: multipliers on LockCamParam's values (engine/camera.cpp)

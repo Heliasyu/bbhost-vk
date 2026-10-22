@@ -44,8 +44,20 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <filesystem>
 #include <string>
 #include <thread>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <sys/resource.h>
+#endif
 #include <unordered_map>
 #include <vector>
 
@@ -335,6 +347,9 @@ struct Presenter {
     VkFence acquire_fence = VK_NULL_HANDLE;
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
     bool latest_ready = false;  // the device has FIFO_LATEST_READY enabled (gpu.cpp)
+    bool hdr_metadata = false;  // VK_EXT_hdr_metadata is on (gpu.cpp)
+    bool hdr = false;           // the swapchain is HDR10 (BT.2020, PQ): the present pass encodes into it
+    float hdr_display_peak = 0.0f;  // nits, from the display's EDID; 0 when it says none
     bool gpu_wait = false;      // sleep on the frame's fence before presenting (present_gpu_wait_default)
     std::mutex mu;
     bool ok = false;
@@ -481,6 +496,69 @@ bool surface_size_changed() {
     return changed;
 }
 
+// HDR output: the peak brightness the display reports, from its EDID's HDR
+// static metadata (CTA-861.3: desired content max luminance, 50 * 2^(CV/32)
+// nits) - the connector named like SDL's display, else the only one that has
+// such a block. 0 when there is none to read.
+float display_peak_nits(const char* sdl_name) {
+#if defined(__linux__)
+    namespace fs = std::filesystem;
+    const auto peak_of = [](const fs::path& edid) -> float {
+        std::FILE* f = std::fopen(edid.string().c_str(), "rb");
+        if (!f) return 0.0f;
+        std::vector<std::uint8_t> d(4096);
+        d.resize(std::fread(d.data(), 1, d.size(), f));
+        std::fclose(f);
+        for (std::size_t blk = 128; blk + 128 <= d.size(); blk += 128) {
+            if (d[blk] != 0x02) continue;  // a CTA extension
+            const std::size_t end = blk + std::min<std::size_t>(d[blk + 2] ? d[blk + 2] : 127, 127);
+            for (std::size_t i = blk + 4; i < end;) {
+                const unsigned tag = d[i] >> 5, len = d[i] & 31u;
+                if (tag == 7 && len >= 4 && i + len < d.size() && d[i + 1] == 6) {
+                    const unsigned cv = d[i + 4];
+                    if (cv) return 50.0f * std::exp2(static_cast<float>(cv) / 32.0f);
+                }
+                i += 1 + len;
+            }
+        }
+        return 0.0f;
+    };
+    std::error_code ec;
+    float only = 0.0f;
+    int found = 0;
+    for (const auto& e : fs::directory_iterator("/sys/class/drm", ec)) {
+        const std::string n = e.path().filename().string();
+        const auto dash = n.find('-');
+        if (n.rfind("card", 0) != 0 || dash == std::string::npos) continue;
+        const float p = peak_of(e.path() / "edid");
+        if (sdl_name && *sdl_name && n.substr(dash + 1) == sdl_name && p > 0.0f) return p;
+        if (p > 0.0f) { only = p; ++found; }
+    }
+    return found == 1 ? only : 0.0f;
+#else
+    (void)sdl_name;
+    return 0.0f;
+#endif
+}
+
+// The display's HDR levels as the game will use them (VK_EXT_hdr_metadata):
+// the peak as the mastering maximum and MaxCLL, paper white as MaxFALL.
+void set_hdr_metadata(float peak, float paper) {
+    if (!g_vk.hdr || !g_vk.hdr_metadata || !g_vk.swapchain) return;
+    static const auto set = reinterpret_cast<PFN_vkSetHdrMetadataEXT>(vkGetDeviceProcAddr(g_vk.device, "vkSetHdrMetadataEXT"));
+    if (!set) return;
+    VkHdrMetadataEXT md{VK_STRUCTURE_TYPE_HDR_METADATA_EXT};
+    md.displayPrimaryRed = {0.708f, 0.292f};
+    md.displayPrimaryGreen = {0.170f, 0.797f};
+    md.displayPrimaryBlue = {0.131f, 0.046f};
+    md.whitePoint = {0.3127f, 0.3290f};
+    md.maxLuminance = peak;
+    md.minLuminance = 0.0f;
+    md.maxContentLightLevel = peak;
+    md.maxFrameAverageLightLevel = paper;
+    set(g_vk.device, 1, &g_vk.swapchain, &md);
+}
+
 bool vk_create_swapchain() {
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps);
@@ -504,6 +582,34 @@ bool vk_create_swapchain() {
     for (const auto& f : fmts) {
         if (f.format == wanted && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             g_vk.format = f.format;
+        }
+    }
+    // HDR output (the HDR setting, read at the start): a 10-bit HDR10 swapchain
+    // where the surface offers one - the desktop's HDR is on for this display.
+    VkColorSpaceKHR colour_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    g_vk.hdr = false;
+    {
+        static const bool want_hdr = [] {
+            const char* e = std::getenv("BBHOST_HDR");
+            if (e && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
+            return host_settings().hdr;
+        }();
+        if (want_hdr) {
+            for (const auto& f : fmts)
+                if (f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+                    (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) {
+                    g_vk.format = f.format;
+                    colour_space = f.colorSpace;
+                    g_vk.hdr = true;
+                    break;
+                }
+            static bool said = false;
+            if (!said) {
+                said = true;
+                host_log(g_vk.hdr ? "present: HDR output - HDR10 (BT.2020, PQ), the SDR frame's white at paper white"
+                                  : "present: HDR output asked for, but this display's surface offers no HDR10 swapchain "
+                                    "(turn HDR on for the display in the desktop's settings); SDR");
+            }
         }
     }
     g_vk.extent = caps.currentExtent;
@@ -530,7 +636,7 @@ bool vk_create_swapchain() {
     if (caps.maxImageCount) images = std::min(images, caps.maxImageCount);
     sci.minImageCount = images;
     sci.imageFormat = g_vk.format;
-    sci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    sci.imageColorSpace = colour_space;
     sci.imageExtent = g_vk.extent;
     sci.imageArrayLayers = 1;
     sci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -570,6 +676,17 @@ bool vk_create_swapchain() {
     }
     [[maybe_unused]] const std::string modules_after = host_graphics_modules();
     g_vk.mode = sci.presentMode;
+    if (g_vk.hdr) {
+        const char* name = nullptr;
+        if (const SDL_DisplayID id = SDL_GetDisplayForWindow(g_window)) name = SDL_GetDisplayName(id);
+        g_vk.hdr_display_peak = display_peak_nits(name);
+        const HostSettings hs = host_settings();
+        const float peak = hs.hdr_peak_auto && g_vk.hdr_display_peak > 0.0f ? g_vk.hdr_display_peak : hs.hdr_peak;
+        host_log("present: HDR - the display (%s) reports a peak of %.0f nits%s; paper white %.0f, peak used %.0f",
+                 name ? name : "?", static_cast<double>(g_vk.hdr_display_peak), g_vk.hdr_display_peak > 0.0f ? "" : " (none: the setting's)",
+                 static_cast<double>(hs.hdr_paper_white), static_cast<double>(peak));
+        set_hdr_metadata(peak, hs.hdr_paper_white);
+    }
     if (old) {
         vkDestroySwapchainKHR(g_vk.device, old, nullptr);
         host_log("present: swapchain %ux%u", g_vk.extent.width, g_vk.extent.height);
@@ -665,6 +782,7 @@ bool vk_start() {
     g_vk.present_queue = static_cast<VkQueue>(h.present_queue);
     g_vk.family = h.family;
     g_vk.latest_ready = h.fifo_latest_ready;
+    g_vk.hdr_metadata = h.hdr_metadata;
     if (!SDL_Vulkan_CreateSurface(g_window, g_vk.instance, nullptr, &g_vk.surface)) {
         host_log("vulkan: surface creation failed: %s", SDL_GetError());
         return false;
@@ -1129,6 +1247,20 @@ void vk_present(int buffer_index, std::uint64_t display_va, unsigned display_w, 
             src.h = src_h && src.y + src_h <= ih ? src_h : ih - src.y;
             magnified = src.w <= shown.extent.width && src.h <= shown.extent.height &&
                         (src.w < shown.extent.width || src.h < shown.extent.height);
+        }
+        // HDR output encodes in the pass: a magnified picture (FSR 1's compute
+        // into the swapchain image) is drawn by the pass too, scaled linearly.
+        if (g_vk.hdr) magnified = false;
+        {
+            const HostSettings hs = host_settings();
+            present_pass_set_grade(hs.brightness, hs.contrast, hs.hue_degrees);
+            const float peak = hs.hdr_peak_auto && g_vk.hdr_display_peak > 0.0f ? g_vk.hdr_display_peak : hs.hdr_peak;
+            present_pass_set_hdr(g_vk.hdr, hs.hdr_paper_white, peak, hs.hdr_boost);
+            static std::uint64_t md_serial = 0;
+            if (g_vk.hdr && hs.serial != md_serial) {
+                md_serial = hs.serial;
+                set_hdr_metadata(peak, hs.hdr_paper_white);
+            }
         }
         if (!magnified) {
             // Dark red (cycling with the buffer index) when the renderer has
@@ -2277,21 +2409,80 @@ bool host_window_pump() {
                 busy_at[0] = now;
             }
         }
-        float dw = 0.0f;
+        // The process's CPU time over the same refresh: of every core, as a
+        // share of the whole machine (100% is every core busy).
+        static int cpu_pct = -1;
+        {
+            static double cpu_was = -1.0;
+            static std::chrono::steady_clock::time_point cpu_at;
+            static std::chrono::steady_clock::time_point cpu_refresh;
+            if (now - cpu_refresh >= std::chrono::milliseconds(500)) {
+                cpu_refresh = now;
+#if defined(_WIN32)
+                FILETIME c0, e0, k0, u0;
+                if (GetProcessTimes(GetCurrentProcess(), &c0, &e0, &k0, &u0)) {
+                    const auto ft = [](const FILETIME& f) { return static_cast<double>((static_cast<std::uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime) / 1e7; };
+                    const double t = ft(k0) + ft(u0);
+#else
+                struct rusage ru{};
+                if (getrusage(RUSAGE_SELF, &ru) == 0) {
+                    const double t = static_cast<double>(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) +
+                                     static_cast<double>(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1e6;
+#endif
+                    if (cpu_was >= 0.0) {
+                        const double wall = std::chrono::duration<double>(now - cpu_at).count();
+                        const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+                        if (wall > 0.0) cpu_pct = static_cast<int>(std::lround(std::clamp((t - cpu_was) / wall / cores * 100.0, 0.0, 100.0)));
+                    }
+                    cpu_was = t;
+                    cpu_at = now;
+                }
+            }
+        }
+        float dw = 0.0f, dh = 0.0f;
         {
             std::lock_guard<std::mutex> ml(g_mouse_mu);
             dw = g_display_w ? static_cast<float>(g_display_w) : 1920.0f;
+            dh = g_display_h ? static_cast<float>(g_display_h) : 1080.0f;
         }
-        char text[48];
-        if (gpu_pct >= 0) {
-            std::snprintf(text, sizeof(text), "%d FPS  GPU %d%%", shown, gpu_pct);
-        } else {
-            std::snprintf(text, sizeof(text), "%d FPS", shown);
+        const HostSettings fs = host_settings();
+        std::string text;
+        const auto add = [&](const std::string& part) {
+            if (!text.empty()) text += "  ";
+            text += part;
+        };
+        char buf[64];
+        if (fs.fps_show_rate) { std::snprintf(buf, sizeof(buf), "%d FPS", shown); add(buf); }
+        if (fs.fps_show_frame_time && shown > 0) { std::snprintf(buf, sizeof(buf), "%.1f ms", 1000.0 / shown); add(buf); }
+        if (fs.fps_show_upscaler) {
+            static const char* const kUp[] = {"Native", "FSR 1", "FSR 3.1", "FSR 4.1.1"};
+            static const char* const kQ[] = {"Native AA", "Quality", "Balanced", "Performance", "Ultra Perf."};
+            const int u = std::clamp(fs.upscaler, 0, 3), q = std::clamp(fs.upscale_quality, 0, 4);
+            add(u >= 2 ? std::string(kUp[u]) + " " + kQ[q] : kUp[u]);
         }
-        const float scale = 0.8f, w = host_overlay_text_width(scale, text);
-        const float x = dw - w - 20.0f, y = 14.0f;
-        host_overlay_rect(x - 8.0f, y - 4.0f, w + 16.0f, 24.0f * scale + 8.0f, 0x000000a0u);
-        host_overlay_text(x, y, scale, 0xe6e6e6ffu, text);
+        if (fs.fps_show_cpu && cpu_pct >= 0) { std::snprintf(buf, sizeof(buf), "CPU %d%%", cpu_pct); add(buf); }
+        if (fs.fps_show_gpu && gpu_pct >= 0) { std::snprintf(buf, sizeof(buf), "GPU %d%%", gpu_pct); add(buf); }
+        if (!text.empty()) {
+            const float scale = 0.8f * fs.fps_scale, w = host_overlay_text_width(scale, text.c_str()), th = 24.0f * scale;
+            const float pad = 8.0f * fs.fps_scale, margin = 14.0f;
+            float x = dw - w - margin - pad, y = margin;
+            switch (fs.fps_position) {
+                case 1: x = margin + pad; break;                              // top left
+                case 2: y = dh - th - margin - pad; break;                    // bottom right
+                case 3: x = margin + pad; y = dh - th - margin - pad; break;  // bottom left
+                case 4: x = (dw - w) * 0.5f; break;                           // top centre
+                default: break;
+            }
+            const auto alpha = [](float a) { return static_cast<std::uint32_t>(std::lround(std::clamp(a, 0.0f, 1.0f) * 255.0f)); };
+            if (fs.fps_background_opacity > 0.0f)
+                host_overlay_round_rect(x - pad, y - pad * 0.6f, w + 2.0f * pad, th + 1.2f * pad, 6.0f * fs.fps_scale,
+                                        (fs.fps_background << 8) | alpha(fs.fps_background_opacity),
+                                        (fs.fps_background << 8) | alpha(fs.fps_background_opacity));
+            if (fs.fps_border)
+                host_overlay_round_frame(x - pad, y - pad * 0.6f, w + 2.0f * pad, th + 1.2f * pad, 6.0f * fs.fps_scale, 1.0f,
+                                         (fs.fps_colour << 8) | alpha(fs.fps_opacity * 0.6f), (fs.fps_colour << 8) | alpha(fs.fps_opacity * 0.6f));
+            host_overlay_text(x, y, scale, (fs.fps_colour << 8) | alpha(fs.fps_opacity), text.c_str());
+        }
     }
     // bbhost-vk (debug_upscaler_time): the presenter's passes on the GPU,
     // under the FPS counter (host/gpu_timer.h; also in the log every 300
