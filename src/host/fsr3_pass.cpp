@@ -25,6 +25,7 @@
 #include "hle/modules.h"
 #include "host/fsr3_upscaler.h"
 #include "host/fsr4_pass.h"
+#include "host/fsr4v07_pass.h"
 #include "host/fsr_dump.h"
 #include "host/pass_timer.h"
 #include "host/gpu_internal.h"
@@ -84,6 +85,7 @@ temporal::Fsr3History g_history;
 std::uint64_t g_last_frame = ~0ull;  // the flip last dispatched (a second scale pass in it copies again)
 Fallback g_last_fallback = Fallback::kCount;
 bool g_fsr4_off = false;  // FSR 4.1.1 cannot run in this session (assets, device): FSR 3.1
+bool g_fsr4v07_off = false;  // nor FSR 4 (INT8 v07, host/fsr4v07_pass.h)
 temporal::Fsr3History g_history4;
 std::uint64_t g_last_frame4 = ~0ull;
 VkImage g_last_out4 = VK_NULL_HANDLE;
@@ -274,8 +276,11 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
     const temporal::Fsr3Sizes sizes{in.render_w, in.render_h, out.w, out.h};
     if (!temporal::fsr3_sizes_ok(sizes) || in.color.width < in.render_w || in.color.height < in.render_h) return fall_back(Fallback::Sizes);
     if (target->format != VK_FORMAT_R16G16B16A16_SFLOAT && !blit_ok(target->format)) return fall_back(Fallback::Format);
-    // FSR 4.1.1 (host/fsr4_pass.h), replayed from the user's DLL; FSR 3.1 below when it cannot.
-    if (hs.upscaler == upscaler::kFsr411 && !g_fsr4_off) {
+    // FSR 4.1.1 (host/fsr4_pass.h), replayed from the user's DLL, or FSR 4
+    // (host/fsr4v07_pass.h), AMD's INT8 model; FSR 3.1 below when they cannot.
+    const bool v07 = hs.upscaler == upscaler::kFsr4;
+    const char* const name4 = v07 ? "FSR 4" : "FSR 4.1.1";
+    if ((hs.upscaler == upscaler::kFsr411 && !g_fsr4_off) || (v07 && !g_fsr4v07_off)) {
         begin_recording_locked();
         render_end_pass_locked();
         VkCommandBuffer cmd4 = g_cmd();
@@ -297,7 +302,7 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
         p4.sharpen = sh4.enable;
         p4.sharpness = sh4.sharpness;
         p4.ultra_performance = hs.upscale_quality >= 4;
-        const bool dump4 = dump_begin_locked(in, *target, out, "FSR 4.1.1", p4.reset);
+        const bool dump4 = dump_begin_locked(in, *target, out, name4, p4.reset);
         // test5: as FSR 3.1 since test4, straight into the target when it took STORAGE (test4: copy 0.26 ms).
         const bool direct4 = target->view && temporal::direct_output_ok(target->upscaler_storage, static_cast<int>(target->format), target->width,
                                                                         target->height, out, out.w, out.h, dump4);
@@ -309,7 +314,8 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
         VkImage out4 = VK_NULL_HANDLE;
         bool fatal = false;
         std::string why4;
-        const bool ok4 = fsr4_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4);
+        const bool ok4 = v07 ? fsr4v07_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4)
+                             : fsr4_record_locked(cmd4, in, out.w, out.h, p4, &out4, &fatal, &why4);
         pass_timer_end_locked(cmd4, slot4);
         if (ok4) {
             if (p4.reset) ++g_window.resets;
@@ -320,8 +326,8 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
                 static bool said = false;
                 if (!said) {
                     said = true;
-                    host_log("fsr4: FSR 4.1.1 writes the scale pass's %ux%u target directly (no copy; BBHOST_FSR_DIRECT_TARGET=0: the copy)",
-                             target->width, target->height);
+                    host_log("fsr4: %s writes the scale pass's %ux%u target directly (no copy; BBHOST_FSR_DIRECT_TARGET=0: the copy)",
+                             name4, target->width, target->height);
                 }
             } else {
                 const std::int32_t copy4 = pass_timer_begin_locked(cmd4, TimedPass::Copy);
@@ -335,9 +341,9 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
             ++g_window.dispatches;
             ++g_window.fsr4;
             pass_timer_upscaler_is_fsr4(true);
-            if (const std::string d = fsr4_describe_locked(); d != g_fsr4_described) {
+            if (const std::string d = v07 ? fsr4v07_describe_locked() : fsr4_describe_locked(); d != g_fsr4_described) {
                 g_fsr4_described = d;
-                host_log("fsr4: FSR 4.1.1 replay, %s (scene %ux%u -> %ux%u)", d.c_str(), in.render_w, in.render_h, out.w, out.h);
+                host_log("fsr4: %s, %s (scene %ux%u -> %ux%u)", v07 ? "FSR 4 (INT8 v07)" : "FSR 4.1.1 replay", d.c_str(), in.render_w, in.render_h, out.w, out.h);
             }
             g_last_fallback = Fallback::None;
             // test6: the 3000-frame summary for FSR 4.1.1 too (test5 had none,
@@ -351,8 +357,11 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
         if (dump4) fsr_dump_finish_locked(in.frame);  // the inputs at least
         g_history4 = {};
         if (fatal) {
-            g_fsr4_off = true;
-            host_opt_fsr4_unavailable();  // anti_alias Auto: the game's AA back on
+            if (v07) g_fsr4v07_off = true;
+            else {
+                g_fsr4_off = true;
+                host_opt_fsr4_unavailable();  // anti_alias Auto: the game's AA back on
+            }
             host_log("fsr4: %s: FSR 3.1 upscales instead", why4.c_str());
         } else {
             static int said = 0;

@@ -119,6 +119,7 @@ public static class Pages
             Ui.Tip(QuickRow("Quality", Ui.Segmented(OptionSchema.Quality.Values, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); },
                 label: v => v switch { "Native AA" => "Native", "Performance" => "Perf.", "Ultra Performance" => "Ultra", _ => v }, fontSize: 12)), OptionSchema.Tips["upscale_quality"]));
         if (upscaler == "FSR 4.1.1") quick.Children.Add(Fsr4Note(ctx, compact: true));
+        if (upscaler == "FSR 4") quick.Children.Add(Fsr4V07Note(ctx, compact: true));
         var hunt = Ui.Glass(Ui.Col(14, Ui.Eyebrow("This hunt"), facts, quick), 22);
 
         var trophies = Trophies.Load(cfg.DataDir);
@@ -212,7 +213,7 @@ public static class Pages
     {
         var p = res.Split('x');
         if (p.Length != 2 || !int.TryParse(p[0], out var w) || !int.TryParse(p[1], out var h)) return res;
-        var s = upscaler is "FSR 3.1" or "FSR 4.1.1" ? OptionSchema.ScaleOf(quality) : 1.0;  // Native TAA: the full size
+        var s = upscaler is "FSR 3.1" or "FSR 4.1.1" or "FSR 4" ? OptionSchema.ScaleOf(quality) : 1.0;  // Native TAA: the full size
         return $"{(int)Math.Round(w / s)}×{(int)Math.Round(h / s)}";
     }
 
@@ -406,13 +407,16 @@ public static class Pages
             Ui.Text("Built once from your own copy of AMD's DLL with build-fsr4.sh in the release folder. Nothing from AMD ships with Helia's Dream.", 13, "soft"),
             Ui.Well(Ui.Col(4, Ui.Text("Assets", 12, "muted"), Ui.Text(built ? Paths.Fsr4Assets : "Not found", 13, null, FontWeight.SemiBold))),
             Fsr4Note(ctx, compact: false)), 22);
+        var fsr4v07 = Ui.Glass(Ui.Col(14, Ui.Text("FSR 4", 16, null, FontWeight.SemiBold),
+            Ui.Text("AMD's FSR 4 INT8 model, from the source AMD published under MIT, as SPIR-V that FireBurn's Q2RTX port builds from it. Downloaded once; nothing from AMD ships with Helia's Dream.", 13, "soft"),
+            Fsr4V07Note(ctx, compact: false)), 22);
 
         var what = Ui.Glass(Ui.Col(14, Ui.Text("What you get", 16, null, FontWeight.SemiBold),
             Ui.Text("The HUD and menus always render at the full resolution; only the 3D scene is upscaled.", 13, "soft")), 22);
 
         var g = new Grid { ColumnDefinitions = new ColumnDefinitions("1.3*,*"), ColumnSpacing = 18 };
         g.Children.Add(left);
-        var right = Ui.Col(18, fsr, what);
+        var right = Ui.Col(18, fsr, fsr4v07, what);
         Grid.SetColumn(right, 1); g.Children.Add(right);
         return g;
     }
@@ -565,6 +569,27 @@ public static class Pages
         var t = Ui.Col(2, Ui.Text(title, 14, null, FontWeight.Medium), Ui.Text(help, 12, "muted"));
         Grid.SetColumn(t, 1); g.Children.Add(t);
         return Ui.Well(g);
+    }
+
+    // FSR 4's assets (Core/Fsr4Assets.cs): there or not, and the download, its lines on the
+    // Console page.
+    static Control Fsr4V07Note(Ctx ctx, bool compact)
+    {
+        bool have = Fsr4Assets.Present;
+        var note = Ui.Text(have ? "FSR 4's shaders are downloaded." + (compact ? "" : $" ({Fsr4Assets.Dir})")
+                                : "FSR 4 needs its shaders downloaded once (about 33 MB, MIT-licensed, from FireBurn's Q2RTX). Until then it runs as FSR 3.1.", 12, have ? "muted" : "soft");
+        var go = Ui.Ghost(have ? "Check again" : "Download", () =>
+        {
+            ctx.Console.RunTask("Downloading FSR 4", (say, ct) => Fsr4Assets.Download(say, ct),
+                ok => ctx.Console.Add(ok ? "FSR 4 is ready from the next start of the game: choose it as the upscaler." : "The download did not finish; try again (it resumes)."));
+            ctx.GoTo(ConsolePage);
+        });
+        Ui.Tip(go, "Downloads the FSR 4 INT8 model's shaders and weights (AMD's MIT-licensed FSR 4 source, built to SPIR-V by FireBurn's Q2RTX port) into " + Fsr4Assets.Dir + ". The game picks them up when it next starts. Runs on any GPU with INT8 dot products: Radeon RX 6000 or newer, GeForce RTX 20 or newer, Intel Arc.");
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 14 };
+        g.Children.Add(note);
+        go.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(go, 1); g.Children.Add(go);
+        return compact ? Ui.Well(g) : g;
     }
 
     // FSR 4.1.1's assets: whether they are built, what the GPU makes of it, and the build

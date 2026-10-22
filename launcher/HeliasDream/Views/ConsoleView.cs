@@ -145,6 +145,19 @@ public sealed class ConsoleView : Grid
         p.BeginErrorReadLine();
     }
 
+    /// Runs work of the launcher's own (a download) with its lines here.
+    public async void RunTask(string title, Func<Action<string>, System.Threading.CancellationToken, System.Threading.Tasks.Task<bool>> work, Action<bool> done)
+    {
+        var cts = new System.Threading.CancellationTokenSource();
+        Begin(title, null, () => cts.Cancel());
+        bool ok;
+        try { ok = await work(Add, cts.Token); }
+        catch (OperationCanceledException) { Add("Stopped."); ok = false; }
+        catch (Exception e) { Add(e.Message); ok = false; }
+        End(ok ? "Finished" : "Did not finish");
+        done(ok);
+    }
+
     void Drain()
     {
         while (_incoming.TryDequeue(out var l))

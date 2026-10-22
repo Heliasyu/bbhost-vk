@@ -4,6 +4,7 @@
 #include "host/foreign_hooks.h"
 #include "host/gpu_internal.h"
 #include "host/fsr4_pass.h"
+#include "host/fsr4v07_pass.h"
 #include "host/perf_capture.h"
 #include "host/settings.h"
 #include "host/shader_patch.h"
@@ -2580,6 +2581,8 @@ bool init_locked() {
     occlusion_device_features(f2.features, dext, &f13.pNext);  // precise queries, conditional rendering
     // bbhost-vk Phase 4: FSR 4.1.1's extensions, only with its assets built (host/fsr4_pass.h).
     fsr4_device_features(f2.features, f12, f13, dext, &f13.pNext);
+    // Helia's Dream: FSR 4 (INT8 v07), only with its assets downloaded (host/fsr4v07_pass.h).
+    fsr4v07_device_features(f2.features, f12, f13, &f13.pNext);
     // DB_DEPTH_CONTROL bit 3: the deferred lights cull by depth range.
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(g.phys, &supported);

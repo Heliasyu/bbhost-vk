@@ -350,7 +350,7 @@ void temporal_frame_locked(std::uint64_t flip) {
         const char* e = std::getenv("BBHOST_FSR4_REACTIVE");
         return e && e[0] == '1';
     }();
-    const bool fsr4_only = hs.upscaler == upscaler::kFsr411 && !fsr4_reactive && !fsr4_replay_unavailable();
+    const bool fsr4_only = ((hs.upscaler == upscaler::kFsr411 && !fsr4_replay_unavailable()) || hs.upscaler == upscaler::kFsr4) && !fsr4_reactive;
     g_cfg.opaque = !no_opaque && g_cfg.temporal && !fsr4_only;
     g_cfg.reactive = g_cfg.opaque && hs.upscale_reactive && !no_reactive;
     scene_split_render_size(&g_cfg.render_w, &g_cfg.render_h);

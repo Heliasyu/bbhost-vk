@@ -2570,10 +2570,10 @@ bool host_window_pump() {
         if (fs.fps_show_rate) { std::snprintf(buf, sizeof(buf), "%d FPS", shown); add(buf); }
         if (fs.fps_show_frame_time && shown > 0) { std::snprintf(buf, sizeof(buf), "%.1f ms", 1000.0 / shown); add(buf); }
         if (fs.fps_show_upscaler) {
-            static const char* const kUp[] = {"Native", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA"};
+            static const char* const kUp[] = {"Native", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA", "FSR 4"};
             static const char* const kQ[] = {"Native AA", "Quality", "Balanced", "Performance", "Ultra Perf."};
-            const int u = std::clamp(fs.upscaler, 0, 4), q = std::clamp(fs.upscale_quality, 0, 4);
-            add(u == 2 || u == 3 ? std::string(kUp[u]) + " " + kQ[q] : kUp[u]);
+            const int u = std::clamp(fs.upscaler, 0, 5), q = std::clamp(fs.upscale_quality, 0, 4);
+            add(u == 2 || u == 3 || u == 5 ? std::string(kUp[u]) + " " + kQ[q] : kUp[u]);
         }
         if (fs.fps_show_cpu && cpu_pct >= 0) { std::snprintf(buf, sizeof(buf), "CPU %d%%", cpu_pct); add(buf); }
         if (fs.fps_show_gpu && gpu_pct >= 0) { std::snprintf(buf, sizeof(buf), "GPU %d%%", gpu_pct); add(buf); }

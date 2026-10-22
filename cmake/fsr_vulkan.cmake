@@ -29,7 +29,10 @@ if(BBHOST_FSR_VULKAN AND Vulkan_FOUND)
   set(FFX_VK_PORTABLE_BUILD_FSR3_HOST ON CACHE BOOL "" FORCE)
   set(FFX_VK_PORTABLE_BUILD_FSR3_VK_BACKEND ON CACHE BOOL "" FORCE)
   set(FFX_VK_PORTABLE_BUILD_FSR3_3_1_5_SCAFFOLD ON CACHE BOOL "" FORCE)
-  set(FFX_VK_PORTABLE_BUILD_FSR4_V07_VULKAN OFF CACHE BOOL "" FORCE)
+  # Helia's Dream: the FSR 4 INT8 (v07) provider, AMD's MIT FSR 4 source - its
+  # shaders and weights are not built here: the player downloads them
+  # (host/fsr4v07_pass.h).
+  set(FFX_VK_PORTABLE_BUILD_FSR4_V07_VULKAN ON CACHE BOOL "" FORCE)
   set(FFX_VK_PORTABLE_INSTALL OFF CACHE BOOL "" FORCE)
   set(FFX_VK_PORTABLE_INSTALL_FSR4_V07_ASSETS OFF CACHE BOOL "" FORCE)
   # Its static libraries go into a position-independent executable.
@@ -38,7 +41,7 @@ if(BBHOST_FSR_VULKAN AND Vulkan_FOUND)
   # Its own -Wall -Wextra -Wpedantic would drown bbhost's build log; it is
   # third-party code, built as it ships.
   foreach(t ffx_vulkan_portable ffx_vulkan_fsr3_host_1_1_4 ffx_vulkan_fsr3_vk_backend_1_1_4
-            ffx_vulkan_fsr3_host_3_1_5_scaffold ffx_vulkan_fsr3_vk_backend_3_1_5)
+            ffx_vulkan_fsr3_host_3_1_5_scaffold ffx_vulkan_fsr3_vk_backend_3_1_5 ffx_vulkan_fsr4_v07_vulkan ffx_vulkan_fsr4_v07_assets)
     if(TARGET ${t})
       target_compile_options(${t} PRIVATE -w)
     endif()
@@ -87,6 +90,10 @@ if(BBHOST_FSR_VULKAN AND Vulkan_FOUND)
   set_source_files_properties(src/host/fsr3_upscaler.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
   target_compile_definitions(bbhost PRIVATE BBHOST_HAVE_FSR_VULKAN=1)
   target_link_libraries(bbhost PRIVATE ffx-vulkan::portable ffx-vulkan::fsr3-vk-backend-3.1.5)
+  if(TARGET ffx_vulkan_fsr4_v07_vulkan)
+    target_link_libraries(bbhost PRIVATE ffx-vulkan::fsr4-v07-vulkan)
+    target_compile_definitions(bbhost PRIVATE BBHOST_HAVE_FSR4_V07=1)
+  endif()
   message(STATUS "bbhost: FSR-Vulkan linked (FSR 3.1.5 and 3.1.4 upscalers, shader tables embedded)")
 else()
   message(STATUS "bbhost: FSR-Vulkan not linked (BBHOST_FSR_VULKAN=${BBHOST_FSR_VULKAN})")

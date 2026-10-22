@@ -414,7 +414,7 @@ public sealed class MainWindow : Window
         var o = _options;
         var parts = new List<string>();
         var up = o.Get("upscaler", "FSR 1");
-        parts.Add(up is "FSR 3.1" or "FSR 4.1.1" ? $"{up} {o.Get("upscale_quality", "Native AA")}" : up == "Native TAA" ? "Native TAA" : $"Upscaler {up}");
+        parts.Add(up is "FSR 3.1" or "FSR 4.1.1" or "FSR 4" ? $"{up} {o.Get("upscale_quality", "Native AA")}" : up == "Native TAA" ? "Native TAA" : $"Upscaler {up}");
         parts.Add(o.Get("resolution", "1920x1080").Replace("x", "×"));
         var cap = o.Get("frame_cap", "30");
         parts.Add(cap == "Uncapped" ? "Uncapped" : cap + " fps");

@@ -37,6 +37,9 @@ public static class ReadyCheck
                         : new("Decrypted eboot missing", "Needed to start the game", CheckState.Problem));
 
         var upscaler = opts.Get("upscaler", "FSR 1");
+        if (upscaler == "FSR 4")
+            items.Add(Fsr4Assets.Present ? new("FSR 4 ready", "Shaders downloaded", CheckState.Ok)
+                                         : new("FSR 4 not downloaded", "Runs as FSR 3.1 until downloaded", CheckState.Note));
         if (upscaler == "FSR 4.1.1")
         {
             bool built = Directory.Exists(Path.Combine(Paths.Fsr4Assets, "t2160_m0")) || Directory.Exists(Paths.Fsr4Assets);

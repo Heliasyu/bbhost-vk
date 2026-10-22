@@ -14,16 +14,17 @@ namespace upscaler {
 
 // kTaa (Helia's Dream): FSR 3.1 at the output's own size - AMD's Native AA
 // mode, a temporal AA with no upscale - whatever the quality preset says.
-enum Kind : int { kOff = 0, kFsr1 = 1, kFsr31 = 2, kFsr411 = 3, kTaa = 4, kKindCount = 5 };
+// kFsr4: AMD's FSR 4 INT8 model (host/fsr4v07_pass.h), assets downloaded.
+enum Kind : int { kOff = 0, kFsr1 = 1, kFsr31 = 2, kFsr411 = 3, kTaa = 4, kFsr4 = 5, kKindCount = 6 };
 
 // The temporal ones: motion vectors, jitter and FSR's pass at the scale pass.
-inline bool is_temporal(int k) { return k == kFsr31 || k == kFsr411 || k == kTaa; }
+inline bool is_temporal(int k) { return k == kFsr31 || k == kFsr411 || k == kTaa || k == kFsr4; }
 
 // AMD's quality modes: output size / render size.
 enum Preset : int { kNativeAa = 0, kQuality = 1, kBalanced = 2, kPerformance = 3, kUltraPerformance = 4, kPresetCount = 5 };
 
 inline const char* kind_name(int k) {
-    static const char* const kNames[kKindCount] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA"};
+    static const char* const kNames[kKindCount] = {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA", "FSR 4"};
     return k >= 0 && k < kKindCount ? kNames[k] : "?";
 }
 
