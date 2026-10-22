@@ -2035,8 +2035,34 @@ bool window_start_impl(int width, int height, const char* title) {
     // The options are read before the window exists, so a saved Fullscreen
     // is only a wish until here (host_window_set_fullscreen).
     const bool fullscreen = g_want_fullscreen.load();
-    g_window = SDL_CreateWindow(title, width, height,
-                                SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+    // The monitor (the launcher's Monitor setting, BBHOST_DISPLAY=<connector
+    // name, e.g. DP-1>): the window, and fullscreen, open there; the window
+    // system's choice when unset or not found.
+    SDL_DisplayID on = 0;
+    if (const char* want = std::getenv("BBHOST_DISPLAY"); want && *want) {
+        int n = 0;
+        if (SDL_DisplayID* ids = SDL_GetDisplays(&n)) {
+            for (int k = 0; k < n && !on; ++k) {
+                const char* name = SDL_GetDisplayName(ids[k]);
+                if (name && std::strstr(name, want)) on = ids[k];
+            }
+            SDL_free(ids);
+        }
+        host_log(on ? "window: on the display %s (BBHOST_DISPLAY)" : "window: no display named %s; the window system's choice", want);
+    }
+    SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
+    if (on) {
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED_DISPLAY(on));
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED_DISPLAY(on));
+    }
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen);
+    g_window = SDL_CreateWindowWithProperties(props);
+    SDL_DestroyProperties(props);
     if (g_window && fullscreen) host_log("window: fullscreen");
     if (!g_window) {
         host_log("SDL_CreateWindow failed: %s", SDL_GetError());
