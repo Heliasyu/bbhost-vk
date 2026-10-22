@@ -334,7 +334,7 @@ public static class Pages
         fps.Children.Add(Ui.Advanced("Advanced", fpsMore.ToArray()));
 
         // Language: the game's own (its text and voices from the disc's message bundles).
-        var lang = Ui.Col(8, Ui.Eyebrow("Language"), Ui.OptionRow(OptionSchema.GameLanguage, o, ctx.Changed));
+        var lang = Ui.Col(8, Ui.Eyebrow("Language"), Ui.OptionRow(OptionSchema.MenuLanguage, o, ctx.Changed), Ui.OptionRow(OptionSchema.GameLanguage, o, ctx.Changed));
 
         // HDR, with what the desktop says about the monitor.
         string? connector = string.IsNullOrEmpty(st.Monitor) ? monitors.FirstOrDefault(m => m.Primary).Name : st.Monitor;

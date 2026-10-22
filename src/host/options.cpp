@@ -307,30 +307,29 @@ Setting g_set[kSettingCount] = {
     // window (host/fsr.cpp). Phase 1: with an upscaler on, the quality renders the
     // scene smaller than the output (engine/scene_split.h).
     {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA", "FSR 4"}, 1,
-     "FSR 1 is bbhost's own. FSR 3.1 is temporal: it upscales the 3D scene from Upscaling quality's size using motion vectors (falls back to a bilinear copy if it cannot start). FSR 4.1.1 replays AMD's 4.1.1 upscaler from assets built once from your own DLL (tools/fsr4cap); without them it is FSR 3.1.",
+     "FSR 1 is simple and light. FSR 3.1 is temporal, from Upscaling quality's size. FSR 4 and FSR 4.1.1 are AMD's machine-learning upscalers, sharper; they need their assets (the launcher sets them up), else FSR 3.1 runs. Native TAA is anti-aliasing at the full resolution.",
      true},
     // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
     {"upscale_quality", "Upscaling quality",
      {"Native AA", "Quality", "Balanced", "Performance", "Ultra Performance"}, 0,
-     "Render scale for FSR 3.1 / 4.1.1: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. "
-     "The 3D scene renders at this share of the Resolution setting; menus, text and post-processing stay at the Resolution. Native AA (and Upscaler Off) is stock. "
-     "Changes live, a moment after the menu closes.",
+     "The 3D scene's share of the Resolution: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. "
+     "Menus and text stay at the Resolution. Changes live, a moment after the menu closes.",
      false},
     // 0..1 like FSR 3's sharpness; 0.8 is RCAS at 0.2 stops, what FSR 1 uses.
     {"upscale_sharpness", "Upscaling sharpness", {"0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"}, 8,
-     "How much FSR 3.1 and FSR 4.1.1 sharpen (0 turns it off). 0.8 matches FSR 1 as bbhost ships it; FSR 1 itself keeps its own sharpening.", false},
+     "How much the temporal upscalers sharpen (0 turns it off). 0.8 matches FSR 1's own.", false},
     // bbhost-vk Phase 3: the reactive mask (host/temporal_inputs.h).
     {"upscale_reactive", "Upscaler reactive mask", {"Off", "On"}, 1,
      "FSR 3.1: marks particles, fog, Blood Echoes, the lantern's glow and other transparent effects so they do not smear or ghost. Off for comparison.",
      false},
     // bbhost-vk: the scene's sub-pixel jitter (host/temporal_inputs.h), for testers.
     {"upscale_jitter", "Upscaler jitter", {"Off", "On"}, 1,
-     "FSR 3.1 / 4.1.1: the 3D scene shifts by a fraction of a pixel each frame so the upscaler can rebuild detail. Off for comparison (a softer, more aliased picture); FSR 1 and Off never jitter.",
+     "The 3D scene shifts by a fraction of a pixel each frame so a temporal upscaler can rebuild detail. Off for comparison: a softer, more aliased picture.",
      false},
     {"debug_motion_vectors", "Show motion vectors", {"Off", "On"}, 0,
-     "Debug: draws the scene's motion vectors over the picture - red/green how far a pixel moved sideways/up-down, blue where a moving object (not the camera) moved it, dark where there is no camera. Needs the scene/UI split; computes motion vectors even with no temporal upscaler.", false},
+     "Debug: draws the scene's motion vectors over the picture (red and green: sideways and up-down movement; blue: moving objects).", false},
     {"debug_upscaler_time", "Show upscaler GPU time", {"Off", "On"}, 0,
-     "Debug: the GPU time of FSR 3.1's dispatch and of the presenter's passes (the upscale, the whole present) under the FPS counter, and in the log.",
+     "Debug: the upscaler's and the presenter's GPU time under the FPS counter, and in the log.",
      false},
     // The controller (host/haptics.h).
     {"haptics", "Haptics", {"Off", "Rumble", "HD"}, 2,

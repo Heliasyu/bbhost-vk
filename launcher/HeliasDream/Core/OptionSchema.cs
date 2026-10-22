@@ -107,6 +107,7 @@ public static class OptionSchema
         ["mouse_menu"] = "In menus: click confirms, right-click goes back, the wheel moves the cursor. A click only reaches menus while one is open, so it never swings a weapon.",
         ["pad_icons"] = "The button icons the game's prompts show while you play with a controller. Auto: the game's own PlayStation icons with a PlayStation controller, and the Xbox buttons by name ([A], [RB], D-pad Up) with an Xbox or any other controller. The world's \"Examine\" prompts drawn on the HUD keep the PlayStation icons for now.",
         ["compile_note"] = "Shows \"Building shaders...\" under the FPS counter's corner while the game builds a shader for something it shows for the first time, so a brief stutter then reads as what it is. Built shaders are kept, so it shows less and less.",
+        ["menu_language"] = "The language of the in-game settings menu (F10): its tabs, settings, values and notes. Changes live. The game's own text follows Game language.",
         ["game_language"] = "The language of the game's own text, menus and subtitles, from the message bundles on your disc. Takes effect at the next start. The in-game settings menu (F10) is in English.",
         ["button_prompts"] = "What the game's own button prompts and tutorial notes show. Auto follows the device you used last, keyboard or controller.",
         ["trophy_popups"] = "When you earn a trophy, a frosted glass card slides into the top right corner with its medal, its name and your progress, and a DualSense gives a firm tap. The platinum is awarded once every base-game trophy is earned.",
@@ -140,6 +141,8 @@ public static class OptionSchema
         "\"Building shaders...\" under the counter while the game builds them.");
     public static readonly OptionDef GameLanguage = new("game_language", "Game language",
         new[] { "English", "French", "Spanish", "German", "Italian", "Russian", "Japanese" }, 0, "The game's own text and voices.", true);
+    public static readonly OptionDef MenuLanguage = new("menu_language", "In-game menu language",
+        new[] { "English", "Русский", "Español", "Português (Brasil)", "Français", "Deutsch", "Italiano", "Polski", "Türkçe" }, 0, "The in-game settings menu (F10).");
     public static readonly OptionDef[] FpsLook =
     {
         new("fps_size", "Size", new[] { "75%", "100%", "125%", "150%", "175%", "200%" }, 1, "How large its text is."),
