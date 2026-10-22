@@ -4,11 +4,15 @@
 #include "core/portable.h"
 #include "core/thunk.h"
 #include "engine/addr.h"
+#include "host/window.h"
 #include "log.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 namespace {
@@ -34,6 +38,74 @@ std::uint64_t ptr(std::uint64_t at) {
 std::uint64_t slot(std::uint64_t bn) { return g_ok ? g_slide + (bn - kPreferredGuestSlide) : 0; }
 
 bool finite3(const float v[3]) { return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); }
+
+// BBHOST_CHR_SCAN=<file>: a research recorder for the main player's action
+// state (host/haptics.h wants to know what the character is doing, not what
+// is held). Every frame: the time, the pad, then 0x1000 bytes each of the
+// ChrIns and of three of its modules, found in the module container (+0x3b0)
+// by their vtables (tools/class_catalog): SprjChrTimeActModule (the animation
+// it plays), SprjChrActionRequestModule and SprjChrBehaviorScriptModule. A
+// module not found is zeros. The container's slots, with each one's vtable,
+// go to the log once. Off unless set.
+constexpr std::uint64_t kScanVtables[3] = {0x5735190, 0x5734350, 0x57350f0};
+constexpr std::size_t kScanBytes = 0x1000;
+struct ScanHead {
+    std::uint64_t t_us;
+    std::uint32_t buttons;
+    std::uint8_t l2, r2;
+    std::uint16_t blocks;  // 4: the ChrIns, then the three modules
+};
+void read_block(std::uint64_t at, std::uint8_t* out) {
+    std::memset(out, 0, kScanBytes);
+    if (!at) return;
+    for (std::size_t o = 0; o < kScanBytes; o += 0x100) host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(at + o)), out + o, 0x100);
+}
+void chr_scan() {
+    static const char* path = std::getenv("BBHOST_CHR_SCAN");
+    if (!path || !*path || !g_ok) return;
+    static std::FILE* f = nullptr;
+    static bool failed = false, listed = false;
+    if (failed) return;
+    if (!f) {
+        f = std::fopen(path, "wb");
+        if (!f) {
+            failed = true;
+            host_log("world: BBHOST_CHR_SCAN cannot open %s", path);
+            return;
+        }
+        host_log("world: BBHOST_CHR_SCAN to %s (%zu bytes a frame)", path, sizeof(ScanHead) + 4 * kScanBytes);
+    }
+    const std::uint64_t man = ptr(slot(kWorldChrMan));
+    const std::uint64_t chr = man ? ptr(man + 0x60) : 0;
+    const std::uint64_t modules = chr ? ptr(chr + 0x3b0) : 0;
+    if (!modules) return;
+    std::uint64_t found[3] = {0, 0, 0};
+    for (std::uint64_t s = 0; s < 0x200; s += 8) {
+        const std::uint64_t m = ptr(modules + s);
+        const std::uint64_t vt = m ? ptr(m) : 0;
+        if (!listed && m) {
+            host_log("world: chr scan: module slot +0x%03llx = 0x%llx, vtable 0x%llx", static_cast<unsigned long long>(s),
+                     static_cast<unsigned long long>(m), static_cast<unsigned long long>(vt ? vt - g_slide + kPreferredGuestSlide : 0));
+        }
+        for (int k = 0; k < 3; ++k) {
+            if (vt && vt == slot(kScanVtables[k]) && !found[k]) found[k] = m;
+        }
+    }
+    listed = true;
+    const PadState pad = host_pad_state();
+    ScanHead h{};
+    h.t_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    h.buttons = pad.buttons;
+    h.l2 = pad.l2;
+    h.r2 = pad.r2;
+    h.blocks = 4;
+    static std::uint8_t buf[4][kScanBytes];
+    read_block(chr, buf[0]);
+    for (int k = 0; k < 3; ++k) read_block(found[k], buf[1 + k]);
+    std::fwrite(&h, sizeof(h), 1, f);
+    std::fwrite(buf, sizeof(buf), 1, f);
+}
 
 }  // namespace
 
@@ -190,6 +262,7 @@ bool world_lamp_warp_queue(std::int32_t return_point) {
 }
 
 void world_chr_tick() {
+    chr_scan();
     if (g_unlock) {
         std::uint32_t b = 0;
         if (world_player_block(&b) && b != g_unlock_block) {
