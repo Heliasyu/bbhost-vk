@@ -602,8 +602,7 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
     // Light, Medium, Strong.
     static constexpr int kResist[3] = {2, 3, 5}, kBreak[3] = {3, 5, 8}, kHum[3] = {4, 6, 8};
     const int s = std::clamp(w.trigger_strength, 0, 2);
-    (void)l2;  // what the triggers do follows the character, not how far they are pulled
-    (void)r2;
+    (void)l2;  // what the gun's trigger does follows the character, not how far it is pulled
     // What the character is doing (engine/world_chr.h): its animation, the
     // category's part off. Round 10: the hum followed R2 held, then stamina
     // spent - which the game spends at the swing, so the hum came after it.
@@ -614,6 +613,7 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
     struct State {
         int motion = -1, category = -1;
         std::chrono::steady_clock::time_point since{};
+        bool acted = false;  // an attack ran since R2 went down: free until it is let go
     };
     static std::unordered_map<std::uint32_t, State> states;  // the pump thread only
     State& st = states[id];
@@ -648,6 +648,10 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
     //   the charged swing (032630): one strong kick, then nothing;
     //   any other attack, and the rest of a swing: nothing at all.
     const bool standing = category == 200 || (motion >= 0 && motion < 10000) || anim < 0;
+    // Round 12: "if an attack animation is played out the resistance should
+    // not hold over" - R2 still held after an attack is free until let go.
+    if (r2 < 0.15f) st.acted = false;
+    else if (!standing) st.acted = true;
     if (motion == 32600) {
         haptics_trigger_feedback(t.right, 4, kResist[s] + 1);
     } else if (motion == 32610) {
@@ -656,7 +660,7 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
         haptics_trigger_vibration(t.right, 0, amp, 30 + static_cast<int>(grow * 20.0f));
     } else if (motion == 32630 && in_ms < 120.0f) {
         haptics_trigger_vibration(t.right, 0, 8, 90);
-    } else if (standing) {
+    } else if (standing && !st.acted) {
         haptics_trigger_feedback(t.right, 4, kResist[s]);
     } else {
         haptics_trigger_off(t.right);
