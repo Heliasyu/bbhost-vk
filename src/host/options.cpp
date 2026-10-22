@@ -2,6 +2,7 @@
 #include "host/updater.h"
 #include "host/settings.h"
 #include "host/upscaler_presets.h"
+#include "host/menu_i18n.h"
 
 #include "host/bindings.h"
 #include "host/overlay.h"
@@ -144,6 +145,7 @@ enum SettingId {
     kPadIcons,
     kCompileNote,
     kGameLanguage,
+    kMenuLanguage,
     // rc2: vk.1's present_pace and post_at_render switches are gone: those
     // are permanent (env vars for debugging only); a saved key is ignored.
     kSettingCount,
@@ -408,13 +410,16 @@ Setting g_set[kSettingCount] = {
     {"pad_icons", "Controller icons", {"Auto", "PlayStation", "Xbox"}, 0,
      "The button icons a controller's prompts show. Auto: PlayStation's with a PlayStation controller, the Xbox buttons by name with any other.", false},
     // host/window.cpp's pump: a small note under the FPS counter's corner while
-    // pipelines are built in play (host_pipelines_building).
+    // a frame waits on a pipeline compile (perf::compiling_recently).
+    {"compile_note", "Building shaders note", {"On", "Off"}, 0,
+     "\"Building shaders\" in a corner while the game builds shaders for something it shows for the first time (a brief stutter is normal then).", false},
     // hle/system.cpp's SCE_SYSTEM_SERVICE_PARAM_ID_LANG: the game's text and
     // voices in that language (the disc carries their message bundles).
     {"game_language", "Game language", {"English", "French", "Spanish", "German", "Italian", "Russian", "Japanese"}, 0,
      "The game's own text and voices. Takes effect at the next start.", true},
-    {"compile_note", "Building shaders note", {"On", "Off"}, 0,
-     "\"Building shaders\" in a corner while the game builds shaders for something it shows for the first time (a brief stutter is normal then).", false},
+    // host/menu_i18n.h: this menu's own language; each language by its own name.
+    {"menu_language", "Menu language", {"English", "Русский", "Español", "Português (Brasil)", "Français", "Deutsch", "Italiano", "Polski", "Türkçe"}, 0,
+     "The language of this menu. The game's own text follows Game language.", false},
 };
 
 // rc2: fewer sections, by what a setting is about (vk1-dream's F10 report:
@@ -499,6 +504,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kSkipLogos},
     {Row::Option, nullptr, kTrophyPopups},
     {Row::Option, nullptr, kGameLanguage},
+    {Row::Option, nullptr, kMenuLanguage},
     // The private server's account. No passwords: link this PC to
     // the account signed into on the website with Discord, or make one held
     // by this PC with a recovery code. The token is kept in the options file.
@@ -541,6 +547,18 @@ bool g_dirty = false;  // something changed since the last save
 // anything is loaded over them, then whatever bbhost.toml sets for it - the
 // frame cap, the logos, and a package's resolution and window mode (the
 // Steam Deck kit's) - so the menus' Defaults go back to those.
+// The table is indexed by SettingId: its entries must be in the enum's order.
+// A few checked here, so an entry put in the wrong place fails at once.
+const bool g_table_order_ok = [] {
+    const auto at = [](int id, const char* key) {
+        if (std::strcmp(g_set[id].key, key) == 0) return true;
+        std::fprintf(stderr, "options: g_set[%d] is \"%s\", not \"%s\" - the table and SettingId disagree\n", id, g_set[id].key, key);
+        std::abort();
+    };
+    return at(kUpscaler, "upscaler") && at(kHaptics, "haptics") && at(kHdr, "hdr") && at(kMipBias, "mip_bias") && at(kPadIcons, "pad_icons") &&
+           at(kCompileNote, "compile_note") && at(kGameLanguage, "game_language") && at(kMenuLanguage, "menu_language");
+}();
+
 std::array<int, kSettingCount> g_default_index = [] {
     std::array<int, kSettingCount> a{};
     for (int id = 0; id < kSettingCount; ++id) a[static_cast<std::size_t>(id)] = g_set[id].index;
@@ -576,6 +594,25 @@ int section_of(int r) {
     return s;
 }
 
+// The notes of the action rows (by field: 0..4 the account's, 10.. the
+// updates'), and the key guide: file scope, so --menu-strings lists them.
+const char* const kNotes[] = {
+    "Shows a code and opens the website: sign in there with Discord and approve it.",
+    "Makes an account held by this PC under the name above; write down its recovery code.",
+    "The name and recovery code above give this PC the account back (other PCs are signed out).",
+    "A one-time code to sign in on the website's account page with this PC's account.",
+    "Forgets the token; the game is signed out if the server requires an account.",
+};
+const char* const kUpdateNotes[] = {
+    "Asks GitHub for the newest release.",
+    "Opens the newer release's page in your browser, to download it from there.",
+};
+const char* const kKeys[][2] = {
+    {"Up / Down", "move"}, {"Left / Right", "change"}, {"Q / E", "section"}, {"Enter", "toggles"}, {"Esc / F10", "closes"}};
+// The menu's other words.
+const char* const kOtherStrings[] = {"Settings apply live in the game", "(type here)", "RESTART", "Saves on close.",
+                                     "Enter or click to type; Enter keeps it, Escape drops it.", "Fullscreen (borderless)"};
+
 // A tab's name: the header's words, capitalised as a title.
 const char* section_name(int s) {
     static std::string names[16];
@@ -591,7 +628,7 @@ const char* section_name(int s) {
         if (n == "Fps counter") n = "FPS Counter";
         if (n == "Hdr") n = "HDR";
     }
-    return n.c_str();
+    return menu_tr(n.c_str());
 }
 
 // Up and Down: the next selectable row inside the section, round its end.
@@ -901,6 +938,7 @@ void apply(int id) {
         case kPadIcons:
         case kCompileNote:
         case kGameLanguage:
+        case kMenuLanguage:
             break;  // the settings object carries them (host/settings.h)
         case kSsao:
         case kMotionBlur:
@@ -1065,6 +1103,7 @@ void rebuild_settings() {
     h.button_prompts = index_of(kButtonPrompts) < 0 ? 0 : index_of(kButtonPrompts);
     h.pad_icons = std::clamp(index_of(kPadIcons), 0, 2);
     h.compile_note = on_of(kCompileNote);
+    menu_i18n_set_language(std::clamp(index_of(kMenuLanguage), 0, kMenuLanguageCount - 1));
     {
         // The PS4's language codes, in the setting's order.
         static constexpr int kLang[] = {1, 2, 3, 4, 5, 8, 0};
@@ -1508,7 +1547,10 @@ std::vector<std::string> wrap_note(const char* text, float width, float scale, s
     std::string line, word;
     const std::string all(text);
     bool cut = false;
-    auto fits = [&](const std::string& t) { return host_overlay_text_width(scale, t.c_str()) <= width; };
+    // Measured in the face and size the note is drawn in (17 px body), so a
+    // translation's letters count as what they are, not as bytes.
+    (void)scale;
+    auto fits = [&](const std::string& t) { return host_overlay_ui_text_width(kOverlayFontBody, 17.0f, t.c_str()) <= width; };
     std::size_t i = 0;
     while (i <= all.size()) {
         const std::size_t j = std::min(all.find(' ', i), all.size());
@@ -1531,7 +1573,10 @@ std::vector<std::string> wrap_note(const char* text, float width, float scale, s
     if (out.size() > max_lines) out.resize(max_lines), cut = true;
     if (cut && !out.empty()) {
         std::string& last = out.back();
-        while (!last.empty() && !fits(last + "...")) last.pop_back();
+        while (!last.empty() && !fits(last + "...")) {
+            last.pop_back();
+            while (!last.empty() && (static_cast<unsigned char>(last.back()) & 0xc0) == 0x80) last.pop_back();  // a whole UTF-8 letter
+        }
         last += "...";
     }
     return out;
@@ -1574,16 +1619,20 @@ void options_panel_frame(float display_w, float display_h) {
     g_row_h = row_h;
 
     // The tabs, measured before the pointer is handled.
-    constexpr float kTabFont = 17.0f;
+    // 17 px, smaller when a language's longer names would not fit the panel.
+    float kTabFont = 17.0f;
     float tab_x[16], tab_w[16];
     const float tab_y = py + 92.0f, tab_h = 38.0f;
-    {
+    for (int pass = 0; pass < 2; ++pass) {
         float tx = px + 28.0f + 5.0f;
         for (int t = 0; t < g_section_count; ++t) {
             tab_w[t] = host_overlay_ui_text_width(kOverlayFontBold, kTabFont, section_name(t)) + 34.0f;
             tab_x[t] = tx;
             tx += tab_w[t] + 4.0f;
         }
+        const float room = pw - 56.0f - 10.0f, used = tx - (px + 28.0f + 5.0f);
+        if (used <= room || pass == 1) break;
+        kTabFont = std::max(12.0f, kTabFont * (room - 38.0f * static_cast<float>(g_section_count)) / (used - 38.0f * static_cast<float>(g_section_count)));
     }
 
     // The pointer, against this frame's layout. Hover selects only when the
@@ -1641,7 +1690,7 @@ void options_panel_frame(float display_w, float display_h) {
     host_overlay_round_frame(px, py, pw, ph, 28.0f, 1.0f, 0xffffff66u, 0xffffff17u);
     host_overlay_round_rect(px + pw - 86.0f, py + 26.0f, 42.0f, 42.0f, 21.0f, 0xe9eefad0u, 0xc8d6f0a8u);  // the moon
     host_overlay_ui_text(kOverlayFontTitle, px + 30.0f, py + 18.0f, 46.0f, kText, "Helia's Dream");
-    host_overlay_ui_text(kOverlayFontBody, px + 32.0f, py + 64.0f, 16.0f, kMuted, "Settings apply live in the game");
+    host_overlay_ui_text(kOverlayFontBody, px + 32.0f, py + 64.0f, 16.0f, kMuted, menu_tr("Settings apply live in the game"));
     {
         const std::string online = hle_np_online_status();
         const float ow = host_overlay_ui_text_width(kOverlayFontBody, 16.0f, online.c_str());
@@ -1676,7 +1725,7 @@ void options_panel_frame(float display_w, float display_h) {
         const float lx = x + 18.0f, right = x + w - 16.0f;
         if (row.kind == Row::Close || row.kind == Row::Action) {
             const bool busy = row.kind == Row::Action && !action_idle(row.field);
-            host_overlay_ui_text(kOverlayFontBold, lx, y + text_dy, 19.0f, busy ? 0x6a7080ffu : label_c, row.text);
+            host_overlay_ui_text(kOverlayFontBold, lx, y + text_dy, 19.0f, busy ? 0x6a7080ffu : label_c, menu_tr(row.text));
             continue;
         }
         if (row.kind == Row::Info) {
@@ -1688,10 +1737,10 @@ void options_panel_frame(float display_w, float display_h) {
             continue;
         }
         if (row.kind == Row::Text) {
-            host_overlay_ui_text(kOverlayFontBody, lx, y + text_dy, 19.0f, label_c, row.text);
+            host_overlay_ui_text(kOverlayFontBody, lx, y + text_dy, 19.0f, label_c, menu_tr(row.text));
             std::string shown = g_field[row.field];
             if (g_edit_field == row.field) shown += "_";
-            if (shown.empty()) shown = "(type here)";
+            if (shown.empty()) shown = menu_tr("(type here)");
             const float vw = host_overlay_ui_text_width(kOverlayFontBold, 18.0f, shown.c_str());
             const float vx = right - 16.0f - vw;
             host_overlay_round_rect(vx - 16.0f, y + 6.0f, vw + 32.0f, row_h - 12.0f, (row_h - 12.0f) * 0.5f, 0x0000004du, 0x00000040u);
@@ -1700,7 +1749,7 @@ void options_panel_frame(float display_w, float display_h) {
             continue;
         }
         const Setting& s = g_set[row.setting];
-        const float lw = host_overlay_ui_text(kOverlayFontBody, lx, y + text_dy, 19.0f, label_c, s.label);
+        const float lw = host_overlay_ui_text(kOverlayFontBody, lx, y + text_dy, 19.0f, label_c, menu_tr(s.label));
         const bool toggle = s.values.size() == 2 &&
                             ((std::strcmp(s.values[0], "On") == 0 && std::strcmp(s.values[1], "Off") == 0) ||
                              (std::strcmp(s.values[0], "Off") == 0 && std::strcmp(s.values[1], "On") == 0));
@@ -1716,6 +1765,7 @@ void options_panel_frame(float display_w, float display_h) {
         } else {
             const char* v = s.values[static_cast<std::size_t>(s.index)];
             if (std::strcmp(s.key, "window_mode") == 0 && std::strcmp(v, "Fullscreen") == 0) v = "Fullscreen (borderless)";
+            if (row.setting != kMenuLanguage) v = menu_tr(v);  // each language keeps its own name
             const float vw = host_overlay_ui_text_width(kOverlayFontBold, 18.0f, v);
             const float pr = right + 4.0f, pl = pr - vw - 66.0f;
             const float ty = y + 6.0f, th = row_h - 12.0f;
@@ -1732,9 +1782,10 @@ void options_panel_frame(float display_w, float display_h) {
             g_row_vm[r] = (pl + pr) * 0.5f;
         }
         if (s.restart && !(row.setting == kResolution && res_live(s.index))) {
-            const float rx = lx + lw + 10.0f, rw = host_overlay_ui_text_width(kOverlayFontBold, 12.0f, "RESTART") + 14.0f;
+            const char* restart = menu_tr("RESTART");
+            const float rx = lx + lw + 10.0f, rw = host_overlay_ui_text_width(kOverlayFontBold, 12.0f, restart) + 14.0f;
             host_overlay_round_rect(rx, y + (row_h - 20.0f) * 0.5f, rw, 20.0f, 10.0f, 0xffffff1au, 0xffffff12u);
-            host_overlay_ui_text(kOverlayFontBold, rx + 7.0f, y + (row_h - 20.0f) * 0.5f + 3.0f, 12.0f, kMuted, "RESTART");
+            host_overlay_ui_text(kOverlayFontBold, rx + 7.0f, y + (row_h - 20.0f) * 0.5f + 3.0f, 12.0f, kMuted, restart);
         }
     }
     g_laid_out = true;
@@ -1745,17 +1796,6 @@ void options_panel_frame(float display_w, float display_h) {
     const char* note = id >= 0 ? g_set[id].note : "Saves on close.";
     if (g_rows[g_sel].kind == Row::Text) note = "Enter or click to type; Enter keeps it, Escape drops it.";
     if (g_rows[g_sel].kind == Row::Action) {
-        static const char* const kNotes[] = {
-            "Shows a code and opens the website: sign in there with Discord and approve it.",
-            "Makes an account held by this PC under the name above; write down its recovery code.",
-            "The name and recovery code above give this PC the account back (other PCs are signed out).",
-            "A one-time code to sign in on the website's account page with this PC's account.",
-            "Forgets the token; the game is signed out if the server requires an account.",
-        };
-        static const char* const kUpdateNotes[] = {
-            "Asks GitHub for the newest release.",
-            "Opens the newer release's page in your browser, to download it from there.",
-        };
         const int f = g_rows[g_sel].field;
         note = f >= 10 ? kUpdateNotes[f - 10] : kNotes[f];
     }
@@ -1766,7 +1806,7 @@ void options_panel_frame(float display_w, float display_h) {
     if (note) {
         // Wrapped by the monospace measure (about as wide as the proportional
         // face at this size), at most three lines, the last cut with "...".
-        const auto lines = wrap_note(note, pw - 100.0f, 0.66f, 3);
+        const auto lines = wrap_note(menu_tr(note), pw - 100.0f, 0.66f, 3);
         for (std::size_t i = 0; i < lines.size(); ++i)
             host_overlay_ui_text(kOverlayFontBody, px + 46.0f, ny + 12.0f + 21.0f * static_cast<float>(i), 17.0f, kSoft, lines[i].c_str());
     }
@@ -1784,8 +1824,6 @@ void options_panel_frame(float display_w, float display_h) {
     }
     // The key guide as small pills.
     {
-        static const char* const kKeys[][2] = {
-            {"Up / Down", "move"}, {"Left / Right", "change"}, {"Q / E", "section"}, {"Enter", "toggles"}, {"Esc / F10", "closes"}};
         float kx = px + 30.0f;
         const float ky = py + ph - 40.0f;
         for (const auto& k : kKeys) {
@@ -1793,7 +1831,7 @@ void options_panel_frame(float display_w, float display_h) {
             host_overlay_round_rect(kx, ky - 4.0f, kw + 20.0f, 24.0f, 12.0f, 0xffffff24u, 0xffffff17u);
             host_overlay_ui_text(kOverlayFontBold, kx + 10.0f, ky, 14.0f, kText, k[0]);
             kx += kw + 28.0f;
-            kx += host_overlay_ui_text(kOverlayFontBody, kx, ky, 14.0f, kMuted, k[1]) + 26.0f;
+            kx += host_overlay_ui_text(kOverlayFontBody, kx, ky, 14.0f, kMuted, menu_tr(k[1])) + 26.0f;
         }
     }
 }
@@ -2023,3 +2061,36 @@ std::string host_account_detail() { return account_detail(); }
 bool host_account_take_save() { return g_acct_save.exchange(false); }
 
 float host_opt_mip_bias() { return g_mip_bias.load(std::memory_order_relaxed); }
+
+std::vector<std::string> host_options_menu_strings() {
+    std::vector<std::string> out;
+    const auto add = [&](const char* t) {
+        if (!t || !*t) return;
+        // Numbers and sizes need no translation.
+        bool word = false;
+        for (const char* c = t; *c; ++c) word = word || std::isalpha(static_cast<unsigned char>(*c));
+        if (!word) return;
+        for (const std::string& o : out)
+            if (o == t) return;
+        out.emplace_back(t);
+    };
+    for (int sec = 0; sec < g_section_count; ++sec) {
+        const int was = menu_i18n_language();
+        menu_i18n_set_language(0);
+        add(section_name(sec));
+        menu_i18n_set_language(was);
+    }
+    for (int id = 0; id < kSettingCount; ++id) {
+        add(g_set[id].label);
+        add(g_set[id].note);
+        if (id == kMenuLanguage || id == kResolution) continue;
+        for (const char* v : g_set[id].values) add(v);
+    }
+    for (int r = 0; r < kRowCount; ++r)
+        if (g_rows[r].kind != Row::Header && g_rows[r].kind != Row::Option) add(g_rows[r].text);
+    for (const char* n : kNotes) add(n);
+    for (const char* n : kUpdateNotes) add(n);
+    for (const auto& k : kKeys) add(k[1]);
+    for (const char* n : kOtherStrings) add(n);
+    return out;
+}

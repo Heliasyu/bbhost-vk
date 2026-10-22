@@ -851,6 +851,11 @@ int main(int argc, char** argv) {
         std::printf("%s %s\n", BBHOST_VERSION, BBHOST_GIT_REV);
         return 0;
     }
+    // --menu-strings: the F10 menu's strings, one a line, for its translations (tools/menu_i18n.tsv).
+    if (argc == 2 && std::strcmp(argv[1], "--menu-strings") == 0) {
+        for (const std::string& t : host_options_menu_strings()) std::printf("%s\n", t.c_str());
+        return 0;
+    }
 #if !defined(_WIN32)
     // The launcher reads the log from a pipe (its Console page); closed while
     // the game runs, a write to it must fail quietly rather than end the game.

@@ -151,6 +151,10 @@ target_include_directories(bbhost PRIVATE src include ${CMAKE_BINARY_DIR}/gen)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/pc_option_messages.tsv)
 file(READ ${CMAKE_SOURCE_DIR}/tools/pc_option_messages.tsv BBHOST_PC_MESSAGES)
 file(WRITE ${CMAKE_BINARY_DIR}/gen/pc_option_messages.inc "R\"tsv(${BBHOST_PC_MESSAGES})tsv\"\n")
+# Helia's Dream: the F10 menu's translations (src/host/menu_i18n.h), built in the same way.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/menu_i18n.tsv)
+file(READ ${CMAKE_SOURCE_DIR}/tools/menu_i18n.tsv BBHOST_MENU_I18N)
+file(WRITE ${CMAKE_BINARY_DIR}/gen/menu_i18n.inc "R\"tsv(${BBHOST_MENU_I18N})tsv\"\n")
 target_link_libraries(bbhost PRIVATE ZLIB::ZLIB)
 
 # The git revision the binary logs on its first line (build/gen/bbhost_version.h,
@@ -267,7 +271,7 @@ if(Vulkan_FOUND)
   add_library(replay_common STATIC src/replay/json.cpp src/replay/compare.cpp)
   target_include_directories(replay_common PUBLIC src)
   target_link_libraries(replay_common PUBLIC Vulkan::Headers)
-  target_sources(bbhost PRIVATE src/host/gpu.cpp src/host/gpu_busy.cpp src/host/gpu_memtrack.cpp src/host/gpu_mutex.cpp src/host/buffer_shadow.cpp src/host/recorder.cpp src/host/bindless.cpp src/host/render.cpp src/host/textures.cpp src/host/gpu_untile.cpp src/host/depth_copy.cpp src/host/temporal_inputs.cpp src/host/fsr3_pass.cpp src/host/fsr4_pass.cpp src/host/fsr4v07_pass.cpp src/host/fsr_dump.cpp
+  target_sources(bbhost PRIVATE src/host/gpu.cpp src/host/gpu_busy.cpp src/host/gpu_memtrack.cpp src/host/gpu_mutex.cpp src/host/buffer_shadow.cpp src/host/recorder.cpp src/host/bindless.cpp src/host/render.cpp src/host/textures.cpp src/host/gpu_untile.cpp src/host/depth_copy.cpp src/host/temporal_inputs.cpp src/host/fsr3_pass.cpp src/host/fsr4_pass.cpp src/host/fsr4v07_pass.cpp src/host/menu_i18n.cpp src/host/fsr_dump.cpp
     src/host/pass_timer.cpp src/host/perf_capture.cpp src/host/fsr411/fsr411.cpp src/host/fsr.cpp src/host/glitch.cpp src/host/occlusion.cpp src/host/draw_capture.cpp src/host/stream_selftest.cpp
                                 src/host/shader_patch.cpp src/host/translation_cache.cpp)
   target_link_libraries(bbhost PRIVATE Vulkan::Vulkan gcn replay_common)

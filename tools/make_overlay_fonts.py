@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Builds src/host/overlay_ui_font.h: the proportional fonts of the in-game menus.
+"""Builds src/host/overlay_ui_font.h: the proportional fonts of the in-game menus, for every
+language the F10 menu speaks (src/host/menu_i18n.h).
 
 Helia's Dream's look (the launcher's) in the engine's overlay: Manrope for text, in a regular
 and a bold weight, and Cormorant Garamond for titles, rasterised once into one 8-bit atlas with
@@ -23,7 +24,11 @@ MONO = os.path.join(ROOT, "src", "host", "overlay_font.h")
 OUT = os.path.join(ROOT, "src", "host", "overlay_ui_font.h")
 
 ATLAS_W = 1024
-FIRST, LAST = 32, 126
+# ASCII, Latin-1 and Latin Extended-A (the F10 menu's Western and Central European languages,
+# Turkish), Cyrillic (Russian), and the punctuation translations use. Sorted: the overlay finds a
+# code by binary search (glyph_index).
+CODES = sorted(set(list(range(32, 127)) + list(range(0xA0, 0x180)) + list(range(0x400, 0x460)) +
+                   [0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x201E, 0x2026, 0x2022, 0x2192]))
 PAD = 2
 # name, file, pixel size, variable-font weight
 FACES = [
@@ -64,7 +69,7 @@ def main():
         font = load(file, size, weight)
         ascent, descent = font.getmetrics()
         glyphs = []
-        for code in range(FIRST, LAST + 1):
+        for code in CODES:
             ch = chr(code)
             advance = font.getlength(ch)
             box = font.getbbox(ch)  # relative to the pen at the line's top (ascender origin)
@@ -102,9 +107,11 @@ def main():
     out.append("namespace overlay_ui_font {")
     out.append(f"constexpr int kAtlasW = {ATLAS_W}, kAtlasH = {height};")
     out.append(f"constexpr int kSolidX = {solid[0]}, kSolidY = {solid[1]};")
-    out.append(f"constexpr int kFirst = {FIRST}, kLast = {LAST};")
+    out.append(f"constexpr int kGlyphs = {len(CODES)};")
+    out.append("// The code points the faces have, ascending; a glyph's index is its code's here.")
+    out.append("constexpr std::uint16_t kCodes[kGlyphs] = {" + ", ".join(str(c) for c in CODES) + "};")
     out.append("struct Glyph { std::uint16_t x, y, w, h; std::int16_t ox, oy; float advance; };")
-    out.append("struct Face { int size, ascent, descent; Glyph glyphs[%d]; };" % (LAST - FIRST + 1))
+    out.append("struct Face { int size, ascent, descent; Glyph glyphs[kGlyphs]; };")
     for name, size, ascent, descent, glyphs in rows:
         out.append(f"constexpr Face k{name} = {{{size}, {ascent}, {descent}, {{")
         for g in glyphs:
@@ -115,6 +122,16 @@ def main():
     for i in range(0, len(data), 48):
         out.append("    " + ",".join(str(v) for v in data[i : i + 48]) + ",")
     out.append("};")
+    out.append("// The index of a code point's glyph, or -1 when the faces have none.")
+    out.append("inline int glyph_index(unsigned code) {")
+    out.append("    int lo = 0, hi = kGlyphs - 1;")
+    out.append("    while (lo <= hi) {")
+    out.append("        const int mid = (lo + hi) / 2;")
+    out.append("        if (kCodes[mid] == code) return mid;")
+    out.append("        if (kCodes[mid] < code) lo = mid + 1; else hi = mid - 1;")
+    out.append("    }")
+    out.append("    return -1;")
+    out.append("}")
     out.append("}  // namespace overlay_ui_font")
     open(OUT, "w").write("\n".join(out) + "\n")
     print(f"{OUT}: {ATLAS_W}x{height}")

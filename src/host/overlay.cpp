@@ -348,6 +348,20 @@ void round_outline(float x, float y, float w, float h, float r, std::vector<std:
         }
 }
 
+// The next code point of UTF-8 text, moving `c` past it; a malformed byte is
+// itself (and has no glyph).
+unsigned next_code(const char*& c) {
+    const auto* p = reinterpret_cast<const unsigned char*>(c);
+    unsigned code = p[0];
+    int more = 0;
+    if (code >= 0xf0 && p[1] && p[2] && p[3]) { code &= 0x07; more = 3; }
+    else if (code >= 0xe0 && p[1] && p[2]) { code &= 0x0f; more = 2; }
+    else if (code >= 0xc0 && p[1]) { code &= 0x1f; more = 1; }
+    for (int i = 1; i <= more; ++i) code = (code << 6) | (p[i] & 0x3f);
+    c += 1 + more;
+    return code;
+}
+
 const overlay_ui_font::Face& face_of(int face) {
     switch (face) {
         case kOverlayFontBold: return overlay_ui_font::kBold;
@@ -399,10 +413,9 @@ float host_overlay_ui_text_width(int face, float size, const char* text) {
     const auto& f = face_of(face);
     const float scale = size / static_cast<float>(f.size);
     float w = 0.0f;
-    for (const char* c = text; *c; ++c) {
-        const unsigned code = static_cast<unsigned char>(*c);
-        if (code < overlay_ui_font::kFirst || code > overlay_ui_font::kLast) continue;
-        w += f.glyphs[code - overlay_ui_font::kFirst].advance * scale;
+    for (const char* c = text; *c;) {
+        const int i = overlay_ui_font::glyph_index(next_code(c));
+        if (i >= 0) w += f.glyphs[i].advance * scale;
     }
     return w;
 }
@@ -413,10 +426,10 @@ float host_overlay_ui_text(int face, float x, float y, float size, std::uint32_t
     const float scale = size / static_cast<float>(f.size);
     float pen = x;
     std::lock_guard<std::mutex> lk(g_mu);
-    for (const char* c = text; *c; ++c) {
-        const unsigned code = static_cast<unsigned char>(*c);
-        if (code < overlay_ui_font::kFirst || code > overlay_ui_font::kLast) continue;
-        const auto& g = f.glyphs[code - overlay_ui_font::kFirst];
+    for (const char* c = text; *c;) {
+        const int i = overlay_ui_font::glyph_index(next_code(c));
+        if (i < 0) continue;
+        const auto& g = f.glyphs[i];
         if (g.w && g.h) {
             const float gx = pen + static_cast<float>(g.ox) * scale, gy = y + static_cast<float>(g.oy) * scale;
             const float gw = static_cast<float>(g.w) * scale, gh = static_cast<float>(g.h) * scale;

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <vector>
+
 // The PC port's own options screen, drawn by the host overlay.
 //
 // These settings configure *bbhost*, not the game: resolution, pacing, what
@@ -108,3 +111,8 @@ std::string host_account_signed_in();  // "Signed in as NAME" or "Not signed in"
 std::string host_account_outcome();    // the last action's outcome, "" before one
 std::string host_account_detail();     // a code the player needs (link, recovery, website), or ""
 bool host_account_take_save();         // true once after a sign-in or sign-out
+
+// Every string the F10 menu can show, in English, once each (labels, values,
+// notes, tabs, buttons): what tools/menu_i18n.tsv translates. `--menu-strings`
+// prints them.
+std::vector<std::string> host_options_menu_strings();
