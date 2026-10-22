@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 namespace {
 
@@ -139,6 +140,132 @@ bool world_player_anim(std::int32_t* anim) {
     if (anim) *anim = v;
     return true;
 }
+
+namespace {
+
+// BBHOST_FIND_BULLETS=1: a research search for the Quicksilver Bullets count
+// (host/haptics.h wants L2 slack the moment the gun is empty). Around the
+// local player's game data (GameDataMan +0x08, +-128 MiB), the int32s that
+// went down by exactly one 0.6 s after a shot's animation (117051000) began,
+// kept while every later shot takes one more off and Blood Bullets (100141)
+// add some; an empty pull (117054500) leaves them alone. The survivors - and
+// the pointers in the game data that lead near them - go to the log.
+struct BulletSearch {
+    bool on = false;
+    std::uint64_t lo = 0, hi = 0;           // the window searched
+    std::vector<std::int32_t> before;      // the window as the first shot began
+    std::vector<std::uint64_t> where;      // the candidates
+    std::vector<std::int32_t> last;
+    int pending = 0;                       // the animation whose result is due
+    std::chrono::steady_clock::time_point due{};
+    std::int32_t prev_anim = -1;
+} g_bullets;
+
+std::uint64_t game_record() {
+    constexpr std::uint64_t kGameDataMan = 0x593b130;
+    const std::uint64_t gdm = ptr(slot(kGameDataMan));
+    return gdm ? ptr(gdm + 0x08) : 0;
+}
+
+void read_window(std::uint64_t lo, std::uint64_t hi, std::vector<std::int32_t>* out) {
+    out->assign((hi - lo) / 4, 0);
+    constexpr std::uint64_t kChunk = 1 << 16;
+    for (std::uint64_t a = lo; a < hi; a += kChunk) {
+        host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(a)), out->data() + (a - lo) / 4,
+                       static_cast<std::size_t>(std::min(kChunk, hi - a)));
+    }
+}
+
+void bullets_report(const char* after) {
+    BulletSearch& b = g_bullets;
+    host_log("world: bullets search: %zu candidate(s) after %s", b.where.size(), after);
+    if (b.where.empty() || b.where.size() > 8) return;
+    const std::uint64_t record = game_record();
+    for (std::size_t i = 0; i < b.where.size(); ++i) {
+        host_log("world: bullets search:   0x%llx = %d (record %s0x%llx)", static_cast<unsigned long long>(b.where[i]), b.last[i],
+                 b.where[i] >= record ? "+" : "-",
+                 static_cast<unsigned long long>(b.where[i] >= record ? b.where[i] - record : record - b.where[i]));
+        // A pointer in the game data (or one level below it) to just before
+        // the count: the path to keep.
+        for (std::uint64_t o = 0; record && o < 0x4000; o += 8) {
+            const std::uint64_t p = ptr(record + o);
+            if (p && p <= b.where[i] && b.where[i] - p < 0x20000) {
+                host_log("world: bullets search:     record+0x%llx -> +0x%llx", static_cast<unsigned long long>(o),
+                         static_cast<unsigned long long>(b.where[i] - p));
+            }
+            for (std::uint64_t o2 = 0; p && o2 < 0x400; o2 += 8) {
+                const std::uint64_t q = ptr(p + o2);
+                if (q && q <= b.where[i] && b.where[i] - q < 0x8000) {
+                    host_log("world: bullets search:     [record+0x%llx]+0x%llx -> +0x%llx", static_cast<unsigned long long>(o),
+                             static_cast<unsigned long long>(o2), static_cast<unsigned long long>(b.where[i] - q));
+                }
+            }
+        }
+    }
+}
+
+void bullets_tick() {
+    BulletSearch& b = g_bullets;
+    static const bool want = [] {
+        const char* e = std::getenv("BBHOST_FIND_BULLETS");
+        return e && e[0] == '1';
+    }();
+    if (!want || !g_ok) return;
+    std::int32_t anim = -1;
+    if (!world_player_anim(&anim)) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (anim != b.prev_anim) {
+        b.prev_anim = anim;
+        if ((anim == 117051000 || anim == 117054500 || anim == 100141) && !b.pending) {
+            if (anim == 117051000 && b.where.empty() && b.before.empty()) {
+                const std::uint64_t record = game_record();
+                if (!record) return;
+                b.lo = (record > (128ull << 20) ? record - (128ull << 20) : 0) & ~0xfffull;
+                b.hi = record + (128ull << 20);
+                read_window(b.lo, b.hi, &b.before);
+                host_log("world: bullets search: the first shot - 0x%llx..0x%llx taken", static_cast<unsigned long long>(b.lo),
+                         static_cast<unsigned long long>(b.hi));
+            }
+            if (!b.before.empty() || !b.where.empty()) {
+                b.pending = anim;
+                b.due = now + std::chrono::milliseconds(anim == 100141 ? 1500 : 600);
+            }
+        }
+    }
+    if (!b.pending || now < b.due) return;
+    const int what = b.pending;
+    b.pending = 0;
+    if (!b.before.empty()) {
+        std::vector<std::int32_t> after;
+        read_window(b.lo, b.hi, &after);
+        for (std::size_t i = 0; i < after.size(); ++i) {
+            if (b.before[i] >= 1 && b.before[i] <= 30 && after[i] == b.before[i] - 1) {
+                b.where.push_back(b.lo + i * 4);
+                b.last.push_back(after[i]);
+            }
+        }
+        b.before.clear();
+        b.before.shrink_to_fit();
+        bullets_report("the first shot");
+        return;
+    }
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < b.where.size(); ++i) {
+        std::int32_t v = 0;
+        if (!rd(b.where[i], &v)) continue;
+        const bool ok = what == 117051000 ? v == b.last[i] - 1 : what == 117054500 ? v == b.last[i] : v > b.last[i];
+        if (ok) {
+            b.where[kept] = b.where[i];
+            b.last[kept] = v;
+            ++kept;
+        }
+    }
+    b.where.resize(kept);
+    b.last.resize(kept);
+    bullets_report(what == 117051000 ? "a shot" : what == 117054500 ? "an empty pull" : "Blood Bullets");
+}
+
+}  // namespace
 
 void world_chr_install(ElfImage* image) {
     g_slide = image->mem.slide;
@@ -294,6 +421,7 @@ bool world_lamp_warp_queue(std::int32_t return_point) {
 
 void world_chr_tick() {
     chr_scan();
+    bullets_tick();
     if (g_unlock) {
         std::uint32_t b = 0;
         if (world_player_block(&b) && b != g_unlock_block) {
