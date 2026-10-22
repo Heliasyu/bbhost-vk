@@ -1,6 +1,7 @@
 // bbhost-vk: DualSense / DualSense Edge HD haptics and adaptive triggers
 // (host/haptics.h).
 #include "host/haptics.h"
+#include "engine/player_data.h"
 #include "host/options.h"
 #include "host/settings.h"
 #include "log.h"
@@ -594,22 +595,42 @@ TriggerEffects haptics_triggers(std::uint32_t id, float l2, float r2, bool relax
     const int s = std::clamp(w.trigger_strength, 0, 2);
     // L2, the gun: a break two-fifths of the way down.
     haptics_trigger_weapon(t.left, 3, 6, kBreak[s]);
-    // R2, the heavy attack: light resistance; held past 350 ms (a charge),
-    // a hum that grows over the next second.
+    // R2, the heavy attack: light resistance; and a hum that grows over a
+    // second while a charge is really under way - R2 held, and the character's
+    // stamina gone down since the press (the attack started: a press while
+    // the character cannot act costs nothing, and gets no hum). Round 9: on
+    // the time held alone, a second hold hummed with nothing happening.
     struct Charge {
         bool down = false;
-        std::chrono::steady_clock::time_point since{};
+        bool started = false;  // the stamina went down: the attack is real
+        std::int64_t stamina_at_press = -1;
+        std::chrono::steady_clock::time_point since{}, started_at{};
     };
+    static int logged = 0;  // the first presses, so a log shows the stamina is live
     static std::unordered_map<std::uint32_t, Charge> charges;  // the pump thread only
     Charge& c = charges[id];
     const auto now = std::chrono::steady_clock::now();
+    std::int64_t stamina = -1;
+    if (!player_stat_get("stamina", &stamina)) stamina = -1;
     if (r2 > 0.6f && !c.down) {
         c.down = true;
+        c.started = false;
         c.since = now;
-    } else if (r2 < 0.3f) {
+        c.stamina_at_press = stamina;
+    } else if (r2 < 0.3f && c.down) {
         c.down = false;
+        if (logged < 12) {
+            ++logged;
+            host_log("haptics: R2 held %.0f ms, stamina %lld at the press, %lld at the release - %s",
+                     std::chrono::duration<double, std::milli>(now - c.since).count(), static_cast<long long>(c.stamina_at_press),
+                     static_cast<long long>(stamina), c.started ? "an attack (hummed past 350 ms)" : "no attack seen");
+        }
     }
-    const float held_ms = c.down ? std::chrono::duration<float, std::milli>(now - c.since).count() : 0.0f;
+    if (c.down && !c.started && stamina >= 0 && c.stamina_at_press >= 0 && stamina < c.stamina_at_press - 5) {
+        c.started = true;
+        c.started_at = now;
+    }
+    const float held_ms = c.down && c.started ? std::chrono::duration<float, std::milli>(now - c.since).count() : 0.0f;
     if (held_ms > 350.0f) {
         const float grow = std::clamp((held_ms - 350.0f) / 1000.0f, 0.0f, 1.0f);
         const int amp = 1 + static_cast<int>(std::lround(grow * static_cast<float>(kHum[s] - 1)));
