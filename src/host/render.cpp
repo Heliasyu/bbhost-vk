@@ -2123,6 +2123,13 @@ VkImageAspectFlags aspect_of(const RtImage& r) {
 void ensure_initialised(RtImage& r) {
     if (r.initialised) return;
     begin_recording_locked();
+    // bbhost-vk: a layout change cannot be recorded inside dynamic rendering
+    // (VUID-vkCmdPipelineBarrier-None-09553/-09554/-01181, the validation
+    // layer on the RX 9070 XT). A target made mid-pass - a post stand-in
+    // (post_shadow_locked), a scene target at a live rescale - was given one
+    // there. Not part of the open pass, so the draw that uses it starts a
+    // pass of its own anyway.
+    render_end_pass_locked();
     image_barrier(g_cmd(), r.image, aspect_of(r), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
                   VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, r.layers);
     r.initialised = true;
