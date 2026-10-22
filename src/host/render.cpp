@@ -6560,6 +6560,15 @@ void end_pass_for_draw_locked() {
     }
     g_pass.active = false;
     if (DrawCmds* c = DrawCmds::open(); !c || !c->end_rendering(false)) rec().end_rendering(false);
+    // bbhost-vk: the pass's timestamp pair is closed here too, as
+    // render_end_pass_locked closes it. Left open, a GPU-sampled frame
+    // (BBHOST_GPU_PROFILE=3, the F11 sampler) had a query never written, and
+    // retire_slot_locked's vkGetQueryPoolResults(WAIT) waited for it forever:
+    // the game hung in its first loading screen with lazy barriers on.
+    if (g_pass.profiled) {
+        profile_end_locked();
+        g_pass.profiled = false;
+    }
     for (int t = 0; t < g_pass.ntargets; ++t) g_hazards.written.insert(g_pass.targets[t]);
     g_hazards.owed = true;
     copy_versions_pass_end_locked();

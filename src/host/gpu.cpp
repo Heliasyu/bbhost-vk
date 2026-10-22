@@ -5355,11 +5355,25 @@ void collect_profile_locked(Gpu::Slot& sl) {
         sl.qreset = false;
         return;
     }
-    std::vector<std::uint64_t> ts(sl.qnames.size() * 2);
-    if (vkGetQueryPoolResults(g.device, sl.qpool, 0, static_cast<std::uint32_t>(ts.size()), ts.size() * 8, ts.data(), 8,
-                              VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
+    // bbhost-vk: with availability, not waiting, as the statistics below.
+    // The slot's command buffer has finished, so every timestamp it wrote is
+    // there; one it never wrote (a pair left open) would make a WAIT read
+    // block for ever - it hung the game in its first loading screen with lazy
+    // pass barriers and the GPU sampler. Such a pair is left out, once logged.
+    std::vector<std::uint64_t> ts(sl.qnames.size() * 2 * 2);  // value, availability
+    const VkResult tr = vkGetQueryPoolResults(g.device, sl.qpool, 0, static_cast<std::uint32_t>(sl.qnames.size() * 2), ts.size() * 8,
+                                              ts.data(), 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    if (tr == VK_SUCCESS || tr == VK_NOT_READY) {
         for (std::size_t i = 0; i < sl.qnames.size(); ++i) {
-            const std::uint64_t dt = ts[i * 2 + 1] > ts[i * 2] ? ts[i * 2 + 1] - ts[i * 2] : 0;
+            const std::uint64_t t0 = ts[i * 4], t1 = ts[i * 4 + 2];
+            if (!ts[i * 4 + 1] || !ts[i * 4 + 3]) {
+                static std::atomic<bool> said{false};
+                if (!said.exchange(true))
+                    host_log("gpu: a timed pass (%s) has a timestamp that was never written; left out of the timings",
+                             sl.qnames[i]->c_str());
+                continue;
+            }
+            const std::uint64_t dt = t1 > t0 ? t1 - t0 : 0;
             auto& e = sampled ? g_sampler.ns[*sl.qnames[i]] : g.profile_ns[*sl.qnames[i]];
             e.first += static_cast<std::uint64_t>(dt * g.timestamp_period_ns);
             e.second += 1;
