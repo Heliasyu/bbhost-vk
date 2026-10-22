@@ -268,7 +268,7 @@ Setting g_set[kSettingCount] = {
      true},
     // 0..1 like FSR 3's sharpness; 0.8 is RCAS at 0.2 stops, what FSR 1 uses.
     {"upscale_sharpness", "Upscaling sharpness", {"0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"}, 8,
-     "How much FSR 3.1 sharpens (its RCAS pass; 0 turns it off). 0.8 matches FSR 1 as bbhost ships it; FSR 1 itself keeps its own sharpening.", false},
+     "How much FSR 3.1 and FSR 4.1.1 sharpen (0 turns it off). 0.8 matches FSR 1 as bbhost ships it; FSR 1 itself keeps its own sharpening.", false},
     // bbhost-vk Phase 3: the reactive mask (host/temporal_inputs.h).
     {"upscale_reactive", "Upscaler reactive mask", {"Off", "On"}, 1,
      "FSR 3.1: marks particles, fog, Blood Echoes, the lantern's glow and other transparent effects so they do not smear or ghost. Off for comparison.",

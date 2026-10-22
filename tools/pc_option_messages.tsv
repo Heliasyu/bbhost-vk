@@ -34,8 +34,8 @@
 110011	PC Camera	The follow camera: field of view, distance, height, and auto-rotation with the mouse.
 110012	Steam Deck	Frame rate and model detail for the Steam Deck.
 110013	PC Enhancements	Additions to the game: the mirror, rebirth, five players. Each needs a restart.
-110014	PC Upscaling	The upscaler and its debug views (bbhost-vk). Not used yet: the picture stays FSR 1.
-110015	Upscaling Quality	The upscaler's render scale and sharpness (bbhost-vk). Not used yet.
+110014	PC Upscaling	The upscaler (FSR 1, FSR 3.1, FSR 4.1.1) and its debug views.
+110015	Upscaling Quality	The 3D scene's render scale and the upscaler's sharpness.
 116000	Vertical Sync	Wait for the display. Off can tear.
 116001	Fullscreen	Borderless, at the desktop resolution.
 116002	Mouse in Menus	Move and click to select.
@@ -51,7 +51,7 @@
 116035	Uncapped
 117000	Ambient Occlusion	Screen-space ambient occlusion.
 117005	Motion Blur	The blur on fast camera and character movement.
-117001	Anti-Aliasing	The game's own anti-aliasing pass.
+117001	Anti-Aliasing	The game's own anti-aliasing pass. Shows what is in effect; Auto (off under FSR 4.1.1) is set from F10 or the launcher.
 117002	Depth of Field	Blurs distant scenery. Off keeps far views sharp.
 117020	PC Graphics	
 117003	Chromatic Aberration	The colour fringing at the edges of the frame.
@@ -121,16 +121,16 @@
 14000335	Accept Rebirth	
 14000336	Undo Rebirth	
 125020	PC Upscaling	
-125000	Show Motion Vectors	Debug: draw the motion vectors over the picture. Nothing to show yet (bbhost-vk Phase 2).
+125000	Show Motion Vectors	Debug: draw the motion vectors the upscaler uses over the picture.
 125001	Show Upscaler GPU Time	Debug: the presenter's GPU time per pass, under the FPS counter, and in the log.
-125002	Upscaler	Not used yet: every choice is still FSR 1 at the Resolution setting, as stock. FSR 3.1 and FSR 4.1.1 come in later bbhost-vk builds.
+125002	Upscaler	FSR 1 is bbhost's own. FSR 3.1 and 4.1.1 rebuild the 3D scene from the Quality's size. FSR 4.1.1 needs assets built from your own DLL, else it uses FSR 3.1. Applies fully at the next start.
 125030	Off	
 125031	FSR 1	
 125032	FSR 3.1	
 125033	FSR 4.1.1	
 126020	Upscaling Quality	
-126000	Sharpness	The upscaler's sharpening, 0 to 10. 8 is stock bbhost's FSR 1. Not used yet.
-126001	Quality	The render scale the upscaler will use: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Not used yet: Resolution still decides.
+126000	Sharpness	How much FSR 3.1 and FSR 4.1.1 sharpen, 0 to 10 (0 turns it off). 8 matches bbhost's FSR 1.
+126001	Quality	The 3D scene's share of the Resolution: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Menus and text stay at the Resolution. Applies fully at the next start.
 126030	Native AA	
 126031	Quality	
 126032	Balanced	

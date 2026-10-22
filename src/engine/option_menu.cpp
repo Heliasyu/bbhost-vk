@@ -161,8 +161,7 @@ const char kOurEnhanceName[] = "PCEnhance";
 // bbhost-vk (docs/vk/PLAN.md): the upscaler and its debug views, and the
 // upscaler's quality and sharpness - two sections, because a section takes
 // one pick list, on its last row. Made only when the movie took them
-// (menu_assets_vk_sections); Phase 0 stores the settings and nothing reads
-// them for the picture yet.
+// (menu_assets_vk_sections).
 const char kOurUpscaleName[] = "PCUpscale";
 const char kOurUpQualityName[] = "PCUpQuality";
 
