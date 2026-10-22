@@ -1608,9 +1608,16 @@ void update_pad() {
         p.ry = further(p.ry, axis_to_u8(SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_RIGHTY)));
         const std::int16_t lt = SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
         const std::int16_t rt = SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
-        p.l2 = std::max(p.l2, static_cast<std::uint8_t>(lt / 128));
+        // A DualSense's L2 with its trigger break on (host/haptics.h): pressed
+        // only past the snap, so the gun fires where the trigger gives way;
+        // the travel before it reads as rest.
+        const float l2_fire = haptics_is_dualsense(SDL_GetGamepadVendor(g_gamepad), SDL_GetGamepadProduct(g_gamepad))
+                                  ? haptics_l2_fire_point()
+                                  : 0.0f;
+        const bool l2_held = l2_fire > 0.0f ? lt >= static_cast<int>(l2_fire * 32767.0f) : lt > 8000;
+        p.l2 = std::max(p.l2, l2_fire > 0.0f && !l2_held ? std::uint8_t{0} : static_cast<std::uint8_t>(lt / 128));
         p.r2 = std::max(p.r2, static_cast<std::uint8_t>(rt / 128));
-        if (lt > 8000) {
+        if (l2_held) {
             p.buttons |= kL2;
         }
         if (rt > 8000) {

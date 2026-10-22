@@ -270,6 +270,14 @@ void scan_locked(bool want_hd) {
         g_said_none = false;
         host_log("haptics: HD output on \"%s\" (motors on channels %d and %d of 4)", found_name ? found_name : "?", g_tune.left + 1,
                  g_tune.right + 1);
+        // PipeWire's Pro Audio profile names the four channels AUX0..AUX3, and
+        // a stream's four (FL FR RL RR) are then mixed down onto the first two -
+        // the speaker - so the motors get nothing. Its Direct profile maps them.
+        const std::size_t len = found_name ? std::strlen(found_name) : 0;
+        if (len > 4 && std::strcmp(found_name + len - 4, " Pro") == 0) {
+            host_log("haptics: the controller's sound card is in the Pro Audio profile, where the motors cannot be reached - "
+                     "switch it to Direct (System Settings > Sound, or: pactl set-card-profile <its card> Direct)");
+        }
     } else if (!found && !g_said_none) {
         g_said_none = true;
         host_log("haptics: no DualSense sound card (HD haptics need the controller plugged in by USB); the classic rumble runs");
@@ -349,6 +357,15 @@ bool haptics_is_dualsense(std::uint16_t vendor, std::uint16_t product) {
 }
 
 void haptics_devices_changed() { g_rescan = true; }
+
+float haptics_l2_fire_point() {
+    static const float fire = [] {
+        const char* e = std::getenv("BBHOST_L2_FIRE");
+        const float v = e && *e ? std::strtof(e, nullptr) : 0.0f;
+        return v > 0.05f && v < 1.0f ? v : 0.65f;  // the break (zone 6 of 10) gives way just before
+    }();
+    return wanted().triggers ? fire : 0.0f;
+}
 
 void haptics_menu_tick(int kind) {
     if (kind < 0 || kind > 2 || !g_hd_live.load(std::memory_order_relaxed)) return;
