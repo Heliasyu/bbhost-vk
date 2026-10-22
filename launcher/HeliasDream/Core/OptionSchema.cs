@@ -66,6 +66,7 @@ public static class OptionSchema
         ["hdr_paper_white"] = "How bright the game's white is on the HDR screen, in nits. Around 200 suits a dim room; raise it in a bright one. Changes live.",
         ["hdr_peak_auto"] = "On: the brightest the display says it can show (from its EDID), as KDE also reads it. Off: the Peak brightness setting below.",
         ["hdr_peak"] = "Your display's peak brightness in nits, used when it is not taken from the display. Nothing in the game goes above it.",
+        ["hdr_ui_brightness"] = "How bright the game's HUD, menus and subtitles (and the in-game menu and FPS counter) are on an HDR screen, as a share of paper white, kept out of the highlight boost so white text never glares. Like the picture: they are boosted with everything else, as before. The UI is told apart from the picture each frame by comparing the frame before and after its UI is drawn.",
         ["hdr_boost"] = "How far the brightest parts of the picture rise above paper white, towards the peak. Off keeps the SDR picture exactly, only on an HDR screen; Max uses the display's whole range.",
         ["brightness"] = "The picture's brightness, applied to the game's finished image (menus and the FPS counter are left as they are). 5 is the game's own; each step is about 10% lighter or darker.",
         ["contrast"] = "The picture's contrast around mid grey. 5 is the game's own; higher deepens shadows and brightens highlights.",
@@ -169,6 +170,9 @@ public static class OptionSchema
             "Your display's peak, in nits (10 to 4000), when not taken from the display."),
         new("hdr_boost", "Highlight boost", new[] { "Off", "Low", "Medium", "High", "Max" }, 1,
             "Off keeps the game's own look; higher makes lamps, fire and the sky brighter."),
+        new("hdr_ui_brightness", "UI brightness",
+            new[] { "Like the picture", "50%", "60%", "70%", "80%", "90%", "100%", "110%", "120%", "130%", "140%", "150%", "160%", "170%", "180%", "190%", "200%" }, 0,
+            "The HUD, menus and subtitles against paper white, kept out of the boost."),
     };
 
     public static readonly OptionGroup[] UpscalingExtras =

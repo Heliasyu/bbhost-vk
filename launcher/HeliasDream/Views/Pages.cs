@@ -301,6 +301,8 @@ public static class Pages
             Ui.Tip(Ui.Row2("Monitor", "The game opens here, fullscreen included.", monitor),
                 "The monitor the game opens on, fullscreen included. Primary is the one your desktop marks as main (KDE: priority 1). Applies when the game starts."));
         foreach (var d in OptionSchema.Screen) screen.Children.Add(Ui.OptionRow(d, o, ctx.Changed));
+        screen.Children.Add(Ui.Tip(CheckRow(new CheckItem("High-resolution UI", "Always on: menus, HUD and text are drawn at the full resolution", CheckState.Ok)),
+            "Helia's Dream draws the game's menus, HUD and text at the output resolution itself (each Scaleform movie's viewport is the Resolution setting), so they stay sharp at 1440p and 4K. Nothing to switch on."));
         screen.Children.Add(Ui.OptionRow(OptionSchema.MenuKey, o, ctx.Changed));
 
         var current = PresentModes.FirstOrDefault(m => m.Value == st.PresentMode);
