@@ -418,7 +418,7 @@ void capture(const std::string& trigger, const std::string& note) {
             o << buf;
         }
     } else {
-        o << "sample: none in the last 45 s (one every ~10 s, skipped after a frame over budget)\n";
+        o << "sample: none in the last 45 s (one every ~10 s, skipped after a frame over budget; BBHOST_GPU_SAMPLE_SLOW=1: every ~3 s, only after one)\n";
     }
     o << "\n[samples]  # every GPU sample kept\n";
     for (const Sample& s : samples) {

@@ -3137,11 +3137,20 @@ void sampler_begin_recording_locked() {
     const auto now = std::chrono::steady_clock::now();
     switch (g_sampler.state) {
         case Sampler::kIdle: {
-            if (now - g_sampler.last < std::chrono::seconds(10) || hle_video_loading()) return;
+            // bbhost-vk: BBHOST_GPU_SAMPLE_SLOW=1 samples the frame after a
+            // slow one instead (every ~3 s while they come), so a snapshot
+            // taken during frame drops shows the passes of the drops rather
+            // than of the smooth frames between them.
+            static const bool slow_frames = [] {
+                const char* e = std::getenv("BBHOST_GPU_SAMPLE_SLOW");
+                return e && e[0] == '1';
+            }();
+            if (now - g_sampler.last < std::chrono::seconds(slow_frames ? 3 : 10) || hle_video_loading()) return;
             // Over budget: the last present interval past 1.06x the game's pace.
             const std::int64_t last = perf::last_interval_ns();
             const int fps = host_settings().frame_cap > 0 ? host_settings().frame_cap : 120;
-            if (last <= 0 || static_cast<double>(last) > 1.06e9 / static_cast<double>(fps)) return;
+            const bool over = static_cast<double>(last) > 1.06e9 / static_cast<double>(fps);
+            if (last <= 0 || over != slow_frames) return;
             g_sampler.flip = flip + 1;
             g_sampler.state = Sampler::kArmed;
             return;
