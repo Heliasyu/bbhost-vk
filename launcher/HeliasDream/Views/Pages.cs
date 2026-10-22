@@ -32,11 +32,14 @@ public sealed class Ctx
     /// The next key (mouse false) or mouse button / wheel (mouse true) pressed: its SDL name or
     /// mouse index to `done`; Escape cancels (null, 0).
     public required Action<bool, Action<string?, int>> Capture { get; init; }
+    public required Func<string, string?, System.Threading.Tasks.Task<string?>> PickFile { get; init; }
+    /// Makes another player profile the one the launcher and the game use.
+    public required Action<string> SwitchProfile { get; init; }
 }
 
 public static class Pages
 {
-    public const int PlayTab = 0, TrophiesTab = 6;
+    public const int PlayTab = 0, TrophiesTab = 6, SetupPage = 8;
 
     public static readonly string[] Names = { "Play", "Display", "Upscaling", "Graphics", "Controller", "Online", "Trophies", "More" };
 
@@ -49,6 +52,7 @@ public static class Pages
         4 => Controller(ctx),
         5 => Online(ctx),
         6 => TrophiesPage(ctx),
+        SetupPage => Setup(ctx),
         _ => More(ctx),
     };
 
@@ -82,6 +86,7 @@ public static class Pages
 
         var left = Ui.Col(18,
             Ui.Col(10, Ui.Title("Bloodborne Launcher", 54), Ui.Text("Everything checks out. Press Play, or Enter.", 15, "soft")),
+            ProfileRow(ctx),
             Ui.Glass(list, 18));
         left.Children[0].Margin = new Thickness(28, 26, 28, 8);
         if (problems > 0) ((TextBlock)((StackPanel)left.Children[0]).Children[1]).Text = "Fix the marked lines before playing.";
@@ -105,8 +110,9 @@ public static class Pages
             facts.Children.Add(w);
         }
         var quick = Ui.Col(10,
-            Ui.Tip(QuickRow("Frame rate", Ui.Segmented(new[] { "60", "90", "120" }, ctx.Options.Get("frame_cap", "30"), v => { ctx.Options.Set("frame_cap", v); ctx.Changed(); })), OptionSchema.Tips["frame_cap"]),
-            Ui.Tip(QuickRow("Upscaling", Ui.Segmented(new[] { "Quality", "Balanced", "Performance" }, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); })), OptionSchema.Tips["upscale_quality"]));
+            Ui.Tip(QuickRow("Frame rate", Ui.Segmented(OptionSchema.FrameCap.Values, ctx.Options.Get("frame_cap", "30"), v => { ctx.Options.Set("frame_cap", v); ctx.Changed(); })), OptionSchema.Tips["frame_cap"]),
+            Ui.Tip(QuickRow("Upscaling", Ui.Segmented(OptionSchema.Quality.Values, quality, v => { ctx.Options.Set("upscale_quality", v); ctx.Changed(); },
+                label: v => v switch { "Native AA" => "Native", "Performance" => "Perf.", "Ultra Performance" => "Ultra", _ => v }, fontSize: 12)), OptionSchema.Tips["upscale_quality"]));
         var hunt = Ui.Glass(Ui.Col(14, Ui.Eyebrow("This hunt"), facts, quick), 22);
 
         var trophies = Trophies.Load(cfg.DataDir);
@@ -151,6 +157,49 @@ public static class Pages
         Grid.SetColumn(right, 1);
         g.Children.Add(right);
         return g;
+    }
+
+    // Player profiles (Core/Profiles.cs): who is playing - their settings, account, saves
+    // and trophies.
+    static Control ProfileRow(Ctx ctx)
+    {
+        var names = Profiles.List();
+        var combo = new ComboBox { ItemsSource = names, SelectedItem = ctx.Settings.Profile, MinWidth = 170, VerticalAlignment = VerticalAlignment.Center };
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (combo.SelectedItem is string p && p != ctx.Settings.Profile) ctx.SwitchProfile(p);
+        };
+        var name = new TextBox { Watermark = "New profile's name", Width = 170, IsVisible = false, VerticalAlignment = VerticalAlignment.Center };
+        Button? remove = null;
+        var add = Ui.Ghost("New", () =>
+        {
+            if (!name.IsVisible) { name.IsVisible = true; name.Focus(); return; }
+            var made = string.IsNullOrWhiteSpace(name.Text) ? null : Profiles.Create(name.Text);
+            if (made != null) ctx.SwitchProfile(made);
+        });
+        name.KeyDown += (_, e) =>
+        {
+            if (e.Key == Avalonia.Input.Key.Enter)
+            {
+                e.Handled = true;
+                var made = string.IsNullOrWhiteSpace(name.Text) ? null : Profiles.Create(name.Text);
+                if (made != null) ctx.SwitchProfile(made);
+            }
+        };
+        bool armed = false;
+        remove = Ui.Ghost("Remove", () =>
+        {
+            if (ctx.Settings.Profile == Profiles.Default) return;
+            if (!armed) { armed = true; remove!.Content = "Click again"; return; }
+            Profiles.Remove(ctx.Settings.Profile);
+            ctx.SwitchProfile(Profiles.Default);
+        });
+        remove.IsVisible = ctx.Settings.Profile != Profiles.Default;
+        foreach (var b in new[] { add, remove }) { b.Height = 38; b.FontSize = 13; }
+        var row = Ui.Row(8, Ui.Text("Profile", 14, "soft"), combo, name, add, remove);
+        row.Children[0].VerticalAlignment = VerticalAlignment.Center;
+        row.Margin = new Thickness(28, 0, 0, 0);
+        return Ui.Tip(row, "Who is playing. Each profile has its own settings, online account, saves and trophies; the game's files are shared. Default is the one you have always had. Remove takes a profile off the list and keeps its saves.");
     }
 
     static string SceneSize(string res, string upscaler, string quality)
@@ -421,6 +470,149 @@ public static class Pages
         Grid.SetColumn(right, 1); g2.Children.Add(right);
         col.Children.Add(g2);
         return col;
+    }
+
+    // ---- Game setup (the footer's Settings): the game's files, the DLC, saves, Steam ----
+
+    static Control PathRow(string label, string? value, string empty, string tip, params Control[] buttons)
+    {
+        var text = Ui.Text(string.IsNullOrEmpty(value) ? empty : value, 12, "muted");
+        text.TextWrapping = TextWrapping.Wrap;
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 14 };
+        g.Children.Add(Ui.Col(3, Ui.Text(label, 14, null, FontWeight.Medium), text));
+        var row = Ui.Row(8, buttons);
+        row.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(row, 1); g.Children.Add(row);
+        return Ui.Tip(Ui.Well(g), tip);
+    }
+
+    static Control Setup(Ctx ctx)
+    {
+        var toml = new OptionsFile(Paths.BbhostToml);
+        var cfg = ctx.Config();
+        var status = Ui.Text("", 12, "soft");
+        void Saved(string what) { status.Text = what; }
+
+        string? app0 = toml.GetIn("paths", "app0")?.TrimEnd('/', '\\');
+        bool dump = app0 != null && File.Exists(System.IO.Path.Combine(app0, "eboot.bin"));
+        string? update = app0 == null ? null : new[] { app0 + "-patch", app0 + "-UPDATE" }.FirstOrDefault(Directory.Exists);
+        var files = Ui.Col(8, Ui.Eyebrow("Game files"),
+            PathRow("Game folder", app0, "Not set", "The folder of your own Bloodborne dump (CUSA03173): the one with eboot.bin and sce_sys in it.",
+                Ui.Ghost("Choose…", async () =>
+                {
+                    var d = await ctx.PickFolder(app0);
+                    if (d == null) return;
+                    if (!File.Exists(System.IO.Path.Combine(d, "eboot.bin"))) { Saved("No eboot.bin in that folder: choose the dump's own folder (CUSA03173)."); return; }
+                    toml.SetIn("paths", "app0", d);
+                    var elf = System.IO.Path.Combine(d, "eboot.elf");
+                    if (File.Exists(elf)) toml.SetIn("paths", "eboot", elf);
+                    ctx.GoTo(SetupPage);
+                })),
+            PathRow("Update 1.09", update, dump ? "No update folder beside the game (CUSA03173-patch)" : "—",
+                "The 1.09 update is read from a folder beside the game's, named like it with -patch or -UPDATE (CUSA03173-patch), as shadPS4 keeps it. Nothing to set: it is found by itself."),
+            PathRow("Decrypted eboot", toml.GetIn("paths", "eboot"), "Not set",
+                "The 1.09 update's eboot, decrypted (eboot.elf). The game cannot start without it.",
+                Ui.Ghost("Choose…", async () =>
+                {
+                    var f = await ctx.PickFile("The decrypted eboot (eboot.elf)", app0);
+                    if (f == null) return;
+                    toml.SetIn("paths", "eboot", f);
+                    ctx.GoTo(SetupPage);
+                })),
+            PathRow("Mods folder", toml.GetIn("paths", "mods"), "None (the default, <saves>/mods)",
+                "A folder of replaced game files (its own dvdroot_ps4): they load ahead of the dump's, which is never written to.",
+                Ui.Ghost("Choose…", async () =>
+                {
+                    var d = await ctx.PickFolder(app0 != null ? System.IO.Path.GetDirectoryName(app0) : null);
+                    if (d == null) return;
+                    toml.SetIn("paths", "mods", d);
+                    ctx.GoTo(SetupPage);
+                }),
+                Ui.Ghost("Clear", () => { toml.Remove("paths", "mods"); ctx.GoTo(SetupPage); })),
+            PathRow("Save data folder", cfg.DataDir, "Default",
+                "Where saves, trophies and the game's own data live. Each player profile has its own (Play page).",
+                Ui.Ghost("Choose…", async () =>
+                {
+                    if (ctx.Settings.Profile != Profiles.Default) { Saved("A profile keeps its own save folder; switch to Default to move the shared one."); return; }
+                    var d = await ctx.PickFolder(cfg.DataDir);
+                    if (d == null) return;
+                    toml.SetIn("paths", "data", d);
+                    ctx.GoTo(SetupPage);
+                })));
+
+        var ohOn = (toml.GetIn("patches", "old-hunters") ?? "true") != "false";
+        var oh = new ToggleSwitch { IsChecked = ohOn, VerticalAlignment = VerticalAlignment.Center };
+        oh.IsCheckedChanged += (_, _) =>
+        {
+            if (oh.IsChecked == true) toml.Remove("patches", "old-hunters");
+            else toml.SetRawIn("patches", "old-hunters", "false");
+            Saved(oh.IsChecked == true ? "The Old Hunters: on at the next start." : "The Old Hunters: off at the next start.");
+        };
+        var dlc = Ui.Col(8, Ui.Eyebrow("DLC: The Old Hunters"),
+            Ui.Tip(Ui.Row2("The Old Hunters", "Unlocked by a patch: no DLC folder or download needed.", oh),
+                "The 1.09 dump already carries The Old Hunters' content; a patch makes the game the Old Hunters edition (Kyo's \"bb 00900\"), as the Game of the Year release is. There is no separate DLC package to point at. Off is the base game alone. Applies at the next start."));
+
+        // Add to Steam
+        var art = ctx.Settings.SteamArt ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "BloodBorne PC", "steam-art");
+        var steamStatus = Ui.Text(Steam.Running() ? "Steam is running: close it first." : "Adds the launcher to Steam as Bloodborne, with your art.", 12, "muted");
+        var preview = new Grid { Height = 120 };
+        var portrait = System.IO.Path.Combine(art, "bbp.png");
+        if (File.Exists(portrait))
+        {
+            try
+            {
+                preview.Children.Add(new Border
+                {
+                    Width = 80, Height = 120, CornerRadius = new CornerRadius(10), ClipToBounds = true, HorizontalAlignment = HorizontalAlignment.Left,
+                    Child = new Image { Source = new Bitmap(portrait), Stretch = Stretch.UniformToFill },
+                });
+                var wide = System.IO.Path.Combine(art, "bb.png");
+                if (File.Exists(wide))
+                    preview.Children.Add(new Border
+                    {
+                        Width = 250, Height = 117, CornerRadius = new CornerRadius(10), ClipToBounds = true, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(92, 0, 0, 0),
+                        Child = new Image { Source = new Bitmap(wide), Stretch = Stretch.UniformToFill },
+                    });
+            }
+            catch (Exception) { }
+        }
+        var steam = Ui.Col(8, Ui.Eyebrow("Add to Steam"), preview,
+            PathRow("Art", art, "Not set", "The pictures Steam shows: bbp.png (the library's portrait), bb.png (wide), bb_hero.jpg (the banner), bb_logo.png and bb_icon.png. Missing ones are left out.",
+                Ui.Ghost("Choose…", async () =>
+                {
+                    var d = await ctx.PickFolder(art);
+                    if (d == null) return;
+                    ctx.Settings.SteamArt = d; ctx.Settings.Save();
+                    ctx.GoTo(SetupPage);
+                })),
+            Ui.Tip(Ui.Row2("Add to Steam", "", Ui.Ghost("Add", () =>
+            {
+                var exe = Environment.ProcessPath ?? "";
+                var (ok, msg) = Steam.Add(exe, System.IO.Path.GetDirectoryName(exe) ?? "", Directory.Exists(art) ? art : null);
+                steamStatus.Text = msg;
+            })), "Adds this launcher to every Steam account on this PC as \"Bloodborne\" (or updates the one there), with the art above. Steam must be closed: it rewrites its shortcut list when it quits. For the DualSense's HD haptics and adaptive triggers, turn Steam Input off for it (its controller settings)."),
+            steamStatus);
+
+        // Import a save
+        var importStatus = Ui.Text($"Into the profile \"{ctx.Settings.Profile}\". The save it replaces is backed up first.", 12, "muted");
+        var import = Ui.Col(8, Ui.Eyebrow("Import a save"),
+            Ui.Tip(Ui.Row2("Import from a folder", "A PS4 save (Apollo Save Tool), shadPS4's, Lantern Engine's, another PC's.",
+                Ui.Ghost("Choose…", async () =>
+                {
+                    var d = await ctx.PickFolder(null);
+                    if (d == null) return;
+                    new Saves(ctx.Config().DataDir).Import(d, out var msg);
+                    importStatus.Text = msg;
+                })),
+                "Choose the save's folder, or any folder above it: the one with userdata0000 in it is found (SPRJ0005 first). Its save files replace this profile's; the save they replace is backed up first (More > Saves can put it back). The game must be closed. A PS4 save has to be decrypted (Apollo Save Tool on a jailbroken PS4 exports it so)."),
+            importStatus);
+
+        var page = Ui.Col(18, Header("Game setup", "Your game's files, the DLC, saves and Steam. Shared by every profile unless it says otherwise."));
+        page.Children[0].Margin = new Thickness(8, 6, 8, 0);
+        status.Margin = new Thickness(8, 0, 8, 0);
+        page.Children.Add(status);
+        page.Children.Add(Columns(Ui.Col(18, Ui.Glass(files, 18), Ui.Glass(dlc, 18)), Ui.Col(18, Ui.Glass(steam, 18), Ui.Glass(import, 18))));
+        return page;
     }
 
     static Control Controller(Ctx ctx)

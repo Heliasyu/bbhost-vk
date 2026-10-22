@@ -12,10 +12,15 @@ namespace HeliasDream.Core;
 /// </summary>
 public sealed class OptionsFile
 {
-    readonly string _path;
+    string _path;
     readonly List<string> _lines = new();
 
     public OptionsFile(string path) { _path = path; Reload(); }
+
+    public string FilePath => _path;
+
+    /// Points at another file (a player profile's) and reads it.
+    public void Retarget(string path) { _path = path; Reload(); }
 
     public void Reload()
     {
@@ -35,9 +40,22 @@ public sealed class OptionsFile
 
     public void Set(string key, string value) => SetIn("options", key, value);
 
-    public void SetIn(string section, string key, string value)
+    /// A value written as it is (true, false, a number), not quoted.
+    public void SetRawIn(string section, string key, string raw) => SetLine(section, key, $"{key} = {raw}");
+
+    public void Remove(string section, string key)
     {
-        var line = $"{key} = \"{value.Replace("\"", "")}\"";
+        var (i, _) = Find(section, key);
+        if (i < 0) return;
+        _lines.RemoveAt(i);
+        Save();
+    }
+
+    public void SetIn(string section, string key, string value) =>
+        SetLine(section, key, $"{key} = \"{value.Replace("\"", "")}\"");
+
+    void SetLine(string section, string key, string line)
+    {
         var (i, end) = Find(section, key);
         if (i >= 0) _lines[i] = line;
         else if (end >= 0) _lines.Insert(end, line);
@@ -136,9 +154,15 @@ public sealed class BbhostToml
 {
     readonly Dictionary<string, string> _kv = new();
 
-    public BbhostToml(string path)
+    /// The files layered as the engine does: later ones (a profile's --config) win.
+    public BbhostToml(params string?[] paths)
     {
-        if (!File.Exists(path)) return;
+        foreach (var path in paths)
+            if (path != null && File.Exists(path)) Layer(path);
+    }
+
+    void Layer(string path)
+    {
         string section = "";
         foreach (var raw in File.ReadAllLines(path))
         {

@@ -79,6 +79,61 @@ public sealed class Saves
         }
     }
 
+    /// The save in a folder the player picked (a PS4 save from Apollo Save Tool or a backup, a
+    /// shadPS4 or Lantern Engine save folder, another PC's): the folder that holds userdata0000,
+    /// searched a few levels down. Null when there is none.
+    public static string? FindSave(string folder)
+    {
+        if (!Directory.Exists(folder)) return null;
+        if (File.Exists(Path.Combine(folder, "userdata0000"))) return folder;
+        try
+        {
+            var found = Directory.EnumerateFiles(folder, "userdata0000", new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 6, IgnoreInaccessible = true })
+                .Select(Path.GetDirectoryName).Where(d => d != null).Cast<string>().ToList();
+            return found.FirstOrDefault(d => Path.GetFileName(d) == Dir) ?? found.FirstOrDefault();
+        }
+        catch (Exception) { return null; }
+    }
+
+    /// Makes a save found by FindSave this game's: its save files (userdata*, backup*,
+    /// sce_param.bin, icon0.png, sce_sys) replace the current ones, which are backed up first.
+    public bool Import(string from, out string message)
+    {
+        if (GameRunner.Running()) { message = "Quit the game first."; return false; }
+        var src = FindSave(from);
+        if (src == null) { message = "No Bloodborne save there (a folder with userdata0000 in it)."; return false; }
+        var safety = HasSave ? BackUpNow() : null;
+        if (HasSave && safety == null) { message = "Could not back up the current save first; nothing changed."; return false; }
+        try
+        {
+            Directory.CreateDirectory(SaveDir);
+            foreach (var f in Directory.EnumerateFiles(SaveDir))
+            {
+                var n = Path.GetFileName(f);
+                if (n.StartsWith("userdata") || n.StartsWith("backup")) File.Delete(f);
+            }
+            int files = 0;
+            foreach (var f in Directory.EnumerateFiles(src))
+            {
+                var n = Path.GetFileName(f);
+                if (n.StartsWith("userdata") || n.StartsWith("backup") || n is "sce_param.bin" or "icon0.png")
+                {
+                    File.Copy(f, Path.Combine(SaveDir, n), true);
+                    files++;
+                }
+            }
+            var sys = Path.Combine(src, "sce_sys");
+            if (Directory.Exists(sys)) Copy(sys, Path.Combine(SaveDir, "sce_sys"));
+            message = $"Imported {files} save files from {src}." + (safety != null ? " The save it replaced is backed up." : "");
+            return true;
+        }
+        catch (Exception e)
+        {
+            message = "Import failed: " + e.Message;
+            return false;
+        }
+    }
+
     static void Copy(string from, string to)
     {
         Directory.CreateDirectory(to);

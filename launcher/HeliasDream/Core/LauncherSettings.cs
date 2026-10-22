@@ -17,6 +17,10 @@ public sealed class LauncherSettings
     public string PresentMode { get; set; } = "mailbox";
     /// The monitor the game opens on (a connector name, DP-1); empty: the primary one.
     public string Monitor { get; set; } = "";
+    /// The player profile (Core/Profiles.cs): Default, or one of profiles/*.toml.
+    public string Profile { get; set; } = "Default";
+    /// The art Add to Steam uses (bbp.png, bb.png, bb_hero.jpg, bb_logo.png, bb_icon.png).
+    public string? SteamArt { get; set; }
 
     public static LauncherSettings Load()
     {

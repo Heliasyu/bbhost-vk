@@ -159,11 +159,12 @@ public static class DesktopHdr
 /// <summary>Starts the game and tells when it ends.</summary>
 public static class GameRunner
 {
-    public static Process? Start(string gameDir, string presentMode, string? monitor, Action onExit)
+    public static Process? Start(string gameDir, string presentMode, string? monitor, string? profileConfig, Action onExit)
     {
         var engine = Paths.EngineIn(gameDir);
         if (engine == null) return null;
         var psi = new ProcessStartInfo(engine) { WorkingDirectory = gameDir, UseShellExecute = false };
+        if (profileConfig != null) { psi.ArgumentList.Add("--config"); psi.ArgumentList.Add(profileConfig); }
         // The launcher has already shown everything bbhost's own setup window would.
         psi.Environment["BBHOST_SETUP_WINDOW"] = "0";
         if (!string.IsNullOrEmpty(monitor)) psi.Environment["BBHOST_DISPLAY"] = monitor;

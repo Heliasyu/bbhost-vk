@@ -28,7 +28,7 @@ namespace HeliasDream;
 public sealed class MainWindow : Window
 {
     readonly LauncherSettings _settings = LauncherSettings.Load();
-    readonly OptionsFile _options = new(Paths.OptionsFile);
+    readonly OptionsFile _options;
     readonly Scene _scene;
     readonly TransitioningContentControl _page;
     readonly GlidePage _glide = new();
@@ -59,11 +59,24 @@ public sealed class MainWindow : Window
         Background = Brushes.Transparent;
         CanResize = true;
 
+        if (!Profiles.List().Contains(_settings.Profile)) _settings.Profile = Profiles.Default;
+        _options = new OptionsFile(Profiles.OptionsFile(_settings.Profile));
         _gameDir = Paths.FindGameDir(_settings.GameDir);
         _ctx = new Ctx
         {
             Options = _options, Settings = _settings,
-            Config = () => new BbhostToml(Paths.BbhostToml),
+            Config = () => new BbhostToml(Paths.BbhostToml, Profiles.ConfigFile(_settings.Profile)),
+            PickFile = PickFile,
+            SwitchProfile = p =>
+            {
+                _settings.Profile = p;
+                _settings.Save();
+                _options.Retarget(Profiles.OptionsFile(p));
+                int keep = _current;
+                _current = -1;
+                UpdateSummary();
+                GoTo(keep);
+            },
             GameDir = () => _gameDir = Paths.FindGameDir(_settings.GameDir),
             GoTo = i => GoTo(i),
             Changed = () => { UpdateSummary(); _scene!.ReduceMotion = _settings.ReduceMotion; _glide.Reduced = _settings.ReduceMotion; },
@@ -130,7 +143,8 @@ public sealed class MainWindow : Window
         var footerRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 12 };
         _summary.VerticalAlignment = VerticalAlignment.Center;
         footerRow.Children.Add(_summary);
-        var settingsBtn = Ui.Ghost("Settings", () => GoTo(1));
+        var settingsBtn = Ui.Ghost("Settings", () => GoTo(Pages.SetupPage));
+        Ui.Tip(settingsBtn, "Game setup: the game's files, the update, mods, The Old Hunters, save import and Add to Steam.");
         Grid.SetColumn(settingsBtn, 1); footerRow.Children.Add(settingsBtn);
         var quit = Ui.Ghost("Quit", Close);
         Grid.SetColumn(quit, 2); footerRow.Children.Add(quit);
@@ -325,7 +339,14 @@ public sealed class MainWindow : Window
 
     void PlaceBead(bool animate)
     {
-        if (_current < 0 || _current >= _tabs.Count) return;
+        if (_current >= _tabs.Count)
+        {
+            // A page with no tab (Game setup): no bead.
+            _bead.Opacity = 0;
+            foreach (var t in _tabs) t.Classes.Set("selected", false);
+            return;
+        }
+        if (_current < 0) return;
         var b = _tabs[_current];
         if (b.Bounds.Width <= 0) return;
         if (!animate || _settings.ReduceMotion)
@@ -359,7 +380,8 @@ public sealed class MainWindow : Window
         _gameDir = Paths.FindGameDir(_settings.GameDir);
         if (_gameDir == null) { GoTo(7); return; }
         var p = GameRunner.Start(_gameDir, _settings.PresentMode,
-            string.IsNullOrEmpty(_settings.Monitor) ? Monitors().FirstOrDefault(m => m.Primary).Name : _settings.Monitor, () => Dispatcher.UIThread.Post(GameEnded));
+            string.IsNullOrEmpty(_settings.Monitor) ? Monitors().FirstOrDefault(m => m.Primary).Name : _settings.Monitor,
+            Profiles.ConfigFile(_settings.Profile), () => Dispatcher.UIThread.Post(GameEnded));
         if (p == null) return;
         if (_settings.CloseOnPlay) { Close(); return; }
         _play.IsEnabled = false;
@@ -376,6 +398,14 @@ public sealed class MainWindow : Window
         _current = -1;
         UpdateSummary();
         GoTo(keep);
+    }
+
+    async Task<string?> PickFile(string title, string? start)
+    {
+        var opts = new FilePickerOpenOptions { Title = title, AllowMultiple = false };
+        if (start != null && Directory.Exists(start)) opts.SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(start);
+        var r = await StorageProvider.OpenFilePickerAsync(opts);
+        return r.FirstOrDefault()?.TryGetLocalPath();
     }
 
     async Task<string?> PickFolder(string? start)
