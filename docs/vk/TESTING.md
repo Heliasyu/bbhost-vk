@@ -149,6 +149,37 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
    - `precompile: before the first in-game frame` and `gpu: shader caches ...` are logged
      once at start.
 
+## Phase 5 step 5.0: where the smoke drops come from (~15 min)
+
+No new build: the installed `bbhost.bin` (vk.2, b28). This decides whether Phase 5 goes after
+`bb-cp0` (CPU) or the GPU frame first (PLAN.md, step 5.0). Settings as always: 4K, FSR 4.1.1
+Performance, 120 cap, motion blur off. Quality changes live, so it is all one session.
+
+**Run A: the diagnosis.** `./bbtest start p5-diag`
+1. Go to Old Yharnam's thickest smoke (the stairs down from the first lamp, the burning
+   street). Stand still, camera on the smoke, and wait for the fps to dip.
+2. **F11 during the dip.** Note it: `./bbtest mark "perf dip"`.
+3. F10 > Upscaling > Quality: **Ultra Performance**. Same spot, same camera, ~10 s, **F11**.
+4. Back to **Performance**, then walk the smoke street once and back, F11 at the end.
+5. Quit (or `./bbtest stop`). Send me the session folder name, or just say done.
+
+How it reads (`bbtest snap --show` on the session's `snaps/`):
+- **CPU-bound:** fps barely changes at Ultra Performance and `bb-cp0` is at or above
+  950 ms/s. Next: the replay harness and the `bb-cp0` split (5.2-5.3).
+- **GPU-bound:** fps goes up clearly at Ultra Performance and GPU busy drops. Next: the
+  GPU tests (5.1) and the GPU frame (5.4).
+- Both move: whichever moves more goes first.
+
+**Run B (optional, ~5 min): lazy barriers again, with uncompressed targets.** Step 5.1's
+retry for the white blocks:
+`BBHOST_PASS_BARRIERS=lazy BBHOST_RT_DCC=0 ./bbtest start p5-lazy-nodcc`
+1. Load into the Hunter's Dream from the lamp. Watch the top and bottom of the screen
+   while it loads (that is where the white blocks were).
+2. Travel to Old Yharnam, the same smoke spot as run A, F11 at Performance.
+3. Quit. Say whether any white blocks or a dark face showed.
+- Clean and faster than run A's Performance snapshot: lazy barriers can go on for RDNA4
+  with `BBHOST_RT_DCC=0`. White blocks: they stay off, and 5.1 moves to the glare pass.
+
 ## vk.1-rc7 checks (~10 min)
 Install as before (`bbtest start vk1-rc7`). The translator is unchanged: **no shader-cache
 rebuild**. Two binaries as in rc6: `bbhost.bin` (ThinLTO + PGO, the rc5 session's profile)
