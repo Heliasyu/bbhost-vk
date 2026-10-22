@@ -34,9 +34,10 @@ bool haptics_rumble(std::uint8_t small, std::uint8_t large);
 // The Haptics setting as it stands: 0 Off, 1 Rumble, 2 HD.
 int haptics_mode();
 
-// A controller came or went (the window's pump thread): look for the
-// haptics device again.
-void haptics_devices_changed();
+// A controller came or went (the window's pump thread): whether a DualSense
+// is now connected by USB - only then is HD tried, since one on Bluetooth
+// ignores its USB sound card even with the cable in - and look again.
+void haptics_devices_changed(bool dualsense_on_usb);
 
 // Whether a USB vendor:product is a DualSense or DualSense Edge.
 bool haptics_is_dualsense(std::uint16_t vendor, std::uint16_t product);

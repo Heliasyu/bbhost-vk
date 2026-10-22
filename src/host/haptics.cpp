@@ -21,6 +21,12 @@
 #if defined(BBHOST_HAVE_SDL3)
 #include <SDL3/SDL.h>
 #endif
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sound/asound.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -145,6 +151,7 @@ bool g_said_none = false;
 std::vector<float> g_out;
 #endif
 std::atomic<bool> g_rescan{true};
+std::atomic<bool> g_usb_pad{false};  // a DualSense connected by USB (haptics_devices_changed)
 
 Tuning g_tune;
 bool g_tune_read = false;
@@ -195,6 +202,46 @@ Wanted wanted() {
     return g_wanted;
 }
 
+// The controller's own playback volume, all the way up. Linux leaves the
+// DualSense's ALSA "PCM Playback Volume" at 80 of 100 - on its -100..0 dB
+// scale, -20 dB, a tenth of the motors' strength - and PipeWire does not
+// raise it. Haptics strength (F10) is the level from there.
+void max_controller_volume() {
+#if defined(__linux__)
+    std::FILE* f = std::fopen("/proc/asound/cards", "r");
+    if (!f) return;
+    char line[256];
+    int card = -1;
+    while (card < 0 && std::fgets(line, sizeof(line), f)) {
+        int n = -1;
+        if (std::strstr(line, "DualSense") && std::sscanf(line, " %d [", &n) == 1) card = n;
+    }
+    std::fclose(f);
+    if (card < 0) return;
+    const std::string path = "/dev/snd/controlC" + std::to_string(card);
+    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        host_log("haptics: cannot open %s to raise the controller's volume", path.c_str());
+        return;
+    }
+    const auto set_max = [&](const char* name, bool boolean) {
+        snd_ctl_elem_info info{};
+        info.id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+        std::snprintf(reinterpret_cast<char*>(info.id.name), sizeof(info.id.name), "%s", name);
+        if (::ioctl(fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0) return -1L;
+        snd_ctl_elem_value v{};
+        v.id = info.id;
+        const long top = boolean ? 1 : info.value.integer.max;
+        for (unsigned i = 0; i < info.count && i < 128; ++i) v.value.integer.value[i] = top;
+        return ::ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &v) < 0 ? -1L : top;
+    };
+    set_max("PCM Playback Switch", true);
+    const long top = set_max("PCM Playback Volume", false);
+    ::close(fd);
+    host_log("haptics: the controller's playback volume %s (card %d)", top >= 0 ? "at its maximum" : "could not be set", card);
+#endif
+}
+
 #if defined(BBHOST_HAVE_SDL3)
 bool contains_nocase(const char* hay, const char* needle) {
     if (!hay) return false;
@@ -221,7 +268,7 @@ void close_locked(const char* why) {
 void scan_locked(bool want_hd) {
     g_last_scan = std::chrono::steady_clock::now();
     if (!want_hd) {
-        close_locked("Haptics is not HD");
+        close_locked("Haptics is not HD, or no DualSense is on USB");
         return;
     }
     if (!g_audio_up) {
@@ -268,6 +315,7 @@ void scan_locked(bool want_hd) {
         g_device = found;
         g_hd_live = true;
         g_said_none = false;
+        max_controller_volume();
         host_log("haptics: HD output on \"%s\" (motors on channels %d and %d of 4)", found_name ? found_name : "?", g_tune.left + 1,
                  g_tune.right + 1);
         // PipeWire's Pro Audio profile names the four channels AUX0..AUX3, and
@@ -356,7 +404,10 @@ bool haptics_is_dualsense(std::uint16_t vendor, std::uint16_t product) {
     return vendor == 0x054c && (product == 0x0ce6 || product == 0x0df2);
 }
 
-void haptics_devices_changed() { g_rescan = true; }
+void haptics_devices_changed(bool dualsense_on_usb) {
+    g_usb_pad = dualsense_on_usb;
+    g_rescan = true;
+}
 
 float haptics_l2_fire_point() {
     static const float fire = [] {
@@ -398,7 +449,7 @@ void haptics_game_audio(const float* frames, unsigned count, float gain) {
                      g_tune.left + 1, g_tune.right + 1);
         }
     }
-    const bool want_hd = w.mode == 2;
+    const bool want_hd = w.mode == 2 && g_usb_pad.load(std::memory_order_relaxed);
     // Looked for when something changed, and every 3 s while HD is wanted
     // and there is no output yet (the controller may be plugged in later).
     if (g_rescan.exchange(false) || (want_hd && !g_stream && std::chrono::steady_clock::now() - g_last_scan > std::chrono::seconds(3))) {

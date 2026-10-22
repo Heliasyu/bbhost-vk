@@ -253,7 +253,32 @@ void pad_open(SDL_JoystickID id) {
         host_log("gamepad: %s connected (id %u, %s; %zu in all)", SDL_GetGamepadName(g), static_cast<unsigned>(id),
                  path ? path : "no path", g_pads.size());
         note_deck_outside_steam(g);
+        // A DualSense on Bluetooth (host/haptics.h): HD haptics play through
+        // its USB sound card, which it ignores while its Bluetooth link is up
+        // - even with the cable plugged in (it then only charges, and the
+        // USB side is refused as the same controller twice).
+        if (haptics_is_dualsense(SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g)) &&
+            SDL_GetGamepadConnectionState(g) == SDL_JOYSTICK_CONNECTION_WIRELESS && haptics_mode() == 2) {
+            host_log("haptics: %s is on Bluetooth - HD haptics need it on USB (disconnect it from Bluetooth, then replug the "
+                     "cable); the classic rumble runs",
+                     SDL_GetGamepadName(g));
+            static bool said = false;
+            if (!said) {
+                said = true;
+                host_message_show("DualSense on Bluetooth: for HD haptics, disconnect it from Bluetooth and replug the USB cable", 10.0f);
+            }
+        }
     }
+}
+// Whether one of the open pads is a DualSense connected by USB (host/haptics.h).
+bool dualsense_on_usb() {
+    std::lock_guard<std::mutex> lock(g_pads_mu);
+    for (SDL_Gamepad* g : g_pads) {
+        if (haptics_is_dualsense(SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g)) &&
+            SDL_GetGamepadConnectionState(g) == SDL_JOYSTICK_CONNECTION_WIRED)
+            return true;
+    }
+    return false;
 }
 void pad_close(SDL_JoystickID id) {
     std::lock_guard<std::mutex> lock(g_pads_mu);
@@ -1888,6 +1913,7 @@ bool window_start_impl(int width, int height, const char* title) {
         for (int k = 0; k < n; ++k) pad_open(ids[k]);
         SDL_free(ids);
     }
+    haptics_devices_changed(dualsense_on_usb());
     // A pad in at the start is what the player is holding until they touch
     // something else - the prompts start as its glyphs, as they always did.
     if (!g_pads.empty()) note_input(InputDevice::Pad);
@@ -2130,7 +2156,7 @@ bool host_window_pump() {
             }
             case SDL_EVENT_GAMEPAD_ADDED:
                 pad_open(e.gdevice.which);
-                haptics_devices_changed();
+                haptics_devices_changed(dualsense_on_usb());
                 break;
             case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
                 note_input(InputDevice::Pad);
@@ -2173,7 +2199,7 @@ bool host_window_pump() {
             }
             case SDL_EVENT_GAMEPAD_REMOVED:
                 pad_close(e.gdevice.which);
-                haptics_devices_changed();
+                haptics_devices_changed(dualsense_on_usb());
                 break;
             default:
                 break;
