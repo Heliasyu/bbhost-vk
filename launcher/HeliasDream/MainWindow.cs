@@ -49,7 +49,7 @@ public sealed class MainWindow : Window
         SystemDecorations = SystemDecorations.None;
         TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
         Background = Brushes.Transparent;
-        CanResize = false;
+        CanResize = true;
 
         _gameDir = Paths.FindGameDir(_settings.GameDir);
         _ctx = new Ctx
@@ -104,6 +104,7 @@ public sealed class MainWindow : Window
         Grid.SetColumn(tabs, 1); header.Children.Add(tabs);
         Grid.SetColumn(winButtons, 3); header.Children.Add(winButtons);
         header.PointerPressed += (_, e) => { if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) BeginMoveDrag(e); };
+        header.DoubleTapped += (_, _) => ToggleMaximized();
 
         // Page
         _page = new TransitioningContentControl { PageTransition = _glide, ClipToBounds = false };
@@ -129,6 +130,7 @@ public sealed class MainWindow : Window
         var root = new Grid();
         root.Children.Add(_scene);
         root.Children.Add(layout);
+        root.Children.Add(Handles());
         Content = new Border { CornerRadius = new CornerRadius(22), ClipToBounds = true, Child = root, Background = Brush.Parse("#07080C") };
 
         KeyDown += (_, e) =>
@@ -139,6 +141,44 @@ public sealed class MainWindow : Window
 
         UpdateSummary();
         GoTo(0);
+    }
+
+    void ToggleMaximized() => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    /// The frameless window's own edges: the very top drags it (double-click maximizes), the
+    /// corners and the other three sides resize it.
+    Control Handles()
+    {
+        const double edge = 7, corner = 18;
+        var g = new Grid { IsHitTestVisible = true, Background = null };
+        Border Zone(HorizontalAlignment h, VerticalAlignment v, double w, double ht, StandardCursorType cursor, WindowEdge? resize)
+        {
+            var b = new Border
+            {
+                HorizontalAlignment = h, VerticalAlignment = v, Background = Brushes.Transparent, Cursor = new Cursor(cursor),
+                Width = double.IsNaN(w) ? double.NaN : w, Height = double.IsNaN(ht) ? double.NaN : ht,
+            };
+            b.PointerPressed += (_, e) =>
+            {
+                if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+                if (resize is { } r) { if (WindowState == WindowState.Normal) BeginResizeDrag(r, e); }
+                else BeginMoveDrag(e);
+                e.Handled = true;
+            };
+            if (resize == null) b.DoubleTapped += (_, _) => ToggleMaximized();
+            g.Children.Add(b);
+            return b;
+        }
+        var top = Zone(HorizontalAlignment.Stretch, VerticalAlignment.Top, double.NaN, 14, StandardCursorType.Arrow, null);
+        top.Margin = new Thickness(corner, 0, corner, 0);
+        Zone(HorizontalAlignment.Left, VerticalAlignment.Stretch, edge, double.NaN, StandardCursorType.LeftSide, WindowEdge.West).Margin = new Thickness(0, corner, 0, corner);
+        Zone(HorizontalAlignment.Right, VerticalAlignment.Stretch, edge, double.NaN, StandardCursorType.RightSide, WindowEdge.East).Margin = new Thickness(0, corner, 0, corner);
+        Zone(HorizontalAlignment.Stretch, VerticalAlignment.Bottom, double.NaN, edge, StandardCursorType.BottomSide, WindowEdge.South).Margin = new Thickness(corner, 0, corner, 0);
+        Zone(HorizontalAlignment.Left, VerticalAlignment.Top, corner, corner, StandardCursorType.TopLeftCorner, WindowEdge.NorthWest);
+        Zone(HorizontalAlignment.Right, VerticalAlignment.Top, corner, corner, StandardCursorType.TopRightCorner, WindowEdge.NorthEast);
+        Zone(HorizontalAlignment.Left, VerticalAlignment.Bottom, corner, corner, StandardCursorType.BottomLeftCorner, WindowEdge.SouthWest);
+        Zone(HorizontalAlignment.Right, VerticalAlignment.Bottom, corner, corner, StandardCursorType.BottomRightCorner, WindowEdge.SouthEast);
+        return g;
     }
 
     static string? KeyArt(string? app0)

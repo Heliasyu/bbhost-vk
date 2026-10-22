@@ -18,7 +18,7 @@ namespace HeliasDream.Views;
 /// </summary>
 public sealed class Scene : Panel
 {
-    sealed record Layer(Control Visual, TranslateTransform Move, double Speed);
+    sealed record Layer(Control Visual, TranslateTransform Move, double Speed, double BaseY = 0);
 
     readonly Layer[] _layers;
     bool _reduceMotion;
@@ -70,10 +70,24 @@ public sealed class Scene : Panel
             },
         };
 
-        var far = Skyline(Far, "#0A0D14", 0.6, 2200, 330, 40);
-        var near = new Grid { Width = 2400, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left };
-        near.Children.Add(Skyline(Near, "#05060A", 0.94, 2400, 370, 0));
-        near.Children.Add(Skyline(Ground, "#030406", 1, 2400, 180, 0));
+        // Each skyline carries the town below it, so a scroll that lifts the layer never shows
+        // past its bottom: the far one a plain dark mass, the near one with lit windows.
+        var far = new Grid
+        {
+            Width = 2200, Height = 330, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 40), Opacity = 0.6,
+            Children = { Skyline(Far, "#0A0D14", 1, 2200, 330, 0), BelowBand("#0A0D14", 330, null) },
+        };
+        var near = new Grid
+        {
+            Width = 2400, Height = 370, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Bottom,
+            Children =
+            {
+                Skyline(Near, "#05060A", 0.94, 2400, 370, 0), Skyline(Ground, "#030406", 1, 2400, 180, 0),
+                Windows(2400, 180, 14, seed: 3), BelowBand("#030406", 370, Windows(2400, Below, 160, seed: 11)),
+            },
+        };
 
         _layers = art != null
             ? new[] { art, new Layer(moon, new TranslateTransform(), 0.14), new Layer(far, new TranslateTransform(), 0.45), new Layer(near, new TranslateTransform(), 1.0) }
@@ -86,6 +100,7 @@ public sealed class Scene : Panel
                 new DoubleTransition { Property = TranslateTransform.XProperty, Duration = TimeSpan.FromMilliseconds(1100), Easing = new CubicEaseOut() },
                 new DoubleTransition { Property = TranslateTransform.YProperty, Duration = TimeSpan.FromMilliseconds(260), Easing = new CubicEaseOut() },
             };
+            l.Move.Y = l.BaseY;
             l.Visual.RenderTransform = l.Move;
             Children.Add(l.Visual);
         }
@@ -94,7 +109,7 @@ public sealed class Scene : Panel
     public bool ReduceMotion
     {
         get => _reduceMotion;
-        set { _reduceMotion = value; if (value) foreach (var l in _layers) { l.Move.X = 0; l.Move.Y = 0; } }
+        set { _reduceMotion = value; if (value) foreach (var l in _layers) { l.Move.X = 0; l.Move.Y = l.BaseY; } }
     }
 
     /// Page index: each layer slides left by its own share.
@@ -108,7 +123,7 @@ public sealed class Scene : Panel
     public void Scrolled(double offset)
     {
         if (_reduceMotion) return;
-        foreach (var l in _layers) l.Move.Y = -offset * 0.22 * l.Speed;
+        foreach (var l in _layers) l.Move.Y = l.BaseY - offset * 0.22 * l.Speed;
     }
 
     static Control Skyline(string data, string fill, double opacity, double width, double height, double lift) => new Path
@@ -117,6 +132,53 @@ public sealed class Scene : Panel
         Width = width, Height = height, Margin = new Thickness(0, 0, 0, lift),
         HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Bottom,
     };
+
+    const double Below = 900;
+
+    /// The town under a skyline: a band hanging below the layer's own box (drawn, not laid out,
+    /// so the skyline stays at the window's bottom), lifted into view as a page scrolls.
+    static Control BelowBand(string fill, double top, Control? content)
+    {
+        var band = new Grid
+        {
+            Height = Below, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top, Background = Brush.Parse(fill),
+            RenderTransform = new TranslateTransform(0, top - 1), IsHitTestVisible = false,
+        };
+        if (content != null) band.Children.Add(content);
+        return band;
+    }
+
+    /// Warm lit windows scattered over a dark band: small panes in pairs and stacks, a few
+    /// brighter than the rest. Drawn from a fixed seed so they stay put between starts.
+    static Control Windows(double width, double height, int count, int seed)
+    {
+        var rnd = new Random(seed);
+        var canvas = new Canvas { Width = width, Height = height, IsHitTestVisible = false,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Bottom, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left };
+        for (int i = 0; i < count; i++)
+        {
+            double x = rnd.NextDouble() * (width - 40), y = 12 + rnd.NextDouble() * (height - 40);
+            int cols = 1 + rnd.Next(3), rows = 1 + rnd.Next(3);
+            double w = 5 + rnd.Next(4), h = 8 + rnd.Next(6);
+            var warm = rnd.NextDouble() < 0.82 ? "#E8B86A" : "#F3D9A4";
+            double glow = 0.25 + rnd.NextDouble() * 0.6;
+            for (int c = 0; c < cols; c++)
+                for (int r = 0; r < rows; r++)
+                {
+                    if (rnd.NextDouble() < 0.3) continue;
+                    var pane = new Border
+                    {
+                        Width = w, Height = h, CornerRadius = new CornerRadius(w / 2, w / 2, 1, 1),
+                        Background = Brush.Parse(warm), Opacity = glow * (0.7 + rnd.NextDouble() * 0.3),
+                        BoxShadow = BoxShadows.Parse($"0 0 10 2 #66E8B86A"),
+                    };
+                    Canvas.SetLeft(pane, x + c * (w + 6));
+                    Canvas.SetTop(pane, y + r * (h + 9));
+                    canvas.Children.Add(pane);
+                }
+        }
+        return canvas;
+    }
 
     static Control Glow(string color, double x, double y, double radius) => new Border
     {

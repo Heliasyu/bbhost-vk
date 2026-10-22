@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using Avalonia;
 using Avalonia.Headless;
@@ -23,6 +24,12 @@ internal static class Shot
         w.Show();
         Pump(20);
         if (page != 0) { w.ShowPage(page); Pump(120); }
+        if (args.Length > 3 && double.TryParse(args[3], out var scroll))
+        {
+            foreach (var sv in Avalonia.VisualTree.VisualExtensions.GetVisualDescendants(w).OfType<Avalonia.Controls.ScrollViewer>())
+                sv.Offset = new Avalonia.Vector(0, scroll);
+            Pump(60);
+        }
         Pump(40);
         w.CaptureRenderedFrame()?.Save(path);
         w.Close();
