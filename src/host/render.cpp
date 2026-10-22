@@ -328,6 +328,32 @@ const bool g_lazy_barriers = [] {
     const char* e = std::getenv("BBHOST_PASS_BARRIERS");
     return e && std::strcmp(e, "lazy") == 0;
 }();
+
+// bbhost-vk: the hazards by range, not by base. A T# can point inside a
+// target - a layer or a mip of it, or an image the game placed in its memory
+// (the blood layers sit 0x28000 bytes into an older target) - and a base
+// compare missed exactly those reads, the likeliest cause of the Deck's
+// white blocks with lazy barriers and compressed targets. Exact bases
+// still hit first; a target that is gone (not in g_rts) matches by base only.
+bool hazard_holds(const std::unordered_set<std::uint64_t>& targets, std::uint64_t va) {
+    if (targets.count(va)) return true;
+    for (const std::uint64_t t : targets) {
+        if (va <= t) continue;
+        if (const auto it = g_rts.find(t); it != g_rts.end() && va < t + rt_size_bytes(it->second)) return true;
+    }
+    return false;
+}
+// Anything in `addrs` inside the target at `base` (its whole range).
+bool hazard_inside(const std::unordered_set<std::uint64_t>& addrs, std::uint64_t base) {
+    if (addrs.count(base)) return true;
+    const auto it = g_rts.find(base);
+    if (it == g_rts.end()) return false;
+    const std::uint64_t end = base + rt_size_bytes(it->second);
+    for (const std::uint64_t a : addrs) {
+        if (a > base && a < end) return true;
+    }
+    return false;
+}
 std::atomic<std::uint64_t> g_barriers_paid{0}, g_barriers_skipped{0}, g_barriers_mid_pass{0};
 
 std::atomic<std::uint64_t> g_rt_created{0}, g_untraced_draws{0}, g_clears{0}, g_rt_copies{0};
@@ -6541,10 +6567,16 @@ void begin_pass(const DrawState& s, std::uint64_t key, bool hazard = false) {
     end_pass_for_draw_locked();
     if (g_hazards.owed) {
         bool need = hazard;
+        // A target written or sampled since the barrier, anywhere in this
+        // pass's targets' memory (or this target inside a written one).
+        const auto touched = [](std::uint64_t base) {
+            return hazard_holds(g_hazards.written, base) || hazard_inside(g_hazards.written, base) ||
+                   hazard_inside(g_hazards.sampled, base);
+        };
         for (int t = 0; t < 8 && !need; ++t) {
-            if (s.color[t]) need = g_hazards.written.count(s.color[t]->base) || g_hazards.sampled.count(s.color[t]->base);
+            if (s.color[t]) need = touched(s.color[t]->base);
         }
-        if (s.depth && !need) need = g_hazards.written.count(s.depth->base) || g_hazards.sampled.count(s.depth->base);
+        if (s.depth && !need) need = touched(s.depth->base);
         if (need) {
             pay_pass_barrier_locked();
         } else {
@@ -14175,7 +14207,7 @@ static bool draw_impl(const GpuDraw& d) {
             for (const StageImages::Image& im : stage_images[st].images) {
                 if (!im.resolved) continue;
                 const std::uint64_t base = tsharp_base(im.w);
-                if (g_hazards.owed && g_hazards.written.count(base)) sample_hazard = true;
+                if (g_hazards.owed && hazard_holds(g_hazards.written, base)) sample_hazard = true;
                 g_hazards.sampled.insert(base);
             }
         }
