@@ -105,9 +105,9 @@ Phase 5 ends at the **first** of these:
   - Ultra Performance takes ~5 points off GPU busy and a third of the slow frames, and
     `bb-cp0` stays put. So the smoke frames that go slow are mostly GPU frames, but the GPU
     still has ~13% slack on average: the spikes are uneven frames, not a full GPU.
-  - **Next:** the same spot with the cap off (the plan's reading needs fps free to move),
-    and `BBHOST_GPU_SAMPLE_SLOW=1` to time the slow frames themselves. Until then, 5.1/5.4
-    (the GPU) go before 5.2/5.3.
+  - **Next:** the same spot at the 120 cap with `BBHOST_GPU_SAMPLE_SLOW=1`, which times the
+    slow frames themselves. No uncapped runs: the game stays at 120 or below (its physics
+    misbehaves above it). Until then, 5.1/5.4 (the GPU) go before 5.2/5.3.
 
 ### Step 5.1: Cheap GPU tests (2-3 days, no new code, environment switches only)
 1. **Lazy pass barriers on RDNA4** (`BBHOST_PASS_BARRIERS=lazy`).
