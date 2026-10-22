@@ -64,13 +64,14 @@ struct Envelope {
 };
 
 // What can be tuned between test rounds without a build:
-// BBHOST_HAPTICS_TUNE="cutoff=160,sustain=0,floor=0.006,ratio=2,front=4,slow=800,carrier=0.5,gain=3,rumble=0.8"
+// BBHOST_HAPTICS_TUNE="cutoff=160,sustain=0,floor=0.006,ratio=2,front=4,slow=800,expand=0.04,carrier=0.5,gain=3,rumble=0.8"
 //   cutoff   the effects' low-pass, Hz (what the motors are given of the sound)
 //   sustain  how much of a steady sound stays (0: only hits; 1: everything)
 //   floor    the level below which a sound is not felt at all
 //   ratio    how much louder than the last `slow` ms a sound must be to be a hit
 //   front    the same for the front left and right, where the music is
 //   slow     that window, ms - longer than a gust of wind
+//   expand   what the effects give the motors below this fades to nothing (0: off)
 //   carrier  0: the filtered sound itself; 1: a 150 Hz tone that follows it
 //   gain     the effects' level before the soft limit
 //   rumble   the converted rumble's level
@@ -79,8 +80,8 @@ struct Tuning {
     // Round 7: with 15% of every steady sound kept, a 1.4x rise over 400 ms
     // counted as a hit and a floor of 0.003, wind and ambience were felt as a
     // constant buzz. Only hits now: twice the last 800 ms, above a higher floor.
-    float cutoff = 160.0f, sustain = 0.0f, floor = 0.006f, ratio = 2.0f, front = 4.0f, slow = 800.0f, carrier = 0.5f, gain = 3.0f,
-          rumble = 0.8f;
+    float cutoff = 160.0f, sustain = 0.0f, floor = 0.006f, ratio = 2.0f, front = 4.0f, slow = 800.0f, expand = 0.04f, carrier = 0.5f,
+          gain = 3.0f, rumble = 0.8f;
     int left = 2, right = 3;
 };
 Tuning read_tuning() {
@@ -101,6 +102,7 @@ Tuning read_tuning() {
                 else if (k == "carrier") t.carrier = std::clamp(v, 0.0f, 1.0f);
                 else if (k == "ratio") t.ratio = std::clamp(v, 1.0f, 10.0f);
                 else if (k == "front") t.front = std::clamp(v, 1.0f, 20.0f);
+                else if (k == "expand") t.expand = std::clamp(v, 0.0f, 0.5f);
                 else if (k == "slow") t.slow = std::clamp(v, 50.0f, 5000.0f);
                 else if (k == "gain") t.gain = std::clamp(v, 0.0f, 50.0f);
                 else if (k == "rumble") t.rumble = std::clamp(v, 0.0f, 2.0f);
@@ -173,6 +175,10 @@ bool g_tune_read = false;
 // title music and the Dream's ambience were all in FL/FR, and every in-game
 // event showed in C, the LFE or the backs).
 Side g_side[2], g_front[2];
+// The expander after them (Tuning::expand): round 9's area music still came
+// through faintly - its bass notes in every channel, each passing the gate -
+// at a tenth of a hit's level. What stays under the threshold fades out.
+Envelope g_expand[2];
 float g_carrier_phase = 0.0f, g_large_phase = 0.0f, g_small_phase = 0.0f;
 float g_large = 0.0f, g_small = 0.0f;  // the rumble's smoothed amplitudes
 
@@ -409,9 +415,10 @@ void render(const float* in, unsigned count, float gain, const Wanted& w, float*
         }
         float motor[2];
         for (int s = 0; s < 2; ++s) {
-            const float fx = (1.0f - t.carrier) * sides[s] + t.carrier * 2.0f * levels[s] * tone;
+            float fx = ((1.0f - t.carrier) * sides[s] + t.carrier * 2.0f * levels[s] * tone) * t.gain;
+            if (t.expand > 0.0f) fx *= std::clamp((g_expand[s].run(std::fabs(fx)) - t.expand) / t.expand, 0.0f, 1.0f);
             // The tap keeps its own level: the strength setting is for the game.
-            motor[s] = std::tanh((fx * t.gain + rumble) * strength + tick) * 0.95f;
+            motor[s] = std::tanh((fx + rumble) * strength + tick) * 0.95f;
         }
         float* o = out + i * 4;
         o[0] = o[1] = o[2] = o[3] = 0.0f;
@@ -470,11 +477,16 @@ void haptics_game_audio(const float* frames, unsigned count, float gain) {
             s.init(g_tune);
             s.ratio = g_tune.front;
         }
+        for (Envelope& e : g_expand) {
+            e.attack = follow(1.0f);
+            e.release = follow(50.0f);
+        }
         if (std::getenv("BBHOST_HAPTICS_TUNE") || std::getenv("BBHOST_HAPTICS_CHANNELS")) {
-            host_log("haptics: tuning cutoff %.0f Hz, sustain %.2f, floor %.4f, ratio %.2f (front %.2f), slow %.0f ms, carrier %.2f, gain %.2f, "
+            host_log("haptics: tuning cutoff %.0f Hz, sustain %.2f, floor %.4f, ratio %.2f (front %.2f), slow %.0f ms, expand %.3f, carrier %.2f, gain %.2f, "
                      "rumble %.2f; motors on channels %d,%d",
                      static_cast<double>(g_tune.cutoff), static_cast<double>(g_tune.sustain), static_cast<double>(g_tune.floor),
                      static_cast<double>(g_tune.ratio), static_cast<double>(g_tune.front), static_cast<double>(g_tune.slow),
+                     static_cast<double>(g_tune.expand),
                      static_cast<double>(g_tune.carrier), static_cast<double>(g_tune.gain), static_cast<double>(g_tune.rumble),
                      g_tune.left + 1, g_tune.right + 1);
         }
