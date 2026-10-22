@@ -161,8 +161,8 @@ GUEST_ABI int hle_audio_output(int handle, const void* data) {
         std::lock_guard<std::mutex> lock(g_audio_stats_mu);
         ++g_audio_writes[handle];
     }
-    // The main port's 7.1 mix (sound effects and voices; music is the BGM
-    // port's) is what HD haptics feel (host/haptics.h).
+    // The main port's 7.1 mix is what HD haptics feel (host/haptics.h). It
+    // carries the music as well: the BGM port the game opens stays silent.
     if (data && p.port_type == 0 && p.is_float && p.channels == 8 && p.freq == 48000) {
         haptics_game_audio(static_cast<const float*>(data), p.len, p.gain);
     }

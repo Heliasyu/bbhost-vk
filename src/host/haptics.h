@@ -7,9 +7,10 @@
 // PS4 title and knows only the DualShock 4's two rumble motors, so the
 // waveform is made here from two things: the game's rumble (each motor a tone
 // the actuators carry well) and the game's sound effects - the main audio
-// port's 7.1 mix (music has a port of its own, hle/audio.cpp), its LFE and
-// the low end of each side, with a transient detector so impacts, shots and
-// footsteps come through and steady rain, wind and fire do not. Over
+// port's 7.1 mix, its low end, with a transient detector so impacts, shots
+// and footsteps come through and steady rain, wind and fire do not. The game
+// opens a BGM port but plays its music through the main one too, in the front
+// pair: those two pass only far sharper hits than the other channels. Over
 // Bluetooth, or with any other controller, there is no such device and the
 // classic rumble runs (Haptics: Rumble).
 //
