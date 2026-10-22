@@ -130,7 +130,7 @@ FSR 4.1.1 Performance, 4K/120, all effects on, MangoHud as usual.
 1. Run `bbtest start vk1-rc2`.
 2. Check the menu: open F10. The sections should be DISPLAY, GRAPHICS & EFFECTS, CAMERA &
    CONTROLS, GAME, ONLINE & ACCOUNT, DEBUG.
-   - Frame rate, Upscaler and Upscaling quality say "(restart required)".
+   - Frame rate and Upscaler say "(restart required)"; Upscaling quality changes live (b1+).
    - There are no pacing or post-processing switches.
    - Scroll every row. The menu must never go blank, and long notes wrap.
 3. Set **Upscaling sharpness 0.8**.

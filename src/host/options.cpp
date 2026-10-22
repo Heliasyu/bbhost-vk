@@ -186,7 +186,7 @@ Setting g_set[kSettingCount] = {
     // smooths edges itself, and the game's AA pass costs ~0.35 ms at 4K -
     // and On otherwise (FSR 3.1, FSR 1, native, or FSR 4.1.1 not running).
     {"anti_alias", "Anti-aliasing", {"On", "Off", "Auto"}, 2,
-     "The game's own AA pass. Auto: off while FSR 4.1.1 upscales (it smooths edges itself), on otherwise.", false},
+     "The game's own AA pass. Auto: off while FSR 4.1.1 upscales (a quality below Native AA: it smooths edges itself), on otherwise.", false},
     {"depth_of_field", "Depth of field", {"On", "Off"}, 0,
      "Blurs distant scenery; indoors there is rarely anything far enough to blur.", false},
     {"chromatic_aberration", "Chromatic aberration", {"On", "Off"}, 0,
@@ -264,8 +264,9 @@ Setting g_set[kSettingCount] = {
     {"upscale_quality", "Upscaling quality",
      {"Native AA", "Quality", "Balanced", "Performance", "Ultra Performance"}, 0,
      "Render scale for FSR 3.1 / 4.1.1: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. "
-     "The 3D scene renders at this share of the Resolution setting; menus, text and post-processing stay at the Resolution. Native AA (and Upscaler Off) is stock.",
-     true},
+     "The 3D scene renders at this share of the Resolution setting; menus, text and post-processing stay at the Resolution. Native AA (and Upscaler Off) is stock. "
+     "Changes live, a moment after the menu closes.",
+     false},
     // 0..1 like FSR 3's sharpness; 0.8 is RCAS at 0.2 stops, what FSR 1 uses.
     {"upscale_sharpness", "Upscaling sharpness", {"0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"}, 8,
      "How much FSR 3.1 and FSR 4.1.1 sharpen (0 turns it off). 0.8 matches FSR 1 as bbhost ships it; FSR 1 itself keeps its own sharpening.", false},
@@ -822,10 +823,13 @@ void rebuild_settings() {
     h.rebirth = on_of(kRebirth);
     h.five_players = on_of(kFivePlayers);
     h.upscaler = std::clamp(index_of(kUpscaler), 0, 3);
-    // Auto: off while FSR 4.1.1 is the upscaler and runs (host_opt_fsr4_unavailable).
-    h.anti_alias_auto = index_of(kAntiAlias) == 2;
-    h.anti_alias = h.anti_alias_auto ? !(h.upscaler == 3 && !g_fsr4_unavailable.load()) : on_of(kAntiAlias);
     h.upscale_quality = std::clamp(index_of(kUpscaleQuality), 0, 4);
+    // Auto: off while FSR 4.1.1 is the upscaler and runs (host_opt_fsr4_unavailable).
+    // It runs only below Native AA: Native AA is stock rendering, the scene not
+    // split and no FSR pass (DEVLOG Phase 1, decision 2), so Auto keeps the
+    // game's AA there - it turned it off before, and Native AA had none at all.
+    h.anti_alias_auto = index_of(kAntiAlias) == 2;
+    h.anti_alias = h.anti_alias_auto ? !(h.upscaler == 3 && h.upscale_quality > 0 && !g_fsr4_unavailable.load()) : on_of(kAntiAlias);
     h.upscale_sharpness = static_cast<float>(std::clamp(index_of(kUpscaleSharpness), 0, 10)) / 10.0f;
     h.upscale_reactive = on_of(kUpscaleReactive);
     h.upscale_jitter = on_of(kUpscaleJitter);

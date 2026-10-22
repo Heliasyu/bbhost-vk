@@ -130,7 +130,7 @@
 125033	FSR 4.1.1	
 126020	Upscaling Quality	
 126000	Sharpness	How much FSR 3.1 and FSR 4.1.1 sharpen, 0 to 10 (0 turns it off). 8 matches bbhost's FSR 1.
-126001	Quality	The 3D scene's share of the Resolution: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Menus and text stay at the Resolution. Applies fully at the next start.
+126001	Quality	The 3D scene's share of the Resolution: Native AA 100%, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Menus and text stay at the Resolution. Changes live, a moment after the menu closes.
 126030	Native AA	
 126031	Quality	
 126032	Balanced	
