@@ -344,7 +344,7 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
             g_last_out4 = out4;
             ++g_window.dispatches;
             ++g_window.fsr4;
-            pass_timer_upscaler_is_fsr4(true);
+            pass_timer_upscaler_name(name4);
             if (const std::string d = dlss ? dlss_describe_locked() : v07 ? fsr4v07_describe_locked() : fsr4_describe_locked(); d != g_fsr4_described) {
                 g_fsr4_described = d;
                 host_log("fsr4: %s, %s (scene %ux%u -> %ux%u)", dlss ? "DLSS" : v07 ? "FSR 4 (INT8 v07)" : "FSR 4.1.1 replay", d.c_str(), in.render_w, in.render_h, out.w, out.h);
@@ -501,7 +501,7 @@ bool fsr3_scale_pass_locked(RtImage* target, const temporal::OutputRect& out, co
         copy_output(cmd, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target, out);
         pass_timer_end_locked(cmd, copy_slot);
     }
-    pass_timer_upscaler_is_fsr4(false);
+    pass_timer_upscaler_name("FSR 3.1");
     ++g_upscaled;
     dump_end_locked(dump, in.frame, g_fsr->output(), g_fsr->output_format(), g_fsr->output_w(), g_fsr->output_h(), *target);
     g_last_frame = in.frame;
