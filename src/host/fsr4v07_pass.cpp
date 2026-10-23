@@ -1,13 +1,19 @@
 // Helia's Dream: FSR 4 (INT8, v07) at the scale pass (host/fsr4v07_pass.h).
 #include "host/fsr4v07_pass.h"
 
+#include "core/host_clock.h"
 #include "host/gpu_internal.h"
+#include "host/options.h"
+#include "host/perf_capture.h"
 #include "log.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #if defined(BBHOST_HAVE_FSR4_V07)
 
@@ -73,8 +79,7 @@ void destroy(Context* c) {
 }
 
 // A context for these sizes, its shaders and weights read from the asset folder.
-Context* make(std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_t oh, std::string* why) {
-    const FfxFsr4ModelPreset preset = ffxFsr4SelectModelPreset(rw, ow, false);
+Context* make(FfxFsr4ModelPreset preset, std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_t oh, std::string* why) {
     FfxFsr4V07AssetSet set{};
     if (!ffxFsr4V07BuildAssetSet(preset, ow, oh, &set)) {
         *why = "no FSR 4 model for an output of " + std::to_string(ow) + "x" + std::to_string(oh);
@@ -141,6 +146,56 @@ Context* make(std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_
     c->ow = ow;
     c->oh = oh;
     return c;
+}
+
+// The model for these sizes: by the upscale ratio, or (Sharper motion,
+// host_opt_fsr4_sharp_motion) the balanced one in place of Performance and
+// Ultra Performance's, for fewer trails behind moving things.
+FfxFsr4ModelPreset model_for(std::uint32_t rw, std::uint32_t ow) {
+    const FfxFsr4ModelPreset p = ffxFsr4SelectModelPreset(rw, ow, false);
+    if (host_opt_fsr4_sharp_motion() && (p == FFX_FSR4_MODEL_PRESET_PERFORMANCE || p == FFX_FSR4_MODEL_PRESET_ULTRA_PERFORMANCE))
+        return FFX_FSR4_MODEL_PRESET_BALANCED;
+    return p;
+}
+
+// A context built on a worker thread. Its 16 compute pipelines (up to half a
+// megabyte of SPIR-V each) took long enough to compile with a cold driver
+// cache that building them inside the frame, under the GPU lock, froze the
+// game at its first upscaled frame. Now FSR 3.1 stands in until it is ready.
+// The provider records nothing while it is made (its first dispatch uploads
+// the weights), and its backend interface is set only during that, so the
+// worker needs no lock. Never freed while running: the process may end first.
+struct Build {
+    FfxFsr4ModelPreset preset;
+    std::uint32_t rw, rh, ow, oh;
+    std::chrono::steady_clock::time_point start;
+    std::atomic<bool> done{false};
+    Context* result = nullptr;
+    std::string why;
+};
+Build* g_build = nullptr;
+// The last build that failed without being fatal: not tried again for the same model and sizes.
+struct Failed {
+    FfxFsr4ModelPreset preset = FFX_FSR4_MODEL_PRESET_NATIVE_AA;
+    std::uint32_t rw = 0, rh = 0, ow = 0, oh = 0;
+} g_failed;
+
+void start_build(FfxFsr4ModelPreset preset, std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_t oh) {
+    auto* b = new Build;
+    b->preset = preset;
+    b->rw = rw;
+    b->rh = rh;
+    b->ow = ow;
+    b->oh = oh;
+    b->start = std::chrono::steady_clock::now();
+    g_build = b;
+    host_log("fsr4: building FSR 4 (INT8 v07), %s model for %ux%u -> %ux%u, on a worker; FSR 3.1 upscales until it is ready",
+             ffxFsr4ModelPresetName(preset), rw, rh, ow, oh);
+    std::thread([b] {
+        host_thread_place(HostPlace::Cold, "bb-fsr4-build");
+        b->result = make(b->preset, b->rw, b->rh, b->ow, b->oh, &b->why);
+        b->done.store(true, std::memory_order_release);
+    }).detach();
 }
 
 bool make_output(std::uint32_t w, std::uint32_t h) {
@@ -302,14 +357,46 @@ bool fsr4v07_record_locked(VkCommandBuffer cmd, const UpscalerInputs& in, std::u
     if (env_off("BBHOST_FSR4V07")) return fail_for_good("BBHOST_FSR4V07=0");
     if (!g_support.asked) return fail_for_good("no FSR 4 assets in " + fsr4v07_assets_dir() + " (the launcher's Set up downloads them)");
     if (!g_support.ok) return fail_for_good("the GPU lacks " + g_support.missing);
-    if (!g_ctx || g_ctx->rw != in.render_w || g_ctx->rh != in.render_h || g_ctx->ow != output_w || g_ctx->oh != output_h) {
-        destroy(g_ctx);
-        g_ctx = nullptr;
-        std::string w;
-        g_ctx = make(in.render_w, in.render_h, output_w, output_h, &w);
-        if (!g_ctx) return w.rfind("missing", 0) == 0 || w.find("provider") != std::string::npos ? fail_for_good("FSR 4: " + w) : (*why = "FSR 4: " + w, false);
-        host_log("fsr4: FSR 4 (INT8 v07) context: %s model, tier %s, scene %ux%u -> %ux%u", ffxFsr4ModelPresetName(g_ctx->preset), g_ctx->tier.c_str(),
-                 in.render_w, in.render_h, output_w, output_h);
+    const FfxFsr4ModelPreset want = model_for(in.render_w, output_w);
+    const auto fits = [&](FfxFsr4ModelPreset p, std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_t oh) {
+        return p == want && rw == in.render_w && rh == in.render_h && ow == output_w && oh == output_h;
+    };
+    if (!g_ctx || !fits(g_ctx->preset, g_ctx->rw, g_ctx->rh, g_ctx->ow, g_ctx->oh)) {
+        if (g_build && g_build->done.load(std::memory_order_acquire)) {
+            Build* b = g_build;
+            g_build = nullptr;
+            const long long ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - b->start).count();
+            if (b->result) {
+                perf::note_compile("compute", "FSR 4 (INT8 v07)", static_cast<std::uint64_t>(ms) * 1000, true, false);
+                if (fits(b->preset, b->rw, b->rh, b->ow, b->oh)) {
+                    destroy(g_ctx);
+                    g_ctx = b->result;
+                    host_log("fsr4: FSR 4 (INT8 v07) context: %s model, tier %s, scene %ux%u -> %ux%u, built in %lld ms",
+                             ffxFsr4ModelPresetName(g_ctx->preset), g_ctx->tier.c_str(), in.render_w, in.render_h, output_w, output_h, ms);
+                } else {
+                    destroy(b->result);  // the sizes or the model changed while it was built: never recorded into
+                }
+            } else {
+                const std::string w = b->why;
+                if (w.rfind("missing", 0) == 0 || w.find("provider") != std::string::npos) {
+                    delete b;
+                    return fail_for_good("FSR 4: " + w);
+                }
+                g_failed = {b->preset, b->rw, b->rh, b->ow, b->oh};
+                host_log("fsr4: FSR 4: %s (after %lld ms); FSR 3.1 upscales at these sizes", w.c_str(), ms);
+            }
+            delete b;
+        }
+        if (!g_ctx || !fits(g_ctx->preset, g_ctx->rw, g_ctx->rh, g_ctx->ow, g_ctx->oh)) {
+            if (fits(g_failed.preset, g_failed.rw, g_failed.rh, g_failed.ow, g_failed.oh)) {
+                *why = "FSR 4 could not be made at these sizes";
+                return false;
+            }
+            if (!g_build) start_build(want, in.render_w, in.render_h, output_w, output_h);
+            *why = "FSR 4 is still being built";
+            return false;
+        }
     }
     if (!make_output(output_w, output_h)) {
         *why = "could not make its output image";

@@ -108,6 +108,8 @@ public static class OptionSchema
         ["mouse_menu"] = "In menus: click confirms, right-click goes back, the wheel moves the cursor. A click only reaches menus while one is open, so it never swings a weapon.",
         ["pad_icons"] = "The button icons the game's prompts show while you play with a controller. Auto: the game's own PlayStation icons with a PlayStation controller, and the Xbox buttons by name ([A], [RB], D-pad Up) with an Xbox or any other controller. The world's \"Examine\" prompts drawn on the HUD keep the PlayStation icons for now.",
         ["submit_split"] = "Experimental, untested on real hardware. Every N draws (Off, 32, 64, 128, 256), if the graphics card has finished everything it was given, the work recorded so far is handed to it at once instead of at the end of the game's batch. It aims at the card's idle gaps while it waits for the CPU: up to 80-120 ms a second (8-12%) were measured where the card had time to spare. Expected: at best a few % more FPS where the CPU holds the frame back; nothing when the card itself is the limit, since then it never runs dry and nothing is split. Each split is one more submission (about 27 µs on the card), so a small N can cost a little instead. May add stutter, and flashing or black frames would mean it does not work on your system: turn it off then. Changes live; BBHOST_SUBMIT_SPLIT wins when set.",
+        ["thread_priority"] = "Experimental, from Lantern Engine. The engine's graphics threads (command processors, recorder, submission, presenter) and the game's main and render threads run at a higher CPU priority than its other threads (nice -5, the frame clock -10), so a frame isn't held up behind loading or audio work. Expected: steadier frame times where the CPU is busy; nothing where the graphics card is the limit. Linux only lets a program do this when the system allows it (ulimit -e above 20; CachyOS and many desktops do): otherwise the log says so and nothing changes. On Windows these threads already run at a raised priority. Changes live.",
+        ["fsr4_sharp_motion"] = "Experimental, from Lantern Engine. With FSR 4 at Performance or Ultra Performance, it uses FSR 4's balanced model instead of the one made for that ratio: fewer trails and less smearing behind moving characters, for a little more GPU time. No effect at Native AA, Quality or Balanced, or with other upscalers. Changes live: FSR 4 is rebuilt in the background, with FSR 3.1 standing in for a moment.",
         ["compile_note"] = "Shows \"Building shaders...\" under the FPS counter's corner while the game builds a shader for something it shows for the first time, so a brief stutter then reads as what it is. Built shaders are kept, so it shows less and less.",
         ["menu_language"] = "The language of the in-game settings menu (F10): its tabs, settings, values and notes. Changes live. The game's own text follows Game language.",
         ["game_language"] = "The language of the game's own text, menus and subtitles, from the message bundles on your disc. Takes effect at the next start. The in-game settings menu (F10) is in English.",
@@ -249,6 +251,10 @@ public static class OptionSchema
     {
         new OptionDef("submit_split", "Submit split", new[] { "Off", "32", "64", "128", "256" }, 0,
             "Every N draws, give an idle GPU the work recorded so far."),
+        new OptionDef("thread_priority", "Graphics threads first", new[] { "Off", "On" }, 0,
+            "Graphics threads at a higher CPU priority than the game's other threads."),
+        new OptionDef("fsr4_sharp_motion", "Sharper motion (FSR 4)", new[] { "Off", "On" }, 0,
+            "FSR 4's balanced model at Performance and Ultra Performance."),
     });
 
     public static readonly OptionGroup[] More =

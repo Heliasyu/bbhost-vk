@@ -18,7 +18,11 @@
 #endif
 #if defined(__linux__)
 #include <sched.h>
+#include <signal.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -170,6 +174,78 @@ void host_timing_init() {
 #endif
 }
 
+#if defined(__linux__)
+namespace {
+
+// Graphics threads first (host_threads_set_priority): the hot threads met so
+// far, each with the nice value it gets when the setting is on.
+struct PrioThread {
+    pid_t tid;
+    int nice;
+    std::string who;
+};
+std::mutex g_prio_mu;
+std::vector<PrioThread> g_prio_threads;  // under g_prio_mu
+bool g_prio_on = false;                  // under g_prio_mu
+
+// The lowest nice value RLIMIT_NICE lets this process take (20 - the limit).
+int prio_floor() {
+    static const int f = [] {
+        rlimit r{};
+        if (getrlimit(RLIMIT_NICE, &r) != 0) return 0;
+        const long long cur = r.rlim_cur == RLIM_INFINITY ? 40 : static_cast<long long>(r.rlim_cur);
+        return static_cast<int>(std::clamp(20 - cur, -20ll, 20ll));
+    }();
+    return f;
+}
+
+// Sets one thread's nice value; the tid is checked to still be ours (a
+// thread that ended may have had its id reused).
+void prio_apply_locked(const PrioThread& t, bool on) {
+    if (syscall(SYS_tgkill, getpid(), t.tid, 0) != 0) return;
+    const int want = on ? std::max(t.nice, prio_floor()) : 0;
+    if (on && want >= 0) return;
+    setpriority(PRIO_PROCESS, static_cast<id_t>(t.tid), want);
+}
+
+void prio_register(int nice, const char* who) {
+    const pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
+    std::lock_guard<std::mutex> lk(g_prio_mu);
+    PrioThread* t = nullptr;
+    for (PrioThread& e : g_prio_threads)
+        if (e.tid == tid) t = &e;
+    if (!t) {
+        g_prio_threads.push_back({tid, nice, who ? who : "a thread"});
+        t = &g_prio_threads.back();
+    } else {
+        t->nice = std::min(t->nice, nice);
+    }
+    if (g_prio_on) prio_apply_locked(*t, true);
+}
+
+}  // namespace
+
+void host_threads_set_priority(bool on) {
+    std::lock_guard<std::mutex> lk(g_prio_mu);
+    if (on == g_prio_on) return;
+    g_prio_on = on;
+    if (on && prio_floor() >= 0) {
+        host_log("priority: Graphics threads first is on, but this system does not let a program raise its threads' priority "
+                 "(RLIMIT_NICE, ulimit -e, is 0): nothing changed");
+        return;
+    }
+    for (const PrioThread& t : g_prio_threads) prio_apply_locked(t, on);
+    if (on) {
+        host_log("priority: Graphics threads first: %zu hot threads so far at nice -5 (the vblank clock -10), floored at %d by RLIMIT_NICE",
+                 g_prio_threads.size(), prio_floor());
+    } else {
+        host_log("priority: Graphics threads first off: %zu hot threads back at nice 0", g_prio_threads.size());
+    }
+}
+#else
+void host_threads_set_priority(bool) {}
+#endif
+
 void host_thread_set_class(HostThreadClass c, const char* who) {
     static const bool on = !env_off("BBHOST_THREAD_PRIO");
 #if defined(_WIN32)
@@ -194,6 +270,7 @@ void host_thread_set_class(HostThreadClass c, const char* who) {
     // slack and the placement instead.
     host_thread_tight_timers(who);
     host_thread_place(HostPlace::Hot, who);
+    if (c == HostThreadClass::Pacing) prio_register(-10, who);
 #endif
 }
 
@@ -390,6 +467,7 @@ bool host_thread_tight_timers(const char* who) {
 bool host_tight_timers_on() { return g_slack_on.load(std::memory_order_relaxed); }
 
 void host_thread_place(HostPlace where, const char* who) {
+    if (where == HostPlace::Hot) prio_register(-5, who);
     Placement& p = placement();
     if (!p.on) {
         static std::atomic<bool> said{false};

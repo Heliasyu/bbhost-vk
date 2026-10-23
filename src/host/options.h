@@ -49,6 +49,9 @@ float host_opt_mip_bias();
 // Submit split (More > Performance, experimental): check every n-th draw
 // whether the GPU has run dry; 0 off. Live, an atomic. BBHOST_SUBMIT_SPLIT wins.
 unsigned host_opt_submit_split();
+// Sharper motion (FSR 4) (More > Performance, experimental): FSR 4's balanced
+// model at Performance and Ultra Performance. Live, an atomic.
+bool host_opt_fsr4_sharp_motion();
 int host_opt_resolution_index();
 void host_opt_set_resolution_index(int i);
 // The game's frame rate (engine/frame_rate.h): 30, 60, 90, or 0 for

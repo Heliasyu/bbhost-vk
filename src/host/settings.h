@@ -41,6 +41,8 @@ struct HostSettings {
     bool compile_note = true;        // "Building shaders" while pipelines are built in play
     int game_language = 1;           // the PS4's language code (1 English US); BBHOST_SYSTEM_LANG wins
     unsigned submit_split = 0;       // every n-th draw a mid-job submission if the GPU ran dry; 0 off (BBHOST_SUBMIT_SPLIT wins)
+    bool thread_priority = false;    // Graphics threads first (core/host_clock.h)
+    bool fsr4_sharp_motion = false;  // FSR 4's balanced model at Performance and Ultra Performance
     // Texture detail (the samplers' LOD bias, added to the game's own): -1 a mip
     // sharper. NAN is Auto: log2(render / output) under FSR 3.1 / 4.1.1.
     float mip_bias = 0.0f;       // the in-game pop-up when a trophy is earned (host/trophies.h)

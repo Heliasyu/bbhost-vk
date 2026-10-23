@@ -51,6 +51,16 @@ enum class HostThreadClass {
 };
 void host_thread_set_class(HostThreadClass c, const char* who);
 
+// Graphics threads first (More > Performance, experimental; Linux): the hot
+// chain's threads (host_thread_place Hot, and the classed threads above) at a
+// lower nice value than the game's other threads - the vblank clock -10, the
+// rest -5 - so a frame is not held up behind them. Raising priority needs
+// RLIMIT_NICE to allow it (ulimit -e; CachyOS and many desktops give 31, nice
+// -11); where it does not, the log says so once and nothing changes. Live:
+// the threads met so far are set (or put back to 0) at once, later ones as
+// they start. Windows already raises these threads (BBHOST_THREAD_PRIO).
+void host_threads_set_priority(bool on);
+
 // rc5 (Linux; no-ops elsewhere). host_thread_set_class also does both of
 // these for its threads.
 // The calling thread's timer slack to 1 ns (prctl PR_SET_TIMERSLACK): its
