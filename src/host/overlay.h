@@ -57,6 +57,10 @@ void host_overlay_glass(float x, float y, float w, float h, float radius, float 
 std::size_t host_overlay_glass_shown(OverlayGlass* out, std::size_t max);
 void host_overlay_round_rect(float x, float y, float w, float h, float r, std::uint32_t top, std::uint32_t bottom);
 void host_overlay_round_frame(float x, float y, float w, float h, float r, float t, std::uint32_t top, std::uint32_t bottom);
+// Picture `index` of the colour pictures (the trophies' icons, host/trophies.h:
+// trophy id i is picture i), tinted and faded by `rgba`. False, drawing
+// nothing, when there are none.
+bool host_overlay_picture(float x, float y, float w, float h, int index, std::uint32_t rgba);
 float host_overlay_ui_text(int face, float x, float y, float size, std::uint32_t rgba, const char* text);
 float host_overlay_ui_text_width(int face, float size, const char* text);
 

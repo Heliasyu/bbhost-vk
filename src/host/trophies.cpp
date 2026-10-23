@@ -3,6 +3,7 @@
 #include "host/haptics.h"
 #include "host/overlay.h"
 #include "host/settings.h"
+#include "hle/fs.h"
 #include "log.h"
 
 #include <algorithm>
@@ -11,9 +12,17 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
+#include <vector>
+
+#if defined(BBHOST_HAVE_SDL3)
+#include <SDL3/SDL.h>
+#endif
 
 namespace {
 
@@ -114,6 +123,106 @@ int trophy_count_of_grade(int grade) {
     return n;
 }
 
+namespace {
+constexpr int kIconCell = 120, kIconCols = 8;
+
+struct IconSheet {
+    bool tried = false, ok = false;
+    std::vector<std::uint8_t> rgba;
+    int w = 0, h = 0;
+};
+IconSheet g_icons;  // under g_icons_mu
+std::mutex g_icons_mu;
+
+std::uint32_t be32(const std::uint8_t* p) { return std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]; }
+std::uint64_t be64(const std::uint8_t* p) { return std::uint64_t(be32(p)) << 32 | be32(p + 4); }
+
+#if defined(BBHOST_HAVE_SDL3)
+// One TROP<id>.PNG into its cell: decoded, halved (2x2 box), the corners
+// rounded so it sits in the pop-up's rounded tile.
+bool place_icon(const std::uint8_t* png, std::size_t size, int id, IconSheet& sheet) {
+    SDL_Surface* raw = SDL_LoadPNG_IO(SDL_IOFromConstMem(png, size), true);
+    if (!raw) return false;
+    SDL_Surface* s = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(raw);
+    if (!s) return false;
+    const bool fits = s->w == kIconCell * 2 && s->h == kIconCell * 2;
+    if (fits) {
+        const int cx = (id % kIconCols) * kIconCell, cy = (id / kIconCols) * kIconCell;
+        const float r = kIconCell * 0.06f;  // a slight rounding: the frames are ornate to their corners
+        for (int y = 0; y < kIconCell; ++y) {
+            for (int x = 0; x < kIconCell; ++x) {
+                int sum[4] = {0, 0, 0, 0};
+                for (int dy = 0; dy < 2; ++dy) {
+                    const auto* row = static_cast<const std::uint8_t*>(s->pixels) + (y * 2 + dy) * s->pitch;
+                    for (int dx = 0; dx < 2; ++dx)
+                        for (int c = 0; c < 4; ++c) sum[c] += row[(x * 2 + dx) * 4 + c];
+                }
+                // Distance outside the rounded corner, for a soft edge a pixel wide.
+                const float qx = std::max(0.0f, std::max(r - (x + 0.5f), (x + 0.5f) - (kIconCell - r)));
+                const float qy = std::max(0.0f, std::max(r - (y + 0.5f), (y + 0.5f) - (kIconCell - r)));
+                const float cover = std::clamp(r + 0.5f - std::sqrt(qx * qx + qy * qy), 0.0f, 1.0f);
+                std::uint8_t* out = &sheet.rgba[((cy + y) * sheet.w + cx + x) * 4];
+                for (int c = 0; c < 3; ++c) out[c] = static_cast<std::uint8_t>(sum[c] / 4);
+                out[3] = static_cast<std::uint8_t>(std::lround(sum[3] / 4.0f * cover));
+            }
+        }
+    }
+    SDL_DestroySurface(s);
+    return fits;
+}
+#endif
+
+void load_icons(IconSheet& sheet) {
+#if defined(BBHOST_HAVE_SDL3)
+    const std::string path = hle_fs_map_path_base("/app0/sce_sys/trophy/trophy00.trp");
+    std::ifstream f(path, std::ios::binary);
+    const std::vector<std::uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // The pack: a 0x60-byte header (magic 0xDCA24D00, version, size, entry
+    // count, entry size), then entries of a 32-byte name, offset and size.
+    if (d.size() < 0x60 || be32(d.data()) != 0xDCA24D00u) {
+        host_log("trophy: no trophy pack at %s - the pop-up shows the grade's medal", path.c_str());
+        return;
+    }
+    const std::uint32_t count = be32(&d[16]), esize = be32(&d[20]);
+    const int rows = (trophy_count() + kIconCols - 1) / kIconCols;
+    sheet.w = kIconCols * kIconCell;
+    sheet.h = rows * kIconCell;
+    sheet.rgba.assign(static_cast<std::size_t>(sheet.w) * sheet.h * 4, 0);
+    int placed = 0;
+    for (std::uint32_t i = 0; i < count && esize >= 48 && 0x60 + (i + 1) * std::size_t(esize) <= d.size(); ++i) {
+        const std::uint8_t* e = &d[0x60 + i * std::size_t(esize)];
+        char name[33] = {};
+        std::memcpy(name, e, 32);
+        int id = -1;
+        if (std::sscanf(name, "TROP%3d.PNG", &id) != 1 || id < 0 || id >= trophy_count()) continue;
+        const std::uint64_t off = be64(e + 32), size = be64(e + 40);
+        if (off > d.size() || size > d.size() - off) continue;
+        placed += place_icon(&d[off], size, id, sheet);
+    }
+    sheet.ok = placed > 0;
+    host_log("trophy: %d of %d icons from %s", placed, trophy_count(), path.c_str());
+#else
+    (void)sheet;
+#endif
+}
+}  // namespace
+
+bool trophy_icon_sheet(const std::uint8_t** rgba, int* w, int* h, int* cell, int* cols) {
+    std::lock_guard<std::mutex> lk(g_icons_mu);
+    if (!g_icons.tried) {
+        g_icons.tried = true;
+        load_icons(g_icons);
+    }
+    if (!g_icons.ok) return false;
+    *rgba = g_icons.rgba.data();
+    *w = g_icons.w;
+    *h = g_icons.h;
+    *cell = kIconCell;
+    *cols = kIconCols;
+    return true;
+}
+
 void trophy_popup(int id, int earned, int total) {
     const TrophyInfo* t = trophy_info(id);
     host_log("trophy: %s (%d) earned - %d of %d", t ? t->name : "?", id, earned, total);
@@ -182,15 +291,18 @@ void trophy_popup_frame(float display_w, float /*display_h*/) {
 
     host_overlay_glass(x, y, w, h, r, 20.0f * k, 0.72f);
     host_overlay_round_rect(x, y, w, h, r, with_alpha(0x0e10168cu, a), with_alpha(0x0e10168cu, a));
-    // The icon tile, the grade's medal on it (no trophy art to show).
+    // The trophy's own icon (its frame's metal is its grade); without the
+    // game's trophy pack, a dark tile with the grade's medal on it.
     const float m = 60.0f * k, mx = x + 12.0f * k, my = y + (h - m) * 0.5f;
-    host_overlay_round_rect(mx, my, m, m, 15.0f * k, with_alpha(0x00000066u, a), with_alpha(0x00000066u, a));
-    std::uint32_t top, bottom;
-    medal(info->grade, top, bottom);
-    const float d = 34.0f * k, dx = mx + (m - d) * 0.5f, dy = my + (m - d) * 0.5f;
-    host_overlay_round_rect(dx - 2.0f, dy - 2.0f, d + 4.0f, d + 4.0f, (d + 4.0f) * 0.5f, with_alpha(0x0e1016ffu, a), with_alpha(0x0e1016ffu, a));
-    host_overlay_round_rect(dx, dy, d, d, d * 0.5f, with_alpha(top, a), with_alpha(bottom, a));
-    host_overlay_round_rect(dx + d * 0.2f, dy + d * 0.14f, d * 0.36f, d * 0.22f, d * 0.11f, with_alpha(0xffffff8cu, a), with_alpha(0xffffff00u, a));
+    if (!host_overlay_picture(mx, my, m, m, p.id, with_alpha(0xffffffffu, a))) {
+        host_overlay_round_rect(mx, my, m, m, 15.0f * k, with_alpha(0x00000066u, a), with_alpha(0x00000066u, a));
+        std::uint32_t top, bottom;
+        medal(info->grade, top, bottom);
+        const float d = 34.0f * k, dx = mx + (m - d) * 0.5f, dy = my + (m - d) * 0.5f;
+        host_overlay_round_rect(dx - 2.0f, dy - 2.0f, d + 4.0f, d + 4.0f, (d + 4.0f) * 0.5f, with_alpha(0x0e1016ffu, a), with_alpha(0x0e1016ffu, a));
+        host_overlay_round_rect(dx, dy, d, d, d * 0.5f, with_alpha(top, a), with_alpha(bottom, a));
+        host_overlay_round_rect(dx + d * 0.2f, dy + d * 0.14f, d * 0.36f, d * 0.22f, d * 0.11f, with_alpha(0xffffff8cu, a), with_alpha(0xffffff00u, a));
+    }
     // The grade in small capitals, the name in the serif, the progress.
     const float tx = mx + m + 14.0f * k;
     std::string label = grade_name(info->grade);

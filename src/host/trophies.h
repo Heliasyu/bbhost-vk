@@ -22,6 +22,13 @@ int trophy_count();
 // How many of each grade (1..4).
 int trophy_count_of_grade(int grade);
 
+// The trophies' own icons, read from the game's trophy pack
+// (/app0/sce_sys/trophy/trophy00.trp, TROP<id>.PNG) once, on the first call:
+// RGBA rows of `cols` x `rows` cells of `cell` pixels, trophy id i at cell i
+// (left to right, then down), each a 240-pixel icon halved, its corners
+// rounded. False with no pack or no PNG loader; nothing is written to disk.
+bool trophy_icon_sheet(const std::uint8_t** rgba, int* w, int* h, int* cell, int* cols);
+
 // A trophy was just earned: queue its pop-up. `earned` / `total` are the
 // progress after it. Any thread.
 void trophy_popup(int id, int earned, int total);
