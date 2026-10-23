@@ -1793,12 +1793,17 @@ bool pad_options_menu(const std::vector<SDL_Gamepad*>& pads) {
         south |= b(SDL_GAMEPAD_BUTTON_SOUTH);
         east |= b(SDL_GAMEPAD_BUTTON_EAST);
         for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT && !any; ++i) any = b(static_cast<SDL_GamepadButton>(i));
-        // The stick past half its throw, as a press of the D-pad.
+        // The stick past half its throw, as a press of the D-pad: only along
+        // its stronger axis, so pushing up a little off true does not also
+        // change the setting under the cursor.
         const int lx = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
-        up |= ly < -16000;
-        down |= ly > 16000;
-        left |= lx < -16000;
-        right |= lx > 16000;
+        if (std::abs(ly) >= std::abs(lx)) {
+            up |= ly < -16000;
+            down |= ly > 16000;
+        } else {
+            left |= lx < -16000;
+            right |= lx > 16000;
+        }
     }
     static bool latch = false, toggled = false;
     const bool toggle = guide || (l3 && r3);

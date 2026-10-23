@@ -1553,7 +1553,12 @@ bool host_options_key(int scancode, bool repeat) {
     }
     const int id = g_rows[g_sel].setting;
     if ((scancode == SDL_SCANCODE_LEFT || scancode == SDL_SCANCODE_RIGHT) && id >= 0) {
-        set_index(id, stepped(id, scancode == SDL_SCANCODE_LEFT ? -1 : 1, shift), false);
+        // A held key steps to the end and stops there: wrapping round would
+        // flip a two-value setting back and forth for as long as it is held,
+        // and HDR or the upscaler rebuilds with every flip.
+        const int to = stepped(id, scancode == SDL_SCANCODE_LEFT ? -1 : 1, shift);
+        if (repeat && (to < 0 || to >= static_cast<int>(g_set[id].values.size()))) return true;
+        set_index(id, to, false);
         return true;
     }
     if (scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_KP_ENTER ||
