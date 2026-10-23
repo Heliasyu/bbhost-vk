@@ -1738,10 +1738,43 @@ std::uint8_t axis_to_u8(std::int16_t v) {
 void update_triggers() {
     std::lock_guard<std::mutex> lock(g_pads_mu);
     static std::unordered_map<SDL_JoystickID, std::array<std::uint8_t, 22>> sent;
+    // The HD output each pad was reset for, and when its first report went.
+    struct Reset {
+        std::uint32_t hd = 0;
+        std::chrono::steady_clock::time_point first{};
+        bool done = false;
+    };
+    static std::unordered_map<SDL_JoystickID, Reset> reset;
     const bool relaxed = host_options_open() || ingame_menu_open() || hle_video_loading() || menu_pointer_in_menu();
+    const std::uint32_t hd = haptics_hd_generation();
     for (SDL_Gamepad* g : g_pads) {
         if (!haptics_is_dualsense(SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g))) continue;
         const SDL_JoystickID id = SDL_GetGamepadID(g);
+        // A new HD output (the game's start, a replug, the setting back to
+        // HD): the controller's reset first (host/haptics.h), the two reports
+        // a rumble's start and stop make - its rumble emulation on, then every
+        // switch off, which leaves the motors playing sound again whatever
+        // state a crash or another program left them in. The second a few
+        // frames after the first: SDL sends its queued reports from a thread
+        // of its own, and two queued together went out the wrong way round.
+        Reset& rs = reset[id];
+        const auto at = std::chrono::steady_clock::now();
+        if (hd && rs.hd != hd) {
+            std::uint8_t on[47]{};
+            on[0] = 0x02;  // rumble emulation, audio haptics off
+            rs = {hd, at, false};
+            if (!SDL_SendGamepadEffect(g, on, sizeof(on))) {
+                rs.done = true;
+                host_log("haptics: %s took no reset (its haptics may stay off until it is replugged)", SDL_GetGamepadName(g));
+            }
+        } else if (hd && !rs.done && at - rs.first > std::chrono::milliseconds(60)) {
+            std::uint8_t off[47]{};
+            rs.done = true;
+            const bool ok = SDL_SendGamepadEffect(g, off, sizeof(off));
+            host_log("haptics: %s %s", SDL_GetGamepadName(g),
+                     ok ? "reset to play its haptics from sound" : "took no reset (its haptics may stay off until it is replugged)");
+        }
+        if (hd && !rs.done) continue;  // the triggers once the reset is through
         const float l2 = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)) / 32767.0f;
         const float r2 = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / 32767.0f;
         const TriggerEffects t = haptics_triggers(static_cast<std::uint32_t>(id), l2, r2, relaxed);

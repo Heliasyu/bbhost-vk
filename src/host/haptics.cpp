@@ -1,6 +1,7 @@
 // bbhost-vk: DualSense / DualSense Edge HD haptics and adaptive triggers
 // (host/haptics.h).
 #include "host/haptics.h"
+#include "core/host_clock.h"
 #include "engine/world_chr.h"
 #include "host/options.h"
 #include "host/settings.h"
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -188,6 +190,7 @@ float g_large = 0.0f, g_small = 0.0f;  // the rumble's smoothed amplitudes
 std::atomic<std::uint32_t> g_rumble{0};  // small << 8 | large
 std::atomic<std::int64_t> g_rumble_until_us{0};
 std::atomic<bool> g_hd_live{false};  // an HD output is open and fed
+std::atomic<std::uint32_t> g_hd_generation{0};  // HD outputs opened (haptics_hd_generation)
 
 // Menu taps (haptics_menu_tick): the next one asked for, and the one playing.
 std::atomic<int> g_tick_asked{-1};
@@ -292,6 +295,75 @@ bool contains_nocase(const char* hay, const char* needle) {
     return false;
 }
 
+// The motors' channels of the controller's PipeWire sink at 100%. The sink
+// keeps a volume per channel, restored at each plug-in, and the desktop's
+// volume slider moves all four: lowered for the speaker, it weakens the
+// haptics too. The speaker's two are left as they are; a muted sink is
+// unmuted with the speaker's two at 0, so it stays silent. Through pactl
+// (PipeWire's or PulseAudio's), on a thread of its own: a missing pactl or
+// sink only costs a log line.
+void motor_channels_full() {
+#if defined(__linux__)
+    std::thread([] {
+        host_thread_place(HostPlace::Cold, "bb-haptics-vol");
+        const auto run = [](const std::string& cmd) {
+            std::string out;
+            if (std::FILE* p = ::popen(cmd.c_str(), "r")) {
+                char buf[512];
+                while (std::fgets(buf, sizeof(buf), p)) out += buf;
+                ::pclose(p);
+            }
+            return out;
+        };
+        std::string sink;
+        const std::string sinks = run("pactl list short sinks 2>/dev/null");
+        for (std::size_t at = 0; at < sinks.size() && sink.empty();) {
+            const std::size_t end = sinks.find('\n', at);
+            const std::string line = sinks.substr(at, end == std::string::npos ? std::string::npos : end - at);
+            at = end == std::string::npos ? sinks.size() : end + 1;
+            if (!contains_nocase(line.c_str(), "dualsense") || line.find("4ch") == std::string::npos) continue;
+            const std::size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+            if (t2 != std::string::npos) sink = line.substr(t1 + 1, t2 - t1 - 1);
+        }
+        // A name as PipeWire makes them; anything else is not put on a command line.
+        if (sink.empty() || sink.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-") != std::string::npos) {
+            host_log("haptics: no DualSense sink through pactl - its channel volumes are left as they are");
+            return;
+        }
+        // "Volume: front-left: 26214 /  40% / -23.88 dB,   front-right: ...": the channels in the sink's order.
+        const std::string vol = run("pactl get-sink-volume " + sink + " 2>/dev/null");
+        std::vector<std::pair<std::string, long>> ch;
+        for (std::size_t at = vol.find("Volume:"); at != std::string::npos;) {
+            const std::size_t colon = vol.find(": ", at + 7);
+            if (colon == std::string::npos) break;
+            std::size_t name_at = vol.find_last_of(" ,", colon - 1);
+            name_at = name_at == std::string::npos ? 0 : name_at + 1;
+            const std::string name = vol.substr(name_at, colon - name_at);
+            const long v = std::strtol(vol.c_str() + colon + 2, nullptr, 10);
+            if (name.find('-') != std::string::npos) ch.emplace_back(name, v);
+            at = vol.find(',', colon);
+            if (at != std::string::npos && vol.find(':', at) == std::string::npos) break;
+        }
+        const bool muted = run("pactl get-sink-mute " + sink + " 2>/dev/null").find("yes") != std::string::npos;
+        bool low = muted;
+        for (const auto& c : ch) low = low || (c.first.rfind("rear-", 0) == 0 && c.second < 65536);
+        if (ch.size() != 4 || !low) {
+            if (ch.size() != 4) host_log("haptics: the DualSense sink has %zu channels through pactl, not 4 - left as it is", ch.size());
+            return;
+        }
+        std::string cmd = "pactl set-sink-volume " + sink;
+        for (const auto& c : ch) cmd += " " + std::to_string(c.first.rfind("rear-", 0) == 0 ? 65536L : muted ? 0L : c.second);
+        run(cmd + " 2>/dev/null");
+        if (muted) run("pactl set-sink-mute " + sink + " 0 2>/dev/null");
+        std::string was;
+        for (const auto& c : ch)
+            if (c.first.rfind("rear-", 0) == 0) was += (was.empty() ? "" : " and ") + std::to_string(c.second * 100 / 65536) + "%";
+        host_log("haptics: the controller's motor channels raised to 100%%%s (they were %s)", muted ? ", the sink unmuted with its speaker at 0" : "",
+                 was.c_str());
+    }).detach();
+#endif
+}
+
 void close_locked(const char* why) {
     if (!g_stream) return;
     SDL_DestroyAudioStream(g_stream);
@@ -352,8 +424,10 @@ void scan_locked(bool want_hd) {
         SDL_ResumeAudioStreamDevice(g_stream);
         g_device = found;
         g_hd_live = true;
+        g_hd_generation.fetch_add(1, std::memory_order_release);
         g_said_none = false;
         max_controller_volume();
+        motor_channels_full();
         host_log("haptics: HD output on \"%s\" (motors on channels %d and %d of 4)", found_name ? found_name : "?", g_tune.left + 1,
                  g_tune.right + 1);
         // PipeWire's Pro Audio profile names the four channels AUX0..AUX3, and
@@ -446,6 +520,10 @@ void render(const float* in, unsigned count, float gain, const Wanted& w, float*
 }  // namespace
 
 int haptics_mode() { return wanted().mode; }
+
+std::uint32_t haptics_hd_generation() {
+    return g_hd_live.load(std::memory_order_acquire) ? g_hd_generation.load(std::memory_order_acquire) : 0;
+}
 
 bool haptics_is_dualsense(std::uint16_t vendor, std::uint16_t product) {
     return vendor == 0x054c && (product == 0x0ce6 || product == 0x0df2);

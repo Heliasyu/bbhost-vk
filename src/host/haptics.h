@@ -66,6 +66,14 @@ float haptics_r2_fire_point();
 // decide, 2 a back. Light and short; felt only with HD haptics live.
 void haptics_menu_tick(int kind);
 
+// Counts the HD outputs opened (at the start, after a replug, after the
+// setting comes back to HD); 0 while none is open. The pump thread sends each
+// DualSense the controller's reset when it changes (host/window.cpp): the
+// report pair a rumble's start and stop make, which leaves the motors playing
+// sound again - a controller a crash or another program left on its rumble
+// emulation would otherwise stay silent.
+std::uint32_t haptics_hd_generation();
+
 // Before the audio subsystem shuts down: closes the haptics output.
 void haptics_shutdown();
 
