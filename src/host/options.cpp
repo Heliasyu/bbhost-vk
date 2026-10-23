@@ -10,6 +10,8 @@
 #include "core/config.h"
 #include "core/host_clock.h"
 #include "engine/live_resolution.h"
+#include "engine/scene_split.h"
+#include "host/dlss_pass.h"
 #include "hle/modules.h"
 #include "hle/np.h"
 #include "net/account.h"
@@ -215,9 +217,9 @@ Setting g_set[kSettingCount] = {
     // angle a count at each step (engine/mouse_camera.h), 5 its default.
     {"mouse_sens", "Mouse sensitivity", {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}, 5,
      "How far a given mouse movement turns the camera.", false},
-    {"mouse_invert_x", "Mouse X-axis", {"Off", "On"}, 0,
+    {"mouse_invert_x", "Invert mouse X", {"Off", "On"}, 0,
      "Reverses the mouse's horizontal camera movement.", false},
-    {"mouse_invert_y", "Mouse Y-axis", {"Off", "On"}, 0,
+    {"mouse_invert_y", "Invert mouse Y", {"Off", "On"}, 0,
      "Reverses the mouse's vertical camera movement.", false},
     // Off by default: with the mouse the camera stays where it is put, as
     // the community's "Disable Camera Auto Rotation" patch has it - but only
@@ -243,8 +245,8 @@ Setting g_set[kSettingCount] = {
     // test7: Auto (the default) is Off while FSR 4.1.1 upscales - it
     // smooths edges itself, and the game's AA pass costs ~0.35 ms at 4K -
     // and On otherwise (FSR 3.1, FSR 1, native, or FSR 4.1.1 not running).
-    {"anti_alias", "Anti-aliasing", {"On", "Off", "Auto"}, 2,
-     "The game's own AA pass. Auto: off while FSR 4.1.1 upscales (a quality below Native AA: it smooths edges itself), on otherwise.", false},
+    {"anti_alias", "Game anti-aliasing", {"On", "Off", "Auto"}, 2,
+     "The game's own AA pass. Auto: off while FSR 4.1.1, FSR 4 or DLSS upscales (a quality below Native AA: they smooth edges themselves) and with Native TAA, on otherwise.", false},
     {"depth_of_field", "Depth of field", {"On", "Off"}, 0,
      "Blurs distant scenery; indoors there is rarely anything far enough to blur.", false},
     {"chromatic_aberration", "Chromatic aberration", {"On", "Off"}, 0,
@@ -316,8 +318,8 @@ Setting g_set[kSettingCount] = {
     // window (host/fsr.cpp). Phase 1: with an upscaler on, the quality renders the
     // scene smaller than the output (engine/scene_split.h).
     {"upscaler", "Upscaler", {"Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA", "FSR 4", "DLSS"}, 1,
-     "FSR 1 is simple and light. FSR 3.1 is temporal, from Upscaling quality's size. FSR 4 and FSR 4.1.1 are AMD's machine-learning upscalers, sharper; they need their assets (the launcher sets them up), else FSR 3.1 runs. Native TAA is anti-aliasing at the full resolution.",
-     true},
+     "FSR 1 is simple and light. FSR 3.1 is temporal, from Upscaling quality's size. FSR 4 and FSR 4.1.1 are AMD's machine-learning upscalers, sharper; they need their assets (the launcher sets them up), else FSR 3.1 runs. Native TAA is anti-aliasing at the full resolution. DLSS needs an NVIDIA RTX GPU and applies from the next start; elsewhere FSR 3.1 runs.",
+     false},
     // Output size / render size: 1.0, 1.5, 1.7, 2.0, 3.0 (AMD's presets).
     {"upscale_quality", "Upscaling quality",
      {"Native AA", "Quality", "Balanced", "Performance", "Ultra Performance"}, 0,
@@ -394,7 +396,7 @@ Setting g_set[kSettingCount] = {
     {"hdr", "HDR output", {"Off", "On"}, 0,
      "The picture on an HDR screen in HDR10, with brighter highlights. Needs HDR turned on for the display in your "
      "desktop's settings (KDE: Display Configuration).",
-     true},
+     false},
     {"hdr_paper_white", "Paper white", number_labels(10, 500), 190, "How bright the game's white is on an HDR screen, in nits.", false},
     {"hdr_peak_auto", "Peak from the display", {"On", "Off"}, 0,
      "On: the peak brightness the display reports (its EDID). Off: Peak brightness below.", false},
@@ -473,6 +475,7 @@ const Row g_rows[] = {
     {Row::Option, nullptr, kFpsShowUpscaler},
     {Row::Option, nullptr, kFpsShowCpu},
     {Row::Option, nullptr, kFpsShowGpu},
+    {Row::Option, nullptr, kCompileNote},
     {Row::Header, "HDR"},
     {Row::Option, nullptr, kHdr},
     {Row::Option, nullptr, kHdrPaperWhite},
@@ -693,6 +696,23 @@ bool res_live(int index) {
     unsigned w = 0, h = 0;
     return live_resolution_available() && std::sscanf(g_set[kResolution].values[static_cast<std::size_t>(index)], "%ux%u", &w, &h) == 2 &&
            live_resolution_can(w, h);
+}
+
+// Whether the value `index` of setting `id` waits for the next start - the
+// row's RESTART badge. Resolution: past what this run's heap was grown for.
+// Upscaler and Upscaling quality change live, except into a split scene when
+// the run started unsplit (its display buffers are not the output's size)
+// and into DLSS when the device was made without NGX's extensions.
+bool waits_for_restart(int id, int index) {
+    if (id == kResolution) return g_set[id].restart && !res_live(index);
+    if (id == kUpscaler || id == kUpscaleQuality) {
+        const int up = id == kUpscaler ? index : g_set[kUpscaler].index;
+        const int quality = id == kUpscaleQuality ? index : g_set[kUpscaleQuality].index;
+        if (up == upscaler::kDlss && !gpu::dlss_device_ready()) return true;
+        const bool splits = up != 0 && (quality > 0 || up == upscaler::kTaa);
+        return splits && !scene_split_live();
+    }
+    return g_set[id].restart;
 }
 
 // The account rows. The fields are typed through the window's text entry
@@ -952,6 +972,7 @@ void apply(int id) {
     switch (id) {
         case kWindowMode: host_window_set_fullscreen(s.index == 1); break;
         case kVsync: host_window_set_vsync(s.index == 0); break;
+        case kHdr: host_window_set_hdr(s.index == 1); break;
         case kFrameCap:
             hle_video_set_fps_cap(fps_from_label(s.values[static_cast<std::size_t>(s.index)]));
             break;
@@ -1828,7 +1849,7 @@ void options_panel_frame(float display_w, float display_h) {
             g_row_vl[r] = pl - 10.0f;
             g_row_vm[r] = (pl + pr) * 0.5f;
         }
-        if (s.restart && !(row.setting == kResolution && res_live(s.index))) {
+        if (waits_for_restart(row.setting, s.index)) {
             const char* restart = menu_tr("RESTART");
             const float rx = lx + lw + 10.0f, rw = host_overlay_ui_text_width(kOverlayFontBold, 12.0f, restart) + 14.0f;
             host_overlay_round_rect(rx, y + (row_h - 20.0f) * 0.5f, rw, 20.0f, 10.0f, 0xffffff1au, 0xffffff12u);

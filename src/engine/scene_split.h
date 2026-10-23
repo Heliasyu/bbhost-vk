@@ -57,4 +57,8 @@ bool scene_split_active();
 // Whether the settings ask for the split at the output's own size (Native
 // TAA), as scene_split_wanted last found it. Any thread.
 bool scene_split_forced();
+// Whether a split asked for now (an upscaler below Native AA, or Native TAA)
+// takes effect in this run: the split is available and the display buffers
+// are the output's size (they are only when the run started split). Any thread.
+bool scene_split_live();
 void scene_split_render_size(std::uint32_t* w, std::uint32_t* h);

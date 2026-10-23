@@ -28,13 +28,13 @@ public static class OptionSchema
     public static readonly OptionDef FrameCap = new("frame_cap", "Frame rate", new[] { "30", "60", "90", "120", "Uncapped" }, 0,
         "30 is the game's own pace. 60 and 90 run its logic at that rate; 120 steps it by the frame time.", true);
     public static readonly OptionDef Upscaler = new("upscaler", "Upscaler", new[] { "Off", "FSR 1", "FSR 3.1", "FSR 4.1.1", "Native TAA", "FSR 4", "DLSS" }, 1,
-        "FSR 4.1.1 replays AMD's upscaler from assets built once from your own DLL; without them it is FSR 3.1.", true);
-    public static readonly OptionDef Quality = new("upscale_quality", "Quality",
+        "FSR 4.1.1 replays AMD's upscaler from assets built once from your own DLL; without them it is FSR 3.1.");
+    public static readonly OptionDef Quality = new("upscale_quality", "Upscaling quality",
         new[] { "Native AA", "Quality", "Balanced", "Performance", "Ultra Performance" }, 0,
         "The share of the resolution the 3D scene renders at. Menus and text stay sharp.");
-    public static readonly OptionDef Sharpness = new("upscale_sharpness", "Sharpness",
+    public static readonly OptionDef Sharpness = new("upscale_sharpness", "Upscaling sharpness",
         new[] { "0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0" }, 8,
-        "How much FSR 3.1 and FSR 4.1.1 sharpen. 0 turns it off.");
+        "How much FSR 3.1, FSR 4 and FSR 4.1.1 sharpen. 0 turns it off.");
 
     /// Render scale per quality preset (output / render), as the engine uses them.
     public static double ScaleOf(string quality) => quality switch
@@ -62,7 +62,7 @@ public static class OptionSchema
         ["fps_show_upscaler"] = "The upscaler and quality preset running, for example FSR 4.1.1 Performance.",
         ["fps_show_cpu"] = "How much of the whole CPU the game uses; 100% would be every core busy.",
         ["fps_show_gpu"] = "How busy the game keeps the GPU. Near 100% the GPU is the limit; well below, the CPU is.",
-        ["hdr"] = "Shows the game on an HDR screen in HDR10: the picture as it is, with its brightest parts (lamps, fire, the moon) brighter than white can be in SDR. Turn HDR on for that monitor first in your desktop's display settings (KDE: System Settings > Display Configuration). Applies when the game starts.",
+        ["hdr"] = "Shows the game on an HDR screen in HDR10: the picture as it is, with its brightest parts (lamps, fire, the moon) brighter than white can be in SDR. Turn HDR on for that monitor first in your desktop's display settings (KDE: System Settings > Display Configuration). Can be switched while playing, from the F10 menu: the screen blinks once as the picture is remade.",
         ["hdr_paper_white"] = "How bright the game's white is on the HDR screen, in nits. Around 200 suits a dim room; raise it in a bright one. Changes live.",
         ["hdr_peak_auto"] = "On: the brightest the display says it can show (from its EDID), as KDE also reads it. Off: the Peak brightness setting below.",
         ["hdr_peak"] = "Your display's peak brightness in nits, used when it is not taken from the display. Nothing in the game goes above it.",
@@ -80,10 +80,10 @@ public static class OptionSchema
         ["camera_height"] = "How high above your character the camera looks. 5 is the game's own.",
         ["upscaler"] = "DLSS: NVIDIA's upscaler (preset K, M for Performance, L for Ultra Performance, as Lantern Engine picks them), on an NVIDIA RTX GPU with its driver; choosing it takes effect at the next start, and elsewhere FSR 3.1 stands in. Native TAA: temporal anti-aliasing at the full resolution (FSR 3.1's Native AA mode), smoother edges and less shimmer than the game's own AA, nothing upscaled; Quality does not apply. FSR 4: AMD's FSR 4 machine-learning upscaler (its INT8 model, from the source AMD published), sharper than FSR 3.1 with steadier fine detail; it needs a one-time download of its shaders and runs on any GPU with INT8 dot products (RX 6000 or newer, RTX 20 or newer, Arc). FSR 4.1.1: AMD's newest upscaler, the sharpest; it needs assets built once from your own copy of AMD's DLL, and falls back to FSR 3.1 without them. FSR 3.1: temporal, uses motion vectors, works on any GPU. FSR 1: simple and light, no motion vectors. Off renders at the full resolution.",
         ["upscale_quality"] = "How much smaller the 3D scene renders before it is upscaled: Native AA 100% (just anti-aliasing), Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Lower is faster. Menus, text and the HUD always stay at the full resolution. Changes apply live.",
-        ["upscale_sharpness"] = "How much FSR 3.1 and FSR 4.1.1 sharpen the upscaled picture. 0 turns sharpening off; 0.8 matches FSR 1's default. FSR 1 keeps its own sharpening.",
+        ["upscale_sharpness"] = "How much FSR 3.1, FSR 4 and FSR 4.1.1 sharpen the upscaled picture. 0 turns sharpening off; 0.8 matches FSR 1's default. FSR 1 keeps its own sharpening.",
         ["upscale_reactive"] = "Marks particles, fog, Blood Echoes, the lantern's glow and other transparent effects for the upscaler, so they do not smear or leave ghost trails. Leave on; off is for comparison.",
         ["upscale_jitter"] = "The 3D scene shifts by a fraction of a pixel each frame so the upscaler can rebuild fine detail. Off gives a softer, more aliased picture; it is for comparison only.",
-        ["anti_alias"] = "The game's own anti-aliasing pass. Auto turns it off while FSR 4.1.1 upscales (it smooths edges itself, and the pass costs about 0.35 ms at 4K) and on otherwise.",
+        ["anti_alias"] = "The game's own anti-aliasing pass. Auto turns it off while FSR 4.1.1, FSR 4 or DLSS upscales below Native AA, and with Native TAA (they smooth edges themselves, and the pass costs about 0.35 ms at 4K), and on otherwise. FSR 3.1 and FSR 1 keep it on.",
         ["ssao"] = "Screen-space ambient occlusion: soft shadows in corners and where objects meet. Off is faster and flatter.",
         ["motion_blur"] = "The blur on fast camera and character movement. Off also saves a little GPU time.",
         ["depth_of_field"] = "Blurs distant scenery, as the game does in some views. Indoors there is rarely anything far enough to blur.",
@@ -105,6 +105,7 @@ public static class OptionSchema
         ["mouse_invert_x"] = "Reverses the mouse's horizontal camera movement.",
         ["mouse_invert_y"] = "Reverses the mouse's vertical camera movement.",
         ["mouse_auto_rotation"] = "Off: while you use the mouse, the camera stays where you put it instead of swinging behind you as you move. A controller always gets the game's own camera.",
+        ["draw_cursor"] = "Shows a mouse pointer over the game's menus. The game has none of its own, so the engine draws it; turn it off if you play with a controller and the pointer is in the way.",
         ["mouse_menu"] = "In menus: click confirms, right-click goes back, the wheel moves the cursor. A click only reaches menus while one is open, so it never swings a weapon.",
         ["pad_icons"] = "The button icons the game's prompts show while you play with a controller. Auto: the game's own PlayStation icons with a PlayStation controller, and the Xbox buttons by name ([A], [RB], D-pad Up) with an Xbox or any other controller. The world's \"Examine\" prompts drawn on the HUD keep the PlayStation icons for now.",
         ["submit_split"] = "Experimental, untested on real hardware. Every N draws (Off, 32, 64, 128, 256), if the graphics card has finished everything it was given, the work recorded so far is handed to it at once instead of at the end of the game's batch. It aims at the card's idle gaps while it waits for the CPU: up to 80-120 ms a second (8-12%) were measured where the card had time to spare. Expected: at best a few % more FPS where the CPU holds the frame back; nothing when the card itself is the limit, since then it never runs dry and nothing is split. Each split is one more submission (about 27 µs on the card), so a small N can cost a little instead. May add stutter, and flashing or black frames would mean it does not work on your system: turn it off then. Changes live; BBHOST_SUBMIT_SPLIT wins when set.",
@@ -136,16 +137,16 @@ public static class OptionSchema
     };
     public static readonly OptionDef LiveResolution = new("live_resolution", "Live resolution change", OnOff, 0,
         "On: a new resolution applies in the game. Off: at the next start.", true);
-    public static readonly OptionDef MenuKey = new("menu_key", "In-game menu key", new[] { "F10", "Insert", "Home", "F1" }, 0,
+    public static readonly OptionDef MenuKey = new("menu_key", "Menu key", new[] { "F10", "Insert", "Home", "F1" }, 0,
         "What opens the in-game settings menu. F10 always works too.");
-    public static readonly OptionDef FpsShow = new("fps_counter", "Show FPS", OffOn, 0, "Frames per second, in the corner you choose.");
+    public static readonly OptionDef FpsShow = new("fps_counter", "FPS counter", OffOn, 0, "Frames per second, in the corner you choose.");
     public static readonly OptionDef FpsPosition =
         new("fps_position", "Position", new[] { "Top right", "Top left", "Bottom right", "Bottom left", "Top centre" }, 0, "Where the counter sits.");
-    public static readonly OptionDef CompileNote = new("compile_note", "Note while shaders build", OnOff, 0,
+    public static readonly OptionDef CompileNote = new("compile_note", "Building shaders note", OnOff, 0,
         "\"Building shaders...\" under the counter while the game builds them.");
     public static readonly OptionDef GameLanguage = new("game_language", "Game language",
         new[] { "English", "French", "Spanish", "German", "Italian", "Russian", "Japanese" }, 0, "The game's own text and voices.", true);
-    public static readonly OptionDef MenuLanguage = new("menu_language", "In-game menu language",
+    public static readonly OptionDef MenuLanguage = new("menu_language", "Menu language",
         new[] { "English", "Русский", "Español", "Português (Brasil)", "Français", "Deutsch", "Italiano", "Polski", "Türkçe" }, 0, "The in-game settings menu (F10).");
     public static readonly OptionDef[] FpsLook =
     {
@@ -158,17 +159,17 @@ public static class OptionSchema
     };
     public static readonly OptionDef[] FpsParts =
     {
-        new("fps_show_rate", "Frame rate", OnOff, 0, "Frames per second actually shown."),
-        new("fps_show_frame_time", "Frame time", OffOn, 0, "Milliseconds a frame."),
-        new("fps_show_upscaler", "Upscaler", OffOn, 0, "The upscaler and preset running."),
-        new("fps_show_cpu", "CPU usage", OffOn, 0, "How much of the CPU the game uses."),
-        new("fps_show_gpu", "GPU usage", OnOff, 0, "How busy the game keeps the GPU."),
+        new("fps_show_rate", "Show frame rate", OnOff, 0, "Frames per second actually shown."),
+        new("fps_show_frame_time", "Show frame time", OffOn, 0, "Milliseconds a frame."),
+        new("fps_show_upscaler", "Show upscaler", OffOn, 0, "The upscaler and preset running."),
+        new("fps_show_cpu", "Show CPU usage", OffOn, 0, "How much of the CPU the game uses."),
+        new("fps_show_gpu", "Show GPU usage", OnOff, 0, "How busy the game keeps the GPU."),
     };
     public static readonly OptionDef[] Hdr =
     {
-        new("hdr", "HDR output", OffOn, 0, "The picture on an HDR screen in HDR10, with brighter highlights.", true),
+        new("hdr", "HDR output", OffOn, 0, "The picture on an HDR screen in HDR10, with brighter highlights."),
         new("hdr_paper_white", "Paper white", Range(10, 500), 190, "How bright the game's white is, in nits (10 to 500)."),
-        new("hdr_peak_auto", "Peak brightness from the display", OnOff, 0, "The peak the display reports. Off: the value below."),
+        new("hdr_peak_auto", "Peak from the display", OnOff, 0, "The peak the display reports. Off: the value below."),
         new("hdr_peak", "Peak brightness", Range(10, 4000), 990,
             "Your display's peak, in nits (10 to 4000), when not taken from the display."),
         new("hdr_boost", "Highlight boost", new[] { "Off", "Low", "Medium", "High", "Max" }, 1,
@@ -182,9 +183,9 @@ public static class OptionSchema
     {
         new("Fine tuning", new[]
         {
-            new OptionDef("upscale_reactive", "Reactive mask", OffOn, 1, "Keeps fog, particles and the lantern's glow from smearing."),
-            new OptionDef("upscale_jitter", "Camera jitter", OffOn, 1, "Lets the upscaler rebuild fine detail."),
-            new OptionDef("anti_alias", "Game anti-aliasing", new[] { "On", "Off", "Auto" }, 2, "Auto: off while FSR 4.1.1 upscales, on otherwise."),
+            new OptionDef("upscale_reactive", "Upscaler reactive mask", OffOn, 1, "Keeps fog, particles and the lantern's glow from smearing."),
+            new OptionDef("upscale_jitter", "Upscaler jitter", OffOn, 1, "Lets the upscaler rebuild fine detail."),
+            new OptionDef("anti_alias", "Game anti-aliasing", new[] { "On", "Off", "Auto" }, 2, "Auto: off while FSR 4.1.1, FSR 4, DLSS or Native TAA smooths edges, on otherwise."),
             new OptionDef("mip_bias", "Texture detail", new[] { "Auto", "-2.0", "-1.5", "-1.0", "-0.5", "0.0", "+0.5", "+1.0" }, 5,
                 "Auto matches the upscaler; below 0 sharper textures, above softer."),
         }),
@@ -237,10 +238,11 @@ public static class OptionSchema
         {
             new OptionDef("mouse_camera", "Mouse camera", OnOff, 0, "The mouse turns the camera outside menus."),
             new OptionDef("mouse_sens", "Mouse sensitivity", Zero10, 5, "How far a mouse movement turns the camera."),
-            new OptionDef("mouse_invert_x", "Invert X", OffOn, 0, "Reverses horizontal camera movement."),
-            new OptionDef("mouse_invert_y", "Invert Y", OffOn, 0, "Reverses vertical camera movement."),
-            new OptionDef("mouse_auto_rotation", "Auto-rotation", OffOn, 0, "Off: the camera stays where you put it."),
+            new OptionDef("mouse_invert_x", "Invert mouse X", OffOn, 0, "Reverses horizontal camera movement."),
+            new OptionDef("mouse_invert_y", "Invert mouse Y", OffOn, 0, "Reverses vertical camera movement."),
+            new OptionDef("mouse_auto_rotation", "Mouse auto-rotation", OffOn, 0, "Off: the camera stays where you put it."),
             new OptionDef("mouse_menu", "Mouse in menus", OffOn, 1, "Click confirms, right-click goes back."),
+            new OptionDef("draw_cursor", "Draw the pointer", OnOff, 0, "The game has no cursor of its own: the engine draws it."),
             new OptionDef("button_prompts", "Button prompts", new[] { "Auto", "Keyboard", "Controller" }, 0, "Auto follows the device you last used."),
         }),
     };

@@ -25,6 +25,8 @@ namespace gpu {
 // extensions (VK_NVX_binary_import, VK_NVX_image_view_handle) where the GPU
 // has them. Nothing otherwise.
 void dlss_device_extensions(std::vector<const char*>& exts);
+// Whether the device was made with NGX's extensions: DLSS chosen at the start.
+bool dlss_device_ready();
 
 // As fsr4_record_locked (host/fsr4_pass.h). `preset`: the upscale quality
 // (0 Native AA - DLAA - .. 4 Ultra Performance).

@@ -345,7 +345,7 @@ void refresh_settings() {
     // test7: said, so a log shows when AA changed (Auto follows the upscaler).
     if (g_aa.exchange(hs.anti_alias) != hs.anti_alias || !g_aa_said.exchange(true))
         host_log("graphics: the game's anti-aliasing %s%s", hs.anti_alias ? "on" : "off",
-                 hs.anti_alias_auto ? (hs.anti_alias ? " (Auto: FSR 4.1.1 not upscaling)" : " (Auto: FSR 4.1.1 upscales)") : "");
+                 hs.anti_alias_auto ? (hs.anti_alias ? " (Auto: no upscaler smoothing edges)" : " (Auto: the upscaler smooths edges)") : "");
     set_chromatic_aberration(hs.chromatic_aberration);
     g_bloom.store(hs.bloom);
     g_saturation.store(hs.saturation);

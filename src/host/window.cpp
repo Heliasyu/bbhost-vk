@@ -115,6 +115,7 @@ std::atomic<bool> g_ime_test_reopen{true};
 // calls into it.
 std::atomic<bool> g_want_fullscreen{false};
 std::atomic<bool> g_want_vsync{true};
+std::atomic<bool> g_want_hdr{false};  // the HDR setting (host_window_set_hdr); BBHOST_HDR=0/1 wins
 // When the presenting thread last finished a present, and how many it has
 // finished: with V-Sync on that instant is a display vblank, which is the
 // phase the flip clock steers towards.
@@ -667,16 +668,19 @@ bool vk_create_swapchain() {
             g_vk.format = f.format;
         }
     }
-    // HDR output (the HDR setting, read at the start): a 10-bit HDR10 swapchain
-    // where the surface offers one - the desktop's HDR is on for this display.
+    // HDR output (the HDR setting, live: host_window_set_hdr rebuilds the
+    // swapchain): a 10-bit HDR10 swapchain where the surface offers one - the
+    // desktop's HDR is on for this display. The overlay, the menu and the
+    // presenting pass are made again below for the new format.
     VkColorSpaceKHR colour_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    const bool had_hdr = g_vk.hdr;
     g_vk.hdr = false;
     {
-        static const bool want_hdr = [] {
+        static const int forced = [] {
             const char* e = std::getenv("BBHOST_HDR");
-            if (e && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
-            return host_settings().hdr;
+            return e && (e[0] == '0' || e[0] == '1') ? e[0] - '0' : -1;
         }();
+        const bool want_hdr = forced >= 0 ? forced == 1 : g_want_hdr.load();
         if (want_hdr) {
             for (const auto& f : fmts)
                 if (f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
@@ -686,14 +690,17 @@ bool vk_create_swapchain() {
                     g_vk.hdr = true;
                     break;
                 }
-            static bool said = false;
-            if (!said) {
-                said = true;
-                host_log(g_vk.hdr ? "present: HDR output - HDR10 (BT.2020, PQ), the SDR frame's white at paper white"
-                                  : "present: HDR output asked for, but this display's surface offers no HDR10 swapchain "
-                                    "(turn HDR on for the display in the desktop's settings); SDR");
-            }
         }
+        // Each time it changes (and once at the start when asked for).
+        static int said = -1;
+        const int now = (want_hdr ? 2 : 0) | (g_vk.hdr ? 1 : 0);
+        if (now != said && (want_hdr || said >= 0 || had_hdr)) {
+            host_log(g_vk.hdr   ? "present: HDR output - HDR10 (BT.2020, PQ), the SDR frame's white at paper white"
+                     : want_hdr ? "present: HDR output asked for, but this display's surface offers no HDR10 swapchain "
+                                  "(turn HDR on for the display in the desktop's settings); SDR"
+                                : "present: HDR output off - SDR");
+        }
+        said = now;
     }
     g_vk.extent = caps.currentExtent;
     if (g_vk.extent.width == 0xFFFFFFFFu) {
@@ -2051,6 +2058,24 @@ void host_window_set_vsync(bool on) {
     }
     g_swap_dirty.store(true);
     host_log("present: v-sync %s", on ? "on" : "off");
+#else
+    (void)on;
+#endif
+}
+
+void host_window_set_hdr(bool on) {
+#if defined(BBHOST_HAVE_SDL3)
+    if (g_want_hdr.exchange(on) == on) return;
+    if (const char* e = std::getenv("BBHOST_HDR"); e && (e[0] == '0' || e[0] == '1')) {
+        host_log("present: HDR output %s in the settings, but BBHOST_HDR=%c decides", on ? "on" : "off", e[0]);
+        return;
+    }
+    // Before the presenter exists the first swapchain reads the wish; after,
+    // the next present rebuilds it (as a V-Sync change does).
+    if (g_vk.swapchain) {
+        g_swap_dirty.store(true);
+        host_log("present: HDR output %s: the swapchain is made again", on ? "on" : "off");
+    }
 #else
     (void)on;
 #endif

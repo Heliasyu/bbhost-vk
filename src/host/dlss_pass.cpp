@@ -319,6 +319,8 @@ ResourceVk resource(VkImage image, VkImageView view, VkFormat format, std::uint3
 
 }  // namespace
 
+bool dlss_device_ready() { return g_extensions; }
+
 void dlss_device_extensions(std::vector<const char*>& exts) {
     std::uint32_t n = 0;
     vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &n, nullptr);

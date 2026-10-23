@@ -155,6 +155,8 @@ namespace {
 // Set by scene_split_wanted when the split can be made, read by _apply: the
 // sizes alone cannot say a split is wanted when they are equal.
 std::atomic<bool> g_force_wanted{false};
+// The output scene_split_wanted last saw (scene_split_live).
+std::atomic<std::uint64_t> g_last_output{0};
 bool settings_force() { return host_settings().upscaler == upscaler::kTaa; }
 
 // The render size the settings ask for, whether the split can be made or not.
@@ -169,6 +171,15 @@ void settings_render_size(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw,
 
 bool scene_split_forced() { return g_force_wanted.load(std::memory_order_relaxed); }
 
+bool scene_split_live() {
+    if (!g_available) return false;
+    const std::uint64_t o = g_last_output.load(std::memory_order_relaxed);
+    if (!o) return true;  // nothing drawn yet: the start sizes the display buffers for the settings
+    unsigned dw = 0, dh = 0;
+    live_resolution_display(&dw, &dh);
+    return scene_split::display_fits_split(dw, dh, static_cast<std::uint32_t>(o >> 32), static_cast<std::uint32_t>(o));
+}
+
 bool scene_split_planned(const ElfImage* image, std::uint32_t ow, std::uint32_t oh) {
     if (const char* e = std::getenv("BBHOST_SCENE_SPLIT"); e && e[0] == '0') return false;
     if (!image || image->sha256 != kEboot109Sha256) return false;
@@ -181,6 +192,7 @@ void scene_split_wanted(std::uint32_t ow, std::uint32_t oh, std::uint32_t* rw, s
     *rw = ow;
     *rh = oh;
     g_force_wanted.store(false);
+    g_last_output.store(static_cast<std::uint64_t>(ow) << 32 | oh, std::memory_order_relaxed);
     if (!g_available) return;
     std::uint32_t w = ow, h = oh;
     settings_render_size(ow, oh, &w, &h);

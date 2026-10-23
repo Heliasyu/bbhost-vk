@@ -162,6 +162,9 @@ void host_mouse_describe(char* out, std::size_t n);
 // present with whichever no-wait mode the surface supports.
 void host_window_set_fullscreen(bool on);
 void host_window_set_vsync(bool on);
+// HDR output: the swapchain is made again in HDR10 (where the display offers
+// it) or SDR on the next present. BBHOST_HDR=0/1 wins over it.
+void host_window_set_hdr(bool on);
 // The presented image's size in pixels (the swapchain: the window, or the
 // display in fullscreen); false before there is one (headless). Any thread.
 bool host_window_pixels(int* w, int* h);
