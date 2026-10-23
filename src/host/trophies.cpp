@@ -6,6 +6,7 @@
 #include "log.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -132,6 +133,24 @@ void trophy_popup_frame(float display_w, float /*display_h*/) {
             g_queue.push_back({std::atoi(e), 27, 40});
         }
     }
+    // Or on demand: a file $XDG_RUNTIME_DIR/heliasdream-trophy-test holding an
+    // id shows that trophy's pop-up and is removed. Looked for once a second.
+    static auto looked = started;
+    if (std::chrono::steady_clock::now() - looked > std::chrono::seconds(1)) {
+        looked = std::chrono::steady_clock::now();
+        if (const char* dir = std::getenv("XDG_RUNTIME_DIR"); dir && *dir) {
+            const std::string path = std::string(dir) + "/heliasdream-trophy-test";
+            if (std::FILE* f = std::fopen(path.c_str(), "r")) {
+                int id = 23;
+                if (std::fscanf(f, "%d", &id) != 1) id = 23;
+                std::fclose(f);
+                std::remove(path.c_str());
+                host_log("trophy: test pop-up for %d (%s)", id, path.c_str());
+                std::lock_guard<std::mutex> lk(g_mu);
+                g_queue.push_back({id, 27, 40});
+            }
+        }
+    }
     Popup p;
     double t = 0.0;
     {
@@ -155,27 +174,38 @@ void trophy_popup_frame(float display_w, float /*display_h*/) {
     const double in = std::clamp(t / kIn, 0.0, 1.0), out = std::clamp((t - kIn - kHold) / kOut, 0.0, 1.0);
     const float ease = static_cast<float>(1.0 - std::pow(1.0 - in, 3.0));
     const float a = static_cast<float>(std::min(in * 1.4, 1.0) * (1.0 - out));
-    const float w = 460.0f, h = 92.0f;
-    const float x = display_w - w - 28.0f + (1.0f - ease) * 60.0f, y = 70.0f;
+    // The launcher mock-up's toast (Toast.dc.html) at 1.15x: a dark glass card,
+    // no border, and under it a thin pill that empties while it stays.
+    const float k = 1.15f;
+    const float w = 400.0f * k, h = 84.0f * k, r = 20.0f * k;
+    const float x = display_w - w - 36.0f * k + (1.0f - ease) * 60.0f, y = 32.0f * k;
 
-    host_overlay_glass(x, y, w, h, 22.0f, 22.0f, 0.72f);
-    host_overlay_round_rect(x, y, w, h, 22.0f, with_alpha(0x0c0f1655u, a), with_alpha(0x0c0f1677u, a));
-    host_overlay_round_frame(x, y, w, h, 22.0f, 1.0f, with_alpha(0xffffff66u, a), with_alpha(0xffffff1au, a));
-    // The medal: a lit disc in the grade's colours, with a darker ring.
+    host_overlay_glass(x, y, w, h, r, 20.0f * k, 0.72f);
+    host_overlay_round_rect(x, y, w, h, r, with_alpha(0x0e10168cu, a), with_alpha(0x0e10168cu, a));
+    // The icon tile, the grade's medal on it (no trophy art to show).
+    const float m = 60.0f * k, mx = x + 12.0f * k, my = y + (h - m) * 0.5f;
+    host_overlay_round_rect(mx, my, m, m, 15.0f * k, with_alpha(0x00000066u, a), with_alpha(0x00000066u, a));
     std::uint32_t top, bottom;
     medal(info->grade, top, bottom);
-    const float m = 58.0f, mx = x + 18.0f, my = y + (h - m) * 0.5f;
-    host_overlay_round_rect(mx - 2.0f, my - 2.0f, m + 4.0f, m + 4.0f, (m + 4.0f) * 0.5f, with_alpha(0x00000099u, a), with_alpha(0x00000099u, a));
-    host_overlay_round_rect(mx, my, m, m, m * 0.5f, with_alpha(top, a), with_alpha(bottom, a));
-    host_overlay_round_rect(mx + 12.0f, my + 8.0f, m * 0.36f, m * 0.22f, m * 0.11f, with_alpha(0xffffff8cu, a), with_alpha(0xffffff00u, a));
-    const float tx = mx + m + 18.0f;
-    host_overlay_ui_text(kOverlayFontBold, tx, y + 14.0f, 13.0f, with_alpha(0xc2d3efffu, a), grade_name(info->grade));
-    // The name, shortened to the card.
+    const float d = 34.0f * k, dx = mx + (m - d) * 0.5f, dy = my + (m - d) * 0.5f;
+    host_overlay_round_rect(dx - 2.0f, dy - 2.0f, d + 4.0f, d + 4.0f, (d + 4.0f) * 0.5f, with_alpha(0x0e1016ffu, a), with_alpha(0x0e1016ffu, a));
+    host_overlay_round_rect(dx, dy, d, d, d * 0.5f, with_alpha(top, a), with_alpha(bottom, a));
+    host_overlay_round_rect(dx + d * 0.2f, dy + d * 0.14f, d * 0.36f, d * 0.22f, d * 0.11f, with_alpha(0xffffff8cu, a), with_alpha(0xffffff00u, a));
+    // The grade in small capitals, the name in the serif, the progress.
+    const float tx = mx + m + 14.0f * k;
+    std::string label = grade_name(info->grade);
+    for (char& c : label) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    host_overlay_ui_text(kOverlayFontBold, tx, y + 13.0f * k, 11.0f * k, with_alpha(0xc9d6eeffu, a), label.c_str());
     std::string name = info->name;
-    const float room = x + w - 20.0f - tx;
-    while (name.size() > 4 && host_overlay_ui_text_width(kOverlayFontTitle, 27.0f, name.c_str()) > room) name = name.substr(0, name.size() - 4) + "...";
-    host_overlay_ui_text(kOverlayFontTitle, tx, y + 31.0f, 27.0f, with_alpha(0xf2f5faffu, a), name.c_str());
+    const float room = x + w - 18.0f * k - tx;
+    while (name.size() > 4 && host_overlay_ui_text_width(kOverlayFontTitle, 24.0f * k, name.c_str()) > room) name = name.substr(0, name.size() - 4) + "...";
+    host_overlay_ui_text(kOverlayFontTitle, tx, y + 29.0f * k, 24.0f * k, with_alpha(0xe9edf5ffu, a), name.c_str());
     char line[64];
-    std::snprintf(line, sizeof(line), "%d of %d  -  %d%%", p.earned, p.total, p.total ? p.earned * 100 / p.total : 0);
-    host_overlay_ui_text(kOverlayFontBody, tx, y + 64.0f, 14.0f, with_alpha(0xb9c1cfffu, a), line);
+    std::snprintf(line, sizeof(line), "%d of %d \u00b7 %d%%", p.earned, p.total, p.total ? p.earned * 100 / p.total : 0);
+    host_overlay_ui_text(kOverlayFontBody, tx, y + 58.0f * k, 12.0f * k, with_alpha(0xa7b0c0ffu, a), line);
+    // How long it stays.
+    const float bh = 4.0f * k, by = y + h + 10.0f * k;
+    const float left = static_cast<float>(1.0 - std::clamp((t - kIn) / (kHold + kOut), 0.0, 1.0));
+    host_overlay_round_rect(x, by, w, bh, bh * 0.5f, with_alpha(0xffffff1au, a), with_alpha(0xffffff1au, a));
+    if (w * left > bh) host_overlay_round_rect(x, by, w * left, bh, bh * 0.5f, with_alpha(0xc9d6eebfu, a), with_alpha(0xc9d6eebfu, a));
 }
