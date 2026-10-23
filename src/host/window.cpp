@@ -1770,6 +1770,74 @@ void update_triggers() {
     }
 }
 
+// The F10 menu from a controller. The PS / Home / Xbox button - the game
+// never reads it - or L3 and R3 clicked together opens and closes it. While it is open the D-pad or the left stick moves and changes,
+// L1 / R1 switch tabs, the region's confirm toggles and its back closes: each
+// press becomes the menu's key (host_options_key), and a held direction
+// repeats as a held key does. True while the buttons that opened or closed it
+// are still held, so they stay out of the game until let go.
+bool pad_options_menu(const std::vector<SDL_Gamepad*>& pads) {
+    bool guide = false, l3 = false, r3 = false, any = false;
+    bool up = false, down = false, left = false, right = false, l1 = false, r1 = false, south = false, east = false;
+    for (SDL_Gamepad* g : pads) {
+        const auto b = [&](SDL_GamepadButton x) { return SDL_GetGamepadButton(g, x); };
+        guide |= b(SDL_GAMEPAD_BUTTON_GUIDE);
+        l3 |= b(SDL_GAMEPAD_BUTTON_LEFT_STICK);
+        r3 |= b(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+        up |= b(SDL_GAMEPAD_BUTTON_DPAD_UP);
+        down |= b(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+        left |= b(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+        right |= b(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+        l1 |= b(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+        r1 |= b(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        south |= b(SDL_GAMEPAD_BUTTON_SOUTH);
+        east |= b(SDL_GAMEPAD_BUTTON_EAST);
+        for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT && !any; ++i) any = b(static_cast<SDL_GamepadButton>(i));
+        // The stick past half its throw, as a press of the D-pad.
+        const int lx = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
+        up |= ly < -16000;
+        down |= ly > 16000;
+        left |= lx < -16000;
+        right |= lx > 16000;
+    }
+    static bool latch = false, toggled = false;
+    const bool toggle = guide || (l3 && r3);
+    if (toggle && !toggled) {
+        host_options_set_open(!host_options_open());
+        latch = true;
+    }
+    toggled = toggle;
+
+    // Up, Down, Left, Right, L1, R1, confirm, back: bit by bit, as keys.
+    static constexpr int kAsKey[] = {SDL_SCANCODE_UP,     SDL_SCANCODE_DOWN,     SDL_SCANCODE_LEFT,   SDL_SCANCODE_RIGHT,
+                                     SDL_SCANCODE_PAGEUP, SDL_SCANCODE_PAGEDOWN, SDL_SCANCODE_RETURN, SDL_SCANCODE_ESCAPE};
+    static unsigned prev = 0;
+    static std::chrono::steady_clock::time_point next_repeat;
+    unsigned held = 0;
+    if (host_options_open() && !host_options_editing() && !toggle) {
+        const bool south_confirms = menu_confirm_button() != kCircle;
+        const bool confirm = south_confirms ? south : east, cancel = south_confirms ? east : south;
+        held = (up ? 1u : 0u) | (down ? 2u : 0u) | (left ? 4u : 0u) | (right ? 8u : 0u) | (l1 ? 16u : 0u) | (r1 ? 32u : 0u) |
+               (confirm ? 64u : 0u) | (cancel ? 128u : 0u);
+        const auto now = std::chrono::steady_clock::now();
+        const unsigned pressed = held & ~prev;
+        if (pressed & 15u) next_repeat = now + std::chrono::milliseconds(400);
+        unsigned send = pressed;
+        if (!(pressed & 15u) && (held & 15u) && now >= next_repeat) {
+            send |= held & 15u;
+            next_repeat = now + std::chrono::milliseconds(90);
+        }
+        for (int i = 0; i < 8; ++i) {
+            if (!(send & (1u << i))) continue;
+            host_options_key(kAsKey[i], !(pressed & (1u << i)));
+        }
+        if (!host_options_open()) latch = true;  // closed by back or the Close row: that press stays out of the game
+    }
+    prev = held;
+    if (latch && !any && !toggle) latch = false;
+    return latch;
+}
+
 void update_pad() {
     update_triggers();
     PadState p;
@@ -1814,7 +1882,9 @@ void update_pad() {
         std::lock_guard<std::mutex> lock(g_text_mu);
         typing = g_text_want;
     }
-    if (host_options_open() || ingame_menu_open() || binding || typing) {
+    const std::vector<SDL_Gamepad*> pads = live_pads();
+    const bool menu_buttons_held = pad_options_menu(pads);
+    if (host_options_open() || ingame_menu_open() || binding || typing || menu_buttons_held) {
         p.connected = true;
         g_key_strong.store(false, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(g_pad_mu);
@@ -1824,7 +1894,6 @@ void update_pad() {
     // The controller button that ended a text entry stays out of the pad
     // until it is let go, as the key does (g_text_end_key).
     int end_button = g_text_end_button.load(std::memory_order_relaxed);
-    const std::vector<SDL_Gamepad*> pads = live_pads();
     if (end_button >= 0) {
         bool held = false;
         for (SDL_Gamepad* g : pads) held = held || SDL_GetGamepadButton(g, static_cast<SDL_GamepadButton>(end_button));

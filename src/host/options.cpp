@@ -10,6 +10,7 @@
 #include "core/config.h"
 #include "core/host_clock.h"
 #include "engine/live_resolution.h"
+#include "engine/menu_pointer.h"
 #include "engine/scene_split.h"
 #include "host/dlss_pass.h"
 #include "hle/modules.h"
@@ -22,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1894,7 +1896,24 @@ void options_panel_frame(float display_w, float display_h) {
     {
         float kx = px + 30.0f;
         const float ky = py + ph - 40.0f;
-        for (const auto& k : kKeys) {
+        // With a controller in hand, its buttons: the icons' set (pad_icons,
+        // Auto following the pad) and the region's confirm and back.
+        const char* const(*keys)[2] = kKeys;
+        if (host_input_device() == InputDevice::Pad) {
+            const int icons = g_set[kPadIcons].index;
+            const bool ps = icons == 1 || (icons == 0 && host_pad_playstation());
+            const bool circle_confirms = menu_confirm_button() == 0x2000u;  // the pad's Circle bit (engine/menu_pointer.h)
+            static const char* pad[std::size(kKeys)][2];
+            pad[0][0] = kKeys[0][0];  // the D-pad or the left stick, as the arrows
+            pad[1][0] = kKeys[1][0];
+            pad[2][0] = ps ? "L1 / R1" : "LB / RB";
+            pad[3][0] = ps ? (circle_confirms ? "Circle" : "Cross") : (circle_confirms ? "B" : "A");
+            pad[4][0] = ps ? (circle_confirms ? "Cross" : "Circle") : (circle_confirms ? "A" : "B");
+            for (std::size_t i = 0; i < std::size(kKeys); ++i) pad[i][1] = kKeys[i][1];
+            keys = pad;
+        }
+        for (std::size_t ki = 0; ki < std::size(kKeys); ++ki) {
+            const auto& k = keys[ki];
             const float kw = host_overlay_ui_text_width(kOverlayFontBold, 14.0f, k[0]);
             host_overlay_round_rect(kx, ky - 4.0f, kw + 20.0f, 24.0f, 12.0f, 0xffffff24u, 0xffffff17u);
             host_overlay_ui_text(kOverlayFontBold, kx + 10.0f, ky, 14.0f, kText, k[0]);

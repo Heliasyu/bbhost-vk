@@ -48,7 +48,7 @@ public static class OptionSchema
     {
         ["resolution"] = "What the game renders at, before any upscaling. 1920x1080 is what it shipped with. Wide (21:9, 32:9) and 16:10 screens are filled, with the HUD kept 16:9. The largest sizes can need a restart, because their memory is set aside when the game starts.",
         ["live_resolution"] = "On: changing Resolution in the game applies right away. To allow that, memory and display buffers for your largest display's size are set aside when the game starts, and cleared every frame. Off sizes everything for the resolution you start at, so it is a little lighter when the game runs below your display's size (no difference when it runs at it); a new resolution then applies at the next start.",
-        ["menu_key"] = "The key that opens the in-game settings menu while you play. F10 always works as well, so you cannot lock yourself out.",
+        ["menu_key"] = "The key that opens the in-game settings menu while you play. F10 always works as well, so you cannot lock yourself out. On a controller, the PS (Home, Xbox) button or L3 + R3 clicked together opens and closes it; L1 / R1 switch tabs, the D-pad or left stick moves and changes, Cross toggles and Circle closes.",
         ["fps_counter"] = "Shows the FPS counter in the game. Its look and what it shows are set below; F10 in the game has the same settings.",
         ["fps_position"] = "Which corner of the screen the FPS counter sits in, or the top centre.",
         ["fps_size"] = "How large the FPS counter's text is, from 75% to twice the default.",
