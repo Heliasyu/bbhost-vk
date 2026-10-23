@@ -1771,11 +1771,13 @@ void update_triggers() {
 }
 
 // The F10 menu from a controller. The PS / Home / Xbox button - the game
-// never reads it - or L3 and R3 clicked together opens and closes it. While it is open the D-pad or the left stick moves and changes,
-// L1 / R1 switch tabs, the region's confirm toggles and its back closes: each
-// press becomes the menu's key (host_options_key), and a held direction
-// repeats as a held key does. True while the buttons that opened or closed it
-// are still held, so they stay out of the game until let go.
+// never reads it - or L3 and R3 clicked together opens and closes it. While it
+// is open the D-pad or the left stick moves (Left / Right between the
+// columns), L1 / R1 switch tabs, the region's confirm selects a setting for
+// Left / Right to change and its back leaves it or closes: each press goes to
+// the menu (host_options_pad), and a held direction repeats as a held key
+// does. True while the buttons that opened or closed it are still held, so
+// they stay out of the game until let go.
 bool pad_options_menu(const std::vector<SDL_Gamepad*>& pads) {
     bool guide = false, l3 = false, r3 = false, any = false;
     bool up = false, down = false, left = false, right = false, l1 = false, r1 = false, south = false, east = false;
@@ -1813,13 +1815,15 @@ bool pad_options_menu(const std::vector<SDL_Gamepad*>& pads) {
     }
     toggled = toggle;
 
-    // Up, Down, Left, Right, L1, R1, confirm, back: bit by bit, as keys.
-    static constexpr int kAsKey[] = {SDL_SCANCODE_UP,     SDL_SCANCODE_DOWN,     SDL_SCANCODE_LEFT,   SDL_SCANCODE_RIGHT,
-                                     SDL_SCANCODE_PAGEUP, SDL_SCANCODE_PAGEDOWN, SDL_SCANCODE_RETURN, SDL_SCANCODE_ESCAPE};
+    // Up, Down, Left, Right, L1, R1, confirm, back: bit by bit, to the menu.
+    static constexpr OptionsPad kAs[] = {OptionsPad::Up,      OptionsPad::Down,    OptionsPad::Left,    OptionsPad::Right,
+                                         OptionsPad::PrevTab, OptionsPad::NextTab, OptionsPad::Confirm, OptionsPad::Back};
     static unsigned prev = 0;
     static std::chrono::steady_clock::time_point next_repeat;
     unsigned held = 0;
-    if (host_options_open() && !host_options_editing() && !toggle) {
+    // Read while one of its fields is typed too, so the confirm or back that
+    // ends the typing is not a fresh press for the menu when it ends.
+    if (host_options_open() && !toggle) {
         const bool south_confirms = menu_confirm_button() != kCircle;
         const bool confirm = south_confirms ? south : east, cancel = south_confirms ? east : south;
         held = (up ? 1u : 0u) | (down ? 2u : 0u) | (left ? 4u : 0u) | (right ? 8u : 0u) | (l1 ? 16u : 0u) | (r1 ? 32u : 0u) |
@@ -1832,9 +1836,10 @@ bool pad_options_menu(const std::vector<SDL_Gamepad*>& pads) {
             send |= held & 15u;
             next_repeat = now + std::chrono::milliseconds(90);
         }
+        if (host_options_editing()) send = 0;
         for (int i = 0; i < 8; ++i) {
             if (!(send & (1u << i))) continue;
-            host_options_key(kAsKey[i], !(pressed & (1u << i)));
+            host_options_pad(kAs[i], !(pressed & (1u << i)));
         }
         if (!host_options_open()) latch = true;  // closed by back or the Close row: that press stays out of the game
     }
@@ -2535,7 +2540,9 @@ bool host_window_pump() {
                 // keyboard can close. A press, so the button that opened the
                 // box - still held when it appears - does not close it.
                 std::lock_guard<std::mutex> lock(g_text_mu);
-                if (!g_text_on || host_options_open()) break;
+                // The F10 menu's own fields (the account rows) too; its other
+                // presses are pad_options_menu's.
+                if (!g_text_on || (host_options_open() && !host_options_editing())) break;
                 const std::uint32_t bit = e.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH  ? kCross
                                           : e.gbutton.button == SDL_GAMEPAD_BUTTON_EAST ? kCircle
                                                                                          : 0u;

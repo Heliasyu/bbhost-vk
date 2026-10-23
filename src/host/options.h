@@ -33,6 +33,13 @@ void host_options_set_open(bool open);
 // A key the pump saw, as an SDL scancode. True when the screen consumed it,
 // which includes the key that opens it.
 bool host_options_key(int scancode, bool repeat);
+// A controller's press, while the screen is open (host/window.cpp maps the
+// buttons, the region deciding confirm and back). Browsing, Left / Right move
+// between the two columns; Confirm selects a setting, and only then do Left /
+// Right change it, so the D-pad never changes one by accident. Back leaves a
+// selected setting, else closes the screen. `repeat`: a held direction.
+enum class OptionsPad { Up, Down, Left, Right, PrevTab, NextTab, Confirm, Back };
+void host_options_pad(OptionsPad press, bool repeat);
 // One pump: hit-tests the pointer, applies what changed, and draws. Call
 // between host_overlay_reset() and the pointer, so the pointer is on top.
 void host_options_frame(float display_w, float display_h);

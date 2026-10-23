@@ -691,6 +691,37 @@ void go_section(int s) {
     if (r < end) g_sel = r;
 }
 
+// The controller's selected setting (host_options_pad): the row whose value
+// takes Left and Right, -1 for none. Only while it is still the row selected
+// (the pointer may have moved the selection), and cleared by moving off it, a
+// tab, back, a key, or closing.
+int g_pad_edit_row = -1;
+bool pad_editing() { return g_pad_edit_row >= 0 && g_pad_edit_row == g_sel; }
+
+// Left / Right while browsing: the row level with this one in the column on
+// that side, as the last frame laid them out.
+void move_across(int dir) {
+    const int s = section_of(g_sel);
+    const int first = g_sections[s] + 1, end = s + 1 < g_section_count ? g_sections[s + 1] : kRowCount;
+    const float cx = g_row_xs[g_sel], cy = g_row_y[g_sel];
+    int best = -1;
+    float best_d = 1e9f;
+    for (int r = first; r < end; ++r) {
+        if (r == g_sel || !selectable(r) || g_row_y[r] < -9000.0f) continue;
+        const float dx = g_row_xs[r] - cx;
+        if (dir > 0 ? dx < 1.0f : dx > -1.0f) continue;
+        const float d = std::fabs(g_row_y[r] - cy) + std::fabs(dx) * 0.01f;
+        if (d < best_d) {
+            best_d = d;
+            best = r;
+        }
+    }
+    if (best >= 0) {
+        g_sel = best;
+        g_section_sel[s] = g_sel;
+    }
+}
+
 // Whether the resolution entry `index` changes while the game runs. One past
 // what this run's render-target heap was grown for at its start (5120x2160
 // after a smaller start) applies on the next run like any restart setting.
@@ -1498,6 +1529,7 @@ void host_options_set_open(bool open) {
         return;
     }
     g_open.store(open, std::memory_order_relaxed);
+    g_pad_edit_row = -1;
     if (open) {
         // Nothing has consumed the pointer while the screen was closed, so a
         // click from minutes ago is still latched. Drop it: the first click
@@ -1528,6 +1560,7 @@ bool host_options_key(int scancode, bool repeat) {
     if (!host_options_open()) {
         return false;
     }
+    g_pad_edit_row = -1;  // the keyboard changes values with its arrows
     // A field being typed: the window's text entry takes the keys (Enter
     // accepts, Escape cancels); the poll in the frame picks the result up.
     if (g_edit_field >= 0) {
@@ -1585,6 +1618,57 @@ bool host_options_key(int scancode, bool repeat) {
     (void)repeat;
     return false;
 #endif
+}
+
+void host_options_pad(OptionsPad press, bool repeat) {
+    if (!host_options_open() || g_edit_field >= 0) return;
+    const Row& row = g_rows[g_sel];
+    const int id = row.kind == Row::Option ? row.setting : -1;
+    switch (press) {
+        case OptionsPad::Up:
+        case OptionsPad::Down:
+            g_pad_edit_row = -1;
+            move_in_section(press == OptionsPad::Up ? -1 : 1);
+            return;
+        case OptionsPad::PrevTab:
+        case OptionsPad::NextTab:
+            g_pad_edit_row = -1;
+            go_section(section_of(g_sel) + (press == OptionsPad::PrevTab ? -1 : 1));
+            return;
+        case OptionsPad::Left:
+        case OptionsPad::Right: {
+            const int dir = press == OptionsPad::Left ? -1 : 1;
+            if (!pad_editing() || id < 0) {
+                if (!repeat) move_across(dir);
+                return;
+            }
+            // As a held key: steps to the end and stops there.
+            const int to = stepped(id, dir, false);
+            if (repeat && (to < 0 || to >= static_cast<int>(g_set[id].values.size()))) return;
+            set_index(id, to, false);
+            return;
+        }
+        case OptionsPad::Confirm:
+            if (repeat) return;
+            if (row.kind == Row::Close) {
+                host_options_set_open(false);
+            } else if (row.kind == Row::Text) {
+                edit_begin(row.field);
+            } else if (row.kind == Row::Action) {
+                account_action(row.field, g_field[0], g_field[1]);
+            } else if (id >= 0) {
+                g_pad_edit_row = pad_editing() ? -1 : g_sel;
+            }
+            return;
+        case OptionsPad::Back:
+            if (repeat) return;
+            if (pad_editing()) {
+                g_pad_edit_row = -1;
+            } else {
+                host_options_set_open(false);
+            }
+            return;
+    }
 }
 
 namespace {
@@ -1837,6 +1921,7 @@ void options_panel_frame(float display_w, float display_h) {
             host_overlay_round_rect(kx, ty + 3.0f, th - 6.0f, th - 6.0f, (th - 6.0f) * 0.5f, on ? 0x0b0d12ffu : 0xe9edf5ffu,
                                     on ? 0x0b0d12ffu : 0xc3cad6ffu);
             g_row_vl[r] = g_row_vm[r] = 0.0f;  // a click anywhere flips it
+            if (sel && pad_editing()) host_overlay_round_frame(tx - 4.0f, ty - 4.0f, tw + 8.0f, th + 8.0f, th * 0.5f + 4.0f, 2.0f, kAccent, kAccent);
         } else {
             const char* v = s.values[static_cast<std::size_t>(s.index)];
             if (std::strcmp(s.key, "window_mode") == 0 && std::strcmp(v, "Fullscreen") == 0) v = "Fullscreen (borderless)";
@@ -1845,7 +1930,12 @@ void options_panel_frame(float display_w, float display_h) {
             const float pr = right + 4.0f, pl = pr - vw - 66.0f;
             const float ty = y + 6.0f, th = row_h - 12.0f;
             host_overlay_round_rect(pl, ty, pr - pl, th, th * 0.5f, sel ? 0x00000066u : 0x00000047u, sel ? 0x00000052u : 0x00000038u);
-            host_overlay_round_frame(pl, ty, pr - pl, th, th * 0.5f, 1.0f, sel ? 0xc9d6ee66u : 0xffffff1cu, 0xffffff0fu);
+            if (sel && pad_editing()) {
+                // Selected on a controller: Left / Right change it.
+                host_overlay_round_frame(pl, ty, pr - pl, th, th * 0.5f, 2.0f, kAccent, kAccent);
+            } else {
+                host_overlay_round_frame(pl, ty, pr - pl, th, th * 0.5f, 1.0f, sel ? 0xc9d6ee66u : 0xffffff1cu, 0xffffff0fu);
+            }
             host_overlay_ui_text(kOverlayFontBold, pl + 33.0f, y + text_dy, 18.0f, sel ? kText : kSoft, v);
             const std::uint32_t chev_on = sel ? kAccent : 0x8b94a6ffu, chev_off = 0xffffff1fu;
             const float cy = y + row_h * 0.5f;
@@ -1901,29 +1991,30 @@ void options_panel_frame(float display_w, float display_h) {
     {
         float kx = px + 30.0f;
         const float ky = py + ph - 40.0f;
-        // With a controller in hand, its buttons: the icons' set (pad_icons,
-        // Auto following the pad) and the region's confirm and back.
-        const char* const(*keys)[2] = kKeys;
+        std::vector<std::pair<std::string, const char*>> keys;
         if (host_input_device() == InputDevice::Pad) {
+            // A controller's buttons: the icons' set (pad_icons, Auto following
+            // the pad) and the region's confirm and back.
             const int icons = g_set[kPadIcons].index;
             const bool ps = icons == 1 || (icons == 0 && host_pad_playstation());
             const bool circle_confirms = menu_confirm_button() == 0x2000u;  // the pad's Circle bit (engine/menu_pointer.h)
-            static const char* pad[std::size(kKeys)][2];
-            pad[0][0] = kKeys[0][0];  // the D-pad or the left stick, as the arrows
-            pad[1][0] = kKeys[1][0];
-            pad[2][0] = ps ? "L1 / R1" : "LB / RB";
-            pad[3][0] = ps ? (circle_confirms ? "Circle" : "Cross") : (circle_confirms ? "B" : "A");
-            pad[4][0] = ps ? (circle_confirms ? "Cross" : "Circle") : (circle_confirms ? "A" : "B");
-            for (std::size_t i = 0; i < std::size(kKeys); ++i) pad[i][1] = kKeys[i][1];
-            keys = pad;
+            const char* confirm = ps ? (circle_confirms ? "Circle" : "Cross") : (circle_confirms ? "B" : "A");
+            const char* back = ps ? (circle_confirms ? "Cross" : "Circle") : (circle_confirms ? "A" : "B");
+            const char* tabs = ps ? "L1 / R1" : "LB / RB";
+            if (pad_editing()) {
+                keys = {{"Left / Right", "change"}, {std::string(confirm) + " / " + back, "done"}, {tabs, "section"}};
+            } else {
+                keys = {{"D-pad", "move"}, {tabs, "section"}, {confirm, "change"}, {back, "closes"}};
+            }
+        } else {
+            for (const auto& k : kKeys) keys.emplace_back(k[0], k[1]);
         }
-        for (std::size_t ki = 0; ki < std::size(kKeys); ++ki) {
-            const auto& k = keys[ki];
-            const float kw = host_overlay_ui_text_width(kOverlayFontBold, 14.0f, k[0]);
+        for (const auto& k : keys) {
+            const float kw = host_overlay_ui_text_width(kOverlayFontBold, 14.0f, k.first.c_str());
             host_overlay_round_rect(kx, ky - 4.0f, kw + 20.0f, 24.0f, 12.0f, 0xffffff24u, 0xffffff17u);
-            host_overlay_ui_text(kOverlayFontBold, kx + 10.0f, ky, 14.0f, kText, k[0]);
+            host_overlay_ui_text(kOverlayFontBold, kx + 10.0f, ky, 14.0f, kText, k.first.c_str());
             kx += kw + 28.0f;
-            kx += host_overlay_ui_text(kOverlayFontBody, kx, ky, 14.0f, kMuted, menu_tr(k[1])) + 26.0f;
+            kx += host_overlay_ui_text(kOverlayFontBody, kx, ky, 14.0f, kMuted, menu_tr(k.second)) + 26.0f;
         }
     }
 }
@@ -2185,6 +2276,7 @@ std::vector<std::string> host_options_menu_strings() {
     for (const char* n : kNotes) add(n);
     for (const char* n : kUpdateNotes) add(n);
     for (const auto& k : kKeys) add(k[1]);
+    add("done");  // the controller's guide while a setting is selected
     for (const char* n : kOtherStrings) add(n);
     return out;
 }
