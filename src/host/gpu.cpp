@@ -2585,7 +2585,7 @@ bool init_locked() {
     // bbhost-vk Phase 4: FSR 4.1.1's extensions, only with its assets built (host/fsr4_pass.h).
     fsr4_device_features(f2.features, f12, f13, dext, &f13.pNext);
     // Helia's Dream: FSR 4 (INT8 v07), only with its assets downloaded (host/fsr4v07_pass.h).
-    fsr4v07_device_features(f2.features, f12, f13, &f13.pNext);
+    fsr4v07_device_features(f2.features, f12, f13, dext, &f13.pNext);
     // Helia's Dream: DLSS's NGX extensions, only with DLSS chosen (host/dlss_pass.h).
     if (host_settings().upscaler == upscaler::kDlss) dlss_device_extensions(dext);
     // DB_DEPTH_CONTROL bit 3: the deferred lights cull by depth range.

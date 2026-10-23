@@ -23,10 +23,11 @@
 namespace gpu {
 
 // Before vkCreateDevice: only when the FSR 4 assets are there, the features
-// its passes need (INT8 dot products, 8- and 16-bit storage, FP16), where the
-// GPU has them. Nothing otherwise.
+// its passes need (INT8 dot products, 8- and 16-bit storage, FP16, compute
+// derivatives for the pre-pass and auto-exposure), where the GPU has them.
+// Nothing otherwise. After fsr4_device_features: its derivatives are reused.
 void fsr4v07_device_features(VkPhysicalDeviceFeatures& f, VkPhysicalDeviceVulkan12Features& f12,
-                             VkPhysicalDeviceVulkan13Features& f13, void** chain);
+                             VkPhysicalDeviceVulkan13Features& f13, std::vector<const char*>& exts, void** chain);
 
 std::string fsr4v07_assets_dir();
 bool fsr4v07_assets_present(const std::string& dir);

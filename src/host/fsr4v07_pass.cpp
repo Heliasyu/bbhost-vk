@@ -34,6 +34,7 @@ struct Support {
 };
 Support g_support;
 VkPhysicalDeviceVulkan11Features g_f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR g_derivatives{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
 
 // One provider context: for one model, tier and pair of sizes.
 struct Context {
@@ -44,6 +45,9 @@ struct Context {
     std::string tier;
     std::uint32_t rw = 0, rh = 0, ow = 0, oh = 0;
     std::uint64_t last_frame = 0;  // the submission it last recorded into
+    // The shaders' entry points: the provider copies the SPIR-V but keeps
+    // pointers to these names, for pipelines it makes after creation.
+    std::string entries[FFX_FSR4_VK_PASS_COUNT];
 };
 Context* g_ctx = nullptr;
 bool g_fatal = false;
@@ -78,6 +82,26 @@ void destroy(Context* c) {
     delete c;
 }
 
+// The module's first entry point, read from its OpEntryPoint (opcode 15:
+// execution model, id, then the name as a nul-terminated literal). The model
+// passes are named fsr4_model_v07_i8_pass<N>, the rest "main": given "main"
+// for a model pass, RADV crashed in vkCreateComputePipelines (a null
+// dereference) instead of failing, at FSR 4's first frame.
+std::string spirv_entry_point(const std::vector<std::uint8_t>& blob) {
+    const auto* w = reinterpret_cast<const std::uint32_t*>(blob.data());
+    const std::size_t n = blob.size() / 4;
+    for (std::size_t i = 5; i < n;) {
+        const std::uint32_t count = w[i] >> 16, op = w[i] & 0xffff;
+        if (count == 0 || i + count > n) break;
+        if (op == 15 && count > 3) {
+            const char* name = reinterpret_cast<const char*>(w + i + 3);
+            return std::string(name, strnlen(name, (count - 3) * 4));
+        }
+        i += count;
+    }
+    return "main";
+}
+
 // A context for these sizes, its shaders and weights read from the asset folder.
 Context* make(FfxFsr4ModelPreset preset, std::uint32_t rw, std::uint32_t rh, std::uint32_t ow, std::uint32_t oh, std::string* why) {
     FfxFsr4V07AssetSet set{};
@@ -104,6 +128,7 @@ Context* make(FfxFsr4ModelPreset preset, std::uint32_t rw, std::uint32_t rh, std
         return nullptr;
     }
     auto* c = new Context;
+    for (int i = 0; i < FFX_FSR4_VK_PASS_COUNT; ++i) c->entries[i] = spirv_entry_point(blobs[i]);
     c->scratch.resize(ffxFsr4VkGetScratchMemorySize());
     FfxFsr4VkCreateInfo ci{};
     ci.device = g.device;
@@ -111,7 +136,7 @@ Context* make(FfxFsr4ModelPreset preset, std::uint32_t rw, std::uint32_t rh, std
     for (int i = 0; i < FFX_FSR4_VK_PASS_COUNT; ++i) {
         ci.shaders[i].spirv = reinterpret_cast<const std::uint32_t*>(blobs[i].data());
         ci.shaders[i].sizeBytes = blobs[i].size();
-        ci.shaders[i].entryPoint = "main";
+        ci.shaders[i].entryPoint = c->entries[i].c_str();
     }
     ci.modelInitializer = init.data();
     ci.modelInitializerSize = init.size();
@@ -293,7 +318,7 @@ bool fsr4v07_assets_present(const std::string& dir) {
 }
 
 void fsr4v07_device_features(VkPhysicalDeviceFeatures& f, VkPhysicalDeviceVulkan12Features& f12, VkPhysicalDeviceVulkan13Features& f13,
-                             void** chain) {
+                             std::vector<const char*>& exts, void** chain) {
     if (env_off("BBHOST_FSR4V07")) return;
     const std::string dir = fsr4v07_assets_dir();
     if (!fsr4v07_assets_present(dir)) {
@@ -306,6 +331,14 @@ void fsr4v07_device_features(VkPhysicalDeviceFeatures& f, VkPhysicalDeviceVulkan
     VkPhysicalDeviceVulkan13Features q13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     q11.pNext = &q12;
     q12.pNext = &q13;
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR qd{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
+    std::uint32_t n = 0;
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &n, nullptr);
+    std::vector<VkExtensionProperties> props(n);
+    vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &n, props.data());
+    bool e_deriv = false;
+    for (const VkExtensionProperties& p : props) e_deriv = e_deriv || !std::strcmp(p.extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    if (e_deriv) q13.pNext = &qd;
     VkPhysicalDeviceFeatures2 q2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     q2.pNext = &q11;
     vkGetPhysicalDeviceFeatures2(g.phys, &q2);
@@ -319,6 +352,7 @@ void fsr4v07_device_features(VkPhysicalDeviceFeatures& f, VkPhysicalDeviceVulkan
     ok = need(q12.shaderFloat16, "shaderFloat16") && ok;
     ok = need(q12.storageBuffer8BitAccess, "storageBuffer8BitAccess") && ok;
     ok = need(q11.storageBuffer16BitAccess, "storageBuffer16BitAccess") && ok;
+    ok = need(e_deriv && qd.computeDerivativeGroupLinear, "VK_KHR_compute_shader_derivatives") && ok;
     g_support.ok = ok;
     if (!ok) {
         g_support.missing = missing;
@@ -336,6 +370,16 @@ void fsr4v07_device_features(VkPhysicalDeviceFeatures& f, VkPhysicalDeviceVulkan
     g_f11.uniformAndStorageBuffer16BitAccess = q11.uniformAndStorageBuffer16BitAccess;
     g_f11.pNext = *chain;
     *chain = &g_f11;
+    // The pre-pass and auto-exposure use compute derivatives (linear groups).
+    // FSR 4.1.1 (host/fsr4_pass.cpp) may have enabled them already.
+    bool listed = false;
+    for (const char* e : exts) listed = listed || !std::strcmp(e, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+    if (!listed) {
+        exts.push_back(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+        g_derivatives.computeDerivativeGroupLinear = VK_TRUE;
+        g_derivatives.pNext = *chain;
+        *chain = &g_derivatives;
+    }
     host_log("fsr4: FSR 4 (INT8) assets in %s; the device runs them", dir.c_str());
 }
 
@@ -480,7 +524,8 @@ std::string fsr4v07_describe_locked() {
 namespace gpu {
 std::string fsr4v07_assets_dir() { return std::string(); }
 bool fsr4v07_assets_present(const std::string&) { return false; }
-void fsr4v07_device_features(VkPhysicalDeviceFeatures&, VkPhysicalDeviceVulkan12Features&, VkPhysicalDeviceVulkan13Features&, void**) {}
+void fsr4v07_device_features(VkPhysicalDeviceFeatures&, VkPhysicalDeviceVulkan12Features&, VkPhysicalDeviceVulkan13Features&,
+                             std::vector<const char*>&, void**) {}
 bool fsr4v07_record_locked(VkCommandBuffer, const UpscalerInputs&, std::uint32_t, std::uint32_t, const Fsr4Params&, VkImage*, bool* fatal,
                            std::string* why) {
     *fatal = true;
