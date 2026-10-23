@@ -231,7 +231,7 @@ void trophy_popup(int id, int earned, int total) {
     g_queue.push_back({id, earned, total});
 }
 
-void trophy_popup_frame(float display_w, float /*display_h*/) {
+void trophy_popup_frame(float display_w, float display_h) {
     // BBHOST_TROPHY_TEST=<id>: that trophy's pop-up once, a few seconds in, to see it.
     static bool tested = false;
     static const auto started = std::chrono::steady_clock::now();
@@ -283,11 +283,12 @@ void trophy_popup_frame(float display_w, float /*display_h*/) {
     const double in = std::clamp(t / kIn, 0.0, 1.0), out = std::clamp((t - kIn - kHold) / kOut, 0.0, 1.0);
     const float ease = static_cast<float>(1.0 - std::pow(1.0 - in, 3.0));
     const float a = static_cast<float>(std::min(in * 1.4, 1.0) * (1.0 - out));
-    // The launcher mock-up's toast (Toast.dc.html) at 1.15x: a dark glass card,
-    // no border, and under it a thin pill that empties while it stays.
-    const float k = 1.15f;
+    // The launcher mock-up's toast (Toast.dc.html) at 1.15x at 1080p, scaled
+    // with the screen's height so it is the same share of a 4K screen: a dark
+    // glass card, no border, and under it a thin pill that empties while it stays.
+    const float k = 1.15f * std::max(display_h, 360.0f) / 1080.0f;
     const float w = 400.0f * k, h = 84.0f * k, r = 20.0f * k;
-    const float x = display_w - w - 36.0f * k + (1.0f - ease) * 60.0f, y = 32.0f * k;
+    const float x = display_w - w - 36.0f * k + (1.0f - ease) * 52.0f * k, y = 32.0f * k;
 
     host_overlay_glass(x, y, w, h, r, 20.0f * k, 0.72f);
     host_overlay_round_rect(x, y, w, h, r, with_alpha(0x0e10168cu, a), with_alpha(0x0e10168cu, a));
