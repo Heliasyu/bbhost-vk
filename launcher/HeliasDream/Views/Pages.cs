@@ -512,7 +512,7 @@ public static class Pages
             ping.Text = t.Result is int ms ? $"Answering · {ms} ms" : "Not answering right now"));
         bool live = cfg.OnlineHost == "thehuntersdream.com";
         var server = Ui.Glass(Ui.Col(8, Ui.Eyebrow("Server"),
-            Ui.Row2(live ? "The Hunter's Dream (live)" : cfg.OnlineHost, live ? "thehuntersdream.com · co-op, invasions, messages, bloodstains" : "A server set in bbhost.toml", ping)), 18);
+            Ui.Row2(live ? "The Hunter's Dream (live)" : cfg.OnlineHost, live ? "thehuntersdream.com · co-op, invasions, messages, bloodstains" : "A server set in HeliasDream.toml", ping)), 18);
 
         // The community: the server's own numbers, and where to find people.
         var nums = new UniformGrid { Columns = 3 };
@@ -635,12 +635,12 @@ public static class Pages
         {
             var d = await ctx.PickFolder(ctx.GameDir());
             if (d == null) return;
-            if (Paths.EngineIn(d) == null) { dirText.Text = "No bbhost in that folder"; return; }
+            if (Paths.EngineIn(d) == null) { dirText.Text = "No Helia's Dream engine in that folder"; return; }
             s.GameDir = d; s.Save(); dirText.Text = d; ctx.Changed();
         });
         var folderRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 18 };
         folderRow.Children.Add(Ui.Col(2, Ui.Text("Game folder", 14, null, FontWeight.Medium), dirText));
-        Ui.Tip(folderRow, "The folder with the engine in it (bbhost, or bbhost.bin beside its wrapper). Found by itself when the launcher sits in or next to that folder.");
+        Ui.Tip(folderRow, "The Helia's Dream folder, with the engine (HeliasDream.bin) in it. Found by itself when the launcher sits in it or next to it.");
         Grid.SetColumn(choose, 1); folderRow.Children.Add(choose);
 
         Control Toggle(string label, string help, bool value, Action<bool> set, string? tip = null)

@@ -8,7 +8,7 @@ using Avalonia.Threading;
 namespace HeliasDream;
 
 /// <summary>
-/// `helias-dream --shot out.png [page]`: draws the window off-screen and saves it, for checking a
+/// `HeliasDream --shot out.png [page]`: draws the window off-screen and saves it, for checking a
 /// change to the look without opening anything on the desktop.
 /// </summary>
 internal static class Shot

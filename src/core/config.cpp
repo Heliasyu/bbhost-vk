@@ -277,24 +277,63 @@ std::string env_dir(const char* name) {
 // download or update of bbhost then finds - the game's paths, the F10
 // settings, the account. BBHOST_CONFIG_DIR replaces the config one (tests,
 // a portable setup).
+//
+// Helia's Dream: they are named HeliasDream (they were bbhost). A setup from
+// before is copied over once - the config folder with its files renamed
+// (bbhost.toml -> HeliasDream.toml, bbhost-options*.toml ->
+// HeliasDream-options*.toml), the data folder as it is - and the old folders
+// stay as they were, as a backup.
+namespace {
+std::string config_base() {
+#if defined(_WIN32)
+    return env_dir("APPDATA");
+#else
+    if (std::string d = env_dir("XDG_CONFIG_HOME"); !d.empty()) return d;
+    if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.config";
+    return std::string();
+#endif
+}
+std::string data_base() {
+#if defined(_WIN32)
+    return env_dir("LOCALAPPDATA");
+#else
+    if (std::string d = env_dir("XDG_DATA_HOME"); !d.empty()) return d;
+    if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.local/share";
+    return std::string();
+#endif
+}
+void migrate_from_bbhost() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (const std::string b = config_base(); !b.empty() && fs::is_directory(b + "/bbhost", ec) && !fs::exists(b + "/HeliasDream", ec)) {
+        fs::copy(b + "/bbhost", b + "/HeliasDream", fs::copy_options::recursive, ec);
+        for (const auto& e : fs::directory_iterator(b + "/HeliasDream", ec)) {
+            const std::string n = e.path().filename().string();
+            if (n == "bbhost.toml") fs::rename(e.path(), e.path().parent_path() / "HeliasDream.toml", ec);
+            else if (n.rfind("bbhost-options", 0) == 0) fs::rename(e.path(), e.path().parent_path() / ("HeliasDream" + n.substr(6)), ec);
+        }
+        std::fprintf(stderr, "Helia's Dream: settings copied from %s/bbhost to %s/HeliasDream (the old folder is kept)\n", b.c_str(), b.c_str());
+    }
+    if (const std::string b = data_base(); !b.empty() && fs::is_directory(b + "/bbhost", ec) && !fs::exists(b + "/HeliasDream", ec)) {
+        fs::copy(b + "/bbhost", b + "/HeliasDream", fs::copy_options::recursive, ec);
+        std::fprintf(stderr, "Helia's Dream: saves and data copied from %s/bbhost to %s/HeliasDream (the old folder is kept)\n", b.c_str(), b.c_str());
+    }
+}
+}  // namespace
+
 std::string user_config_dir() {
     if (std::string d = env_dir("BBHOST_CONFIG_DIR"); !d.empty()) return d;
-#if defined(_WIN32)
-    if (std::string d = env_dir("APPDATA"); !d.empty()) return d + "/bbhost";
-#else
-    if (std::string d = env_dir("XDG_CONFIG_HOME"); !d.empty()) return d + "/bbhost";
-    if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.config/bbhost";
-#endif
+    migrate_from_bbhost();
+    if (std::string b = config_base(); !b.empty()) return b + "/HeliasDream";
     return exe_dir();
 }
 
 std::string user_data_dir() {
-#if defined(_WIN32)
-    if (std::string d = env_dir("LOCALAPPDATA"); !d.empty()) return d + "/bbhost/data";
-#else
-    if (std::string d = env_dir("XDG_DATA_HOME"); !d.empty()) return d + "/bbhost/data";
-    if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.local/share/bbhost/data";
-#endif
+    migrate_from_bbhost();
+    if (std::string b = data_base(); !b.empty()) return b + "/HeliasDream/data";
     return exe_dir() + "/data";
 }
 
@@ -584,8 +623,14 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
     //   settings, as the playtest kit's dev server). A user config that does
     //   not exist yet is imported from the second when that names the game,
     //   and one that does is given the keys bbhost has since come to expect.
-    const std::string user_cfg = user_config_dir() + "/bbhost.toml";
-    make_dirs(user_config_dir());  // where the F10 settings are saved, whatever else exists
+    const std::string user_cfg = user_config_dir() + "/HeliasDream.toml";
+    make_dirs(user_config_dir());
+    // A bbhost.toml left in the per-user folder (an older release's, or one
+    // put there by hand) becomes the HeliasDream.toml.
+    if (!file_exists(user_cfg) && file_exists(user_config_dir() + "/bbhost.toml")) {
+        std::error_code ec;
+        std::filesystem::rename(user_config_dir() + "/bbhost.toml", user_cfg, ec);
+    }  // where the F10 settings are saved, whatever else exists
     std::string local_cfg;
     // Absolute, so an import into the user config can resolve its relative paths.
     std::string cwd;
@@ -593,7 +638,9 @@ bool config_load(int argc, char** argv, HostConfig* out, std::string* error) {
         std::error_code ec;
         cwd = std::filesystem::current_path(ec).generic_string();
     }
-    for (const std::string& cand : {cwd.empty() ? std::string("bbhost.toml") : cwd + "/bbhost.toml", exe_dir() + "/bbhost.toml"}) {
+    // HeliasDream.toml, or an older package's bbhost.toml.
+    for (const std::string& cand : {cwd.empty() ? std::string("HeliasDream.toml") : cwd + "/HeliasDream.toml", exe_dir() + "/HeliasDream.toml",
+                                     cwd.empty() ? std::string("bbhost.toml") : cwd + "/bbhost.toml", exe_dir() + "/bbhost.toml"}) {
         if (file_exists(cand) && cand != user_cfg) {
             local_cfg = cand;
             break;
@@ -760,7 +807,7 @@ std::string config_setup_help(const HostConfig& c) {
     if (!have_eboot || !have_app0) {
         // The per-user config is the one to fill in: every copy of bbhost,
         // and every update, reads it.
-        const std::string path = user_config_dir() + "/bbhost.toml";
+        const std::string path = user_config_dir() + "/HeliasDream.toml";
         if (!file_exists(path)) {
             const bool wrote = make_dirs(user_config_dir()) && config_write_template(path);
             line("bbhost: there is no configuration yet, so there is nothing to run.");
@@ -908,7 +955,7 @@ bool config_write_template(const std::string& path) {
     out << "# bbhost configuration. Set the two paths under [paths], then run bbhost.\n"
            "# On Windows write them either way: \"C:\\Games\\Bloodborne\" or \"C:/Games/Bloodborne\".\n"
            "# A relative path is taken from the folder this file is in.\n"
-           "# This file is the per-user one (%APPDATA%\\bbhost on Windows, ~/.config/bbhost on\n"
+           "# This file is the per-user one (%APPDATA%\\HeliasDream on Windows, ~/.config/HeliasDream on\n"
            "# Linux): every copy of bbhost reads it, so a new download or an update keeps it.\n"
            "[paths]\n"
            "# The folder that contains dvdroot_ps4 (the decrypted game dump). An update\n"
@@ -920,7 +967,7 @@ bool config_write_template(const std::string& path) {
            "#   eboot = \"C:\\Games\\Bloodborne\\eboot.bin\"\n"
            "eboot = \"PATH-TO-THE-EBOOT\"\n"
            "# Writable folder for saves, caches and /data. Default: the per-user data\n"
-           "# folder (%LOCALAPPDATA%\\bbhost\\data, ~/.local/share/bbhost/data), which\n"
+           "# folder (%LOCALAPPDATA%\\HeliasDream\\data, ~/.local/share/HeliasDream/data), which\n"
            "# outlives any copy of bbhost.\n"
            "# data = \"D:/bbhost-data\"\n"
            "# The PC port's asset overlay: files here resolve ahead of the dump, so a\n"
@@ -1023,7 +1070,7 @@ bool config_write_template(const std::string& path) {
 
 std::string config_exe_dir() { return exe_dir(); }
 std::string config_user_dir() { return user_config_dir(); }
-std::string config_user_file() { return user_config_dir() + "/bbhost.toml"; }
+std::string config_user_file() { return user_config_dir() + "/HeliasDream.toml"; }
 std::string config_default_data_dir() { return user_data_dir(); }
 
 bool config_set_values(const std::string& path, const std::vector<ConfigEdit>& edits) {

@@ -3,7 +3,7 @@ using System.Linq;
 namespace HeliasDream.Core;
 
 /// <summary>
-/// One setting of bbhost-options.toml: its key, the values the engine accepts (the same lists as
+/// One setting of HeliasDream-options.toml: its key, the values the engine accepts (the same lists as
 /// src/host/options.cpp's g_set, which the F10 menu shows), the default, and its help line.
 /// </summary>
 public sealed record OptionDef(string Key, string Label, string[] Values, int Default, string Help, bool Restart = false)

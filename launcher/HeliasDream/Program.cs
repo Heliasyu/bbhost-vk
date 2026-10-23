@@ -7,6 +7,8 @@ internal static class Program
     [System.STAThread]
     public static void Main(string[] args)
     {
+        // The engine's old bbhost folders and the launcher's old settings, copied over once.
+        HeliasDream.Core.Paths.Migrate();
         if (args.Length > 0 && args[0] == "--shot") { Shot.Run(args); return; }
         if (args.Length == 3 && args[0] == "--steam-check") { HeliasDream.Core.Steam.RoundTrip(args[1], args[2]); return; }
         // --add-to-steam [art folder]: what Game setup's Add does, from a terminal.

@@ -888,7 +888,7 @@ std::string options_path() {
     static const std::string path = [] {
         const HostConfig& c = config();
         const std::string mine = config_user_dir() + "/" +
-                                 (c.profile.empty() ? std::string("bbhost-options.toml") : "bbhost-options-" + c.profile + ".toml");
+                                 (c.profile.empty() ? std::string("HeliasDream-options.toml") : "HeliasDream-options-" + c.profile + ".toml");
         std::ifstream have(mine);
         if (have) return mine;
         const auto beside = [](const std::string& f) {

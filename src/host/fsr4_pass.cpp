@@ -202,7 +202,7 @@ std::string fsr4_assets_dir() {
     std::string base;
     if (const char* x = std::getenv("XDG_DATA_HOME"); x && x[0]) base = x;
     else if (const char* h = std::getenv("HOME"); h && h[0]) base = std::string(h) + "/.local/share";
-    return base.empty() ? std::string("fsr4_411") : base + "/bbhost/fsr4_411";
+    return base.empty() ? std::string("fsr4_411") : base + "/HeliasDream/fsr4_411";
 }
 
 bool fsr4_assets_present(const std::string& dir) {

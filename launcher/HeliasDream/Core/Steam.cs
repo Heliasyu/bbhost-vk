@@ -114,7 +114,7 @@ public static class Steam
         }
     }
 
-    /// A check (helias-dream --steam-check in out): reads a shortcuts file and writes it again
+    /// A check (HeliasDream --steam-check in out): reads a shortcuts file and writes it again
     /// unchanged, so the reader and writer can be compared with the original byte for byte.
     public static void RoundTrip(string from, string to)
     {

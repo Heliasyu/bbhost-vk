@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace HeliasDream.Core;
 
-/// <summary>The launcher's own settings, in launcher.json beside bbhost's config.</summary>
+/// <summary>The launcher's own settings, in launcher.json beside the engine's config.</summary>
 public sealed class LauncherSettings
 {
     public string? GameDir { get; set; }

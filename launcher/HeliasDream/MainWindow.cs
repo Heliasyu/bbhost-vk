@@ -466,7 +466,7 @@ public sealed class MainWindow : Window
 
     async Task<string?> PickFolder(string? start)
     {
-        var opts = new FolderPickerOpenOptions { Title = "The folder with bbhost in it", AllowMultiple = false };
+        var opts = new FolderPickerOpenOptions { Title = "The Helia's Dream folder", AllowMultiple = false };
         if (start != null) opts.SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(start);
         var r = await StorageProvider.OpenFolderPickerAsync(opts);
         return r.FirstOrDefault()?.TryGetLocalPath();

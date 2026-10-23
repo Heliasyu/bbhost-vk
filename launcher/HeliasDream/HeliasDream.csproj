@@ -1,13 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!-- Helia's Dream: the launcher. Windows and Linux from one Avalonia app. It writes the
-       settings bbhost reads (~/.config/bbhost) and starts the game; the game itself, its F10
+       settings the engine reads (~/.config/HeliasDream) and starts the game; the game itself, its F10
        menu and the in-game trophy pop-ups stay in the engine. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>helias-dream</AssemblyName>
+    <AssemblyName>HeliasDream</AssemblyName>
     <RootNamespace>HeliasDream</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
     <BuiltInComInteropSupport>false</BuiltInComInteropSupport>

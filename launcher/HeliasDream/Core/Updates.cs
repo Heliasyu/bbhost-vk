@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 namespace HeliasDream.Core;
 
 /// <summary>
-/// The engine's version (bbhost --version) against the newest release on GitHub
+/// The engine's version (HeliasDream.bin --version) against the newest release on GitHub
 /// (Heliasyu/helias-dream), for the header's line.
 /// </summary>
 public static class Updates

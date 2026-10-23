@@ -1,4 +1,4 @@
-// core/config.cpp: a per-user bbhost.toml as older releases left it, loaded
+// core/config.cpp: a per-user bbhost.toml as older releases left it (renamed to HeliasDream.toml), loaded
 // by this one - notes after quoted values, the live server's move to https,
 // and servers of the player's own left as they are. And the game folder with
 // its update in a folder of its own beside it, as shadPS4 keeps one.
@@ -42,7 +42,7 @@ std::string read(const fs::path& p) {
 // The file as the player's config, loaded the way bbhost starts.
 HostConfig load(const std::string& toml) {
     {
-        std::ofstream out(g_dir / "config" / "bbhost.toml", std::ios::trunc);
+        std::ofstream out(g_dir / "config" / "HeliasDream.toml", std::ios::trunc);
         out << toml;
     }
     char arg0[] = "config_test";
@@ -115,7 +115,7 @@ int main() {
         HostConfig c = load("[online]\nhost = \"thehuntersdream.com\"\nscheme = \"http\"\nverify_tls = false\n"
                             "require_account = false\n# auth_server = \"https://thehuntersdream.com\"\n");
         CHECK(is_live_https(c));
-        const std::string f = read(g_dir / "config" / "bbhost.toml");
+        const std::string f = read(g_dir / "config" / "HeliasDream.toml");
         CHECK(f.find("scheme = \"https\"") != std::string::npos);
         CHECK(f.find("verify_tls = true") != std::string::npos);
         CHECK(f.find("require_account = true") != std::string::npos);
@@ -138,7 +138,7 @@ int main() {
         CHECK(c.online_host == "192.168.1.50" && c.online_scheme == "http" && !c.online_verify_tls);
         c = load("[online]\nhost = \"192.168.1.50\"\n");
         CHECK(c.online_scheme == "http");
-        CHECK(read(g_dir / "config" / "bbhost.toml").find("scheme = \"http\"") != std::string::npos);
+        CHECK(read(g_dir / "config" / "HeliasDream.toml").find("scheme = \"http\"") != std::string::npos);
     }
     // The playtest server keeps its own settings.
     {
@@ -158,7 +158,7 @@ int main() {
     {
         HostConfig c = load("[player]\nname = \"Hunter\"\n# auto: the dialog is answered with `name` at once.\nime = \"auto\"\n");
         CHECK(c.ime_mode == "type");
-        std::string f = read(g_dir / "config" / "bbhost.toml");
+        std::string f = read(g_dir / "config" / "HeliasDream.toml");
         CHECK(f.find("ime = \"type\"") != std::string::npos && f.find("ime = \"auto\"") == std::string::npos);
         CHECK(f.find("# auto: the dialog is answered") != std::string::npos);  // the rest of the file as it was
         c = load("[player]\nime = \"auto\"\n\n[bbhost]\nconfig_version = 3\n");

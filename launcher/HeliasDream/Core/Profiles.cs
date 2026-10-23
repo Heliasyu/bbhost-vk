@@ -7,9 +7,9 @@ using System.Text;
 namespace HeliasDream.Core;
 
 /// <summary>
-/// Player profiles: each its own settings and account (the engine's bbhost-options-&lt;name&gt;.toml,
+/// Player profiles: each its own settings and account (the engine's HeliasDream-options-&lt;name&gt;.toml,
 /// which a --config file selects, src/host/options.cpp) and its own saves and trophies (that
-/// config's [paths] data). The game's paths stay the shared bbhost.toml's. "Default" is no
+/// config's [paths] data). The game's paths stay the shared HeliasDream.toml's. "Default" is no
 /// --config at all: the files as they always were.
 /// </summary>
 public static class Profiles
@@ -39,7 +39,7 @@ public static class Profiles
 
     /// The options file the engine reads for a profile.
     public static string OptionsFile(string profile) =>
-        profile == Default ? Paths.OptionsFile : Path.Combine(Paths.BbhostConfigDir, $"bbhost-options-{Stem(profile)}.toml");
+        profile == Default ? Paths.OptionsFile : Path.Combine(Paths.BbhostConfigDir, $"HeliasDream-options-{Stem(profile)}.toml");
 
     public static string DataDir(string profile) =>
         Path.Combine(Paths.BbhostDataDir, "profiles", Stem(profile), "data");
@@ -56,8 +56,8 @@ public static class Profiles
         var data = DataDir(stem);
         Directory.CreateDirectory(data);
         File.WriteAllText(cfg,
-            $"# Helia's Dream profile \"{stem}\": its own saves, settings and account (bbhost-options-{stem}.toml).\n" +
-            "# The game's paths are bbhost.toml's.\n" +
+            $"# Helia's Dream profile \"{stem}\": its own saves, settings and account (HeliasDream-options-{stem}.toml).\n" +
+            "# The game's paths are HeliasDream.toml's.\n" +
             $"[paths]\ndata = \"{data.Replace("\\", "/")}\"\n\n[player]\nname = \"{name.Trim().Replace("\"", "")}\"\n");
         var opts = OptionsFile(stem);
         if (!File.Exists(opts) && File.Exists(Paths.OptionsFile))

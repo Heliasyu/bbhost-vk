@@ -6,7 +6,7 @@ using System.Text;
 namespace HeliasDream.Core;
 
 /// <summary>
-/// bbhost-options.toml, the file the engine's F10 menu writes: one section [options] of
+/// HeliasDream-options.toml, the file the engine's F10 menu writes: one section [options] of
 /// `key = "value"` lines, then [keys] and [account]. Only [options] lines are read and changed;
 /// every other line (key bindings, the account's sign-in) is written back exactly as it was.
 /// </summary>
@@ -61,7 +61,7 @@ public sealed class OptionsFile
         else if (end >= 0) _lines.Insert(end, line);
         else
         {
-            if (_lines.Count == 0) _lines.Add("# bbhost PC port options. Written by the options screen (F10).");
+            if (_lines.Count == 0) _lines.Add("# Helia's Dream options. Written by the options screen (F10).");
             _lines.Add($"[{section}]");
             _lines.Add(line);
         }
@@ -149,7 +149,7 @@ public sealed class OptionsFile
     }
 }
 
-/// <summary>bbhost.toml, read only: the game's paths and the online server.</summary>
+/// <summary>HeliasDream.toml, read only: the game's paths and the online server.</summary>
 public sealed class BbhostToml
 {
     readonly Dictionary<string, string> _kv = new();

@@ -184,7 +184,7 @@ public sealed record HardwareInfo(string Gpu, uint Vendor, uint Device, long Vra
     public string Summary =>
         $"{Gpu}{(VramBytes > 0 ? $" · {VramBytes / (1L << 30)} GB" : "")} · {Cores} threads · {ScreenW}×{ScreenH} screen";
 
-    /// The settings this PC suits: (key, value) pairs of bbhost-options.toml, and why.
+    /// The settings this PC suits: (key, value) pairs of HeliasDream-options.toml, and why.
     public (List<(string Key, string Value)> Settings, string Why) Recommend()
     {
         var s = new List<(string, string)>();

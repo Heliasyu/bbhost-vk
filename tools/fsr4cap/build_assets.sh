@@ -35,8 +35,8 @@ upscaler=$(realpath "${1:?upscaler DLL}")
 loader=${2:+$(realpath "$2")}
 work=$(realpath -m "${BB_FSR4CAP_WORK:-$root/out/fsr4cap}")
 # bbhost-vk: the set goes where bbhost reads it (host/fsr4_pass.h): BBHOST_FSR411_DIR, else
-# ~/.local/share/bbhost/fsr4_411 (BB_FSR411_OUT still wins, as in bbport).
-out=$(realpath -m "${BB_FSR411_OUT:-${BBHOST_FSR411_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bbhost/fsr4_411}}")
+# ~/.local/share/HeliasDream/fsr4_411 (BB_FSR411_OUT still wins, as in bbport).
+out=$(realpath -m "${BB_FSR411_OUT:-${BBHOST_FSR411_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/HeliasDream/fsr4_411}}")
 tools=${BB_FSR4CAP_TOOLS:-}
 python=${PYTHON:-python3}
 

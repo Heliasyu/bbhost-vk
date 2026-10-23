@@ -12,7 +12,7 @@ namespace HeliasDream.Core;
 /// FSR 4's assets (src/host/fsr4v07_pass.h): AMD's FSR 4 INT8 model ("v07", from the FidelityFX
 /// SDK source AMD published under MIT) as SPIR-V and weights, built by FireBurn's Q2RTX port and
 /// kept in its repository with that licence. Downloaded on the player's request into
-/// ~/.local/share/bbhost/fsr4_v07, as Lantern Engine's tools/fetch_fsr4_assets.sh does; nothing of
+/// ~/.local/share/HeliasDream/fsr4_v07, as Lantern Engine's tools/fetch_fsr4_assets.sh does; nothing of
 /// it is in this repository.
 /// </summary>
 public static class Fsr4Assets

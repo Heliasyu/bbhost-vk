@@ -6,7 +6,7 @@ using Avalonia.Input;
 namespace HeliasDream.Core;
 
 /// <summary>
-/// The keyboard and mouse bindings, as the engine keeps them ([keys] of bbhost-options.toml,
+/// The keyboard and mouse bindings, as the engine keeps them ([keys] of HeliasDream-options.toml,
 /// src/host/bindings.cpp): per action one key, by SDL's scancode name ("W", "Left Alt"), and
 /// one mouse input (Mouse1..Mouse5, WheelUp, WheelDown), written "C, Mouse3".
 /// </summary>

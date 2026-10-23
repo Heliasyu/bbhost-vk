@@ -5,7 +5,7 @@
 // bbport). FSR 4.1.1 cannot be shipped: its SPIR-V and weights are built once
 // from the user's own amd_fidelityfx_upscaler_dx12.dll (tools/fsr4cap) into
 // the asset folder (BBHOST_FSR411_DIR, default
-// ~/.local/share/bbhost/fsr4_411). Without them, or on a GPU without the
+// ~/.local/share/HeliasDream/fsr4_411). Without them, or on a GPU without the
 // features its passes need, FSR 4.1.1 is FSR 3.1 (host/fsr3_pass.h), and the
 // log says why once.
 

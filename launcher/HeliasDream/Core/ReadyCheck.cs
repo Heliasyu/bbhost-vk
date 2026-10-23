@@ -22,7 +22,7 @@ public static class ReadyCheck
 
         items.Add(gameDir != null
             ? new("Engine found", Path.GetFileName(gameDir.TrimEnd('/', '\\')), CheckState.Ok)
-            : new("Engine not found", "Choose the folder with bbhost in More", CheckState.Problem));
+            : new("Engine not found", "Choose the Helias Dream folder in More", CheckState.Problem));
 
         var app0 = cfg.App0;
         bool dump = app0 != null && File.Exists(Path.Combine(app0, "eboot.bin"));
@@ -30,7 +30,7 @@ public static class ReadyCheck
         items.Add(dump
             ? new("Game files found", $"CUSA03173{(version != null ? " · " + version : "")}",
                   version == null || version == "1.09" ? CheckState.Ok : CheckState.Note)
-            : new("Game files missing", "Set the game folder in bbhost's setup", CheckState.Problem));
+            : new("Game files missing", "Set the game folder in Setup", CheckState.Problem));
 
         bool eboot = cfg.Eboot != null && File.Exists(cfg.Eboot);
         items.Add(eboot ? new("Decrypted eboot", "eboot.elf", CheckState.Ok)
@@ -161,8 +161,7 @@ public static class DesktopHdr
 
 /// <summary>
 /// Starts the game and tells when it ends. Its output (the engine's log) goes line by line to
-/// `onLine` - the Console page - and to logs/bbhost-&lt;date&gt;.log in the game folder, as the
-/// bbhost wrapper's own runs kept it.
+/// `onLine` - the Console page - and to logs/HeliasDream-&lt;date&gt;.log in the game folder.
 /// </summary>
 public static class GameRunner
 {
@@ -180,7 +179,14 @@ public static class GameRunner
             WorkingDirectory = gameDir, UseShellExecute = false, RedirectStandardOutput = onLine != null, RedirectStandardError = onLine != null,
         };
         if (profileConfig != null) { psi.ArgumentList.Add("--config"); psi.ArgumentList.Add(profileConfig); }
-        // The launcher has already shown everything bbhost's own setup window would.
+        // Native Wayland, the display's scale applied (as the old bbhost wrapper script set them).
+        if (OperatingSystem.IsLinux() && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")) &&
+            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SDL_VIDEO_DRIVER")))
+        {
+            psi.Environment["SDL_VIDEO_DRIVER"] = "wayland";
+            psi.Environment["SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY"] = "1";
+        }
+        // The launcher has already shown everything the engine's own setup window would.
         psi.Environment["BBHOST_SETUP_WINDOW"] = "0";
         if (!string.IsNullOrEmpty(monitor)) psi.Environment["BBHOST_DISPLAY"] = monitor;
         if (presentMode is "mailbox" or "fifo" or "relaxed" or "immediate" or "latest")
@@ -191,7 +197,7 @@ public static class GameRunner
         {
             var dir = Path.Combine(gameDir, "logs");
             Directory.CreateDirectory(dir);
-            LogFile = Path.Combine(dir, $"bbhost-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+            LogFile = Path.Combine(dir, $"HeliasDream-{DateTime.Now:yyyyMMdd-HHmmss}.log");
             log = new StreamWriter(LogFile) { AutoFlush = true };
         }
         catch (Exception) { LogFile = null; }
@@ -240,5 +246,6 @@ public static class GameRunner
     }
 
     public static bool Running() =>
+        Process.GetProcessesByName("HeliasDream.bin").Any() || Process.GetProcessesByName("HeliasDream-engine").Any() ||
         Process.GetProcessesByName("bbhost.bin").Any() || Process.GetProcessesByName("bbhost").Any();
 }
